@@ -24,6 +24,7 @@ import argparse
 import logging
 import sys
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 # statistics not needed - median removed as unused
@@ -1012,14 +1013,21 @@ class Backtest1Hour:
 
         all_trades = []
 
-        # Pre-fetch all data for scanner mode
+        # Pre-fetch all data for scanner mode (parallel loading)
         all_data = {}
         if self.scanner_enabled:
-            logger.info("Scanner mode: pre-fetching data for all symbols...")
-            for symbol in symbols:
-                data = self.fetch_data(symbol, start_date, end_date)
-                if data is not None and len(data) >= 30:
-                    all_data[symbol] = data
+            logger.info("Scanner mode: pre-fetching data for all symbols in parallel...")
+
+            def fetch_symbol_data(sym):
+                return sym, self.fetch_data(sym, start_date, end_date)
+
+            with ThreadPoolExecutor(max_workers=15) as executor:
+                futures = {executor.submit(fetch_symbol_data, sym): sym for sym in symbols}
+                for future in as_completed(futures):
+                    symbol_result, data = future.result()
+                    if data is not None and len(data) >= 30:
+                        all_data[symbol_result] = data
+
             logger.info(f"Pre-fetched data for {len(all_data)} symbols")
 
             self._daily_scanned_symbols = self._build_daily_scan_results(
