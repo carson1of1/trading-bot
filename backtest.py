@@ -26,7 +26,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from statistics import median
+# statistics not needed - median removed as unused
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -371,10 +371,11 @@ class Backtest1Hour:
 
                 if signal and signal.get('action') != 'HOLD':
                     confidence = signal.get('confidence', 0)
+                    conf_threshold = self.strategy_manager.confidence_threshold
 
-                    if signal['action'] == 'BUY' and confidence >= 60:
+                    if signal['action'] == 'BUY' and confidence >= conf_threshold:
                         data.at[data.index[i], 'signal'] = 1
-                    elif signal['action'] == 'BUY' and confidence < 60:
+                    elif signal['action'] == 'BUY' and confidence < conf_threshold:
                         self._diag_entry_blocks[symbol]['confidence'] += 1
                     elif signal['action'] == 'SELL':
                         data.at[data.index[i], 'signal'] = -1
