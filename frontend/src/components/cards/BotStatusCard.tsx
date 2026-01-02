@@ -1,14 +1,40 @@
 "use client";
 
-import { Play, Square, Clock, AlertTriangle } from "lucide-react";
+import { useState } from "react";
+import { Play, Square, Clock, AlertTriangle, Loader2 } from "lucide-react";
 import { usePolling } from "@/hooks/usePolling";
-import { getBotStatus, BotStatus } from "@/lib/api";
+import { getBotStatus, startBot, stopBot, BotStatus } from "@/lib/api";
 
 export function BotStatusCard() {
-  const { data: botState, isLoading, error } = usePolling<BotStatus>({
+  const [isToggling, setIsToggling] = useState(false);
+  const { data: botState, isLoading, error, refetch } = usePolling<BotStatus>({
     fetcher: getBotStatus,
     interval: 3000,
   });
+
+  const handleStart = async () => {
+    setIsToggling(true);
+    try {
+      await startBot();
+      await refetch();
+    } catch (err) {
+      console.error("Failed to start bot:", err);
+    } finally {
+      setIsToggling(false);
+    }
+  };
+
+  const handleStop = async () => {
+    setIsToggling(true);
+    try {
+      await stopBot();
+      await refetch();
+    } catch (err) {
+      console.error("Failed to stop bot:", err);
+    } finally {
+      setIsToggling(false);
+    }
+  };
 
   const statusConfig = {
     running: {
@@ -118,14 +144,22 @@ export function BotStatusCard() {
         {/* Control buttons */}
         <div className="flex gap-2 mt-4 pt-4 border-t border-border">
           {isRunning ? (
-            <button className="btn btn-danger btn-ripple flex-1 text-sm py-2">
-              <Square className="w-4 h-4" />
-              Stop
+            <button
+              onClick={handleStop}
+              disabled={isToggling}
+              className="btn btn-danger btn-ripple flex-1 text-sm py-2"
+            >
+              {isToggling ? <Loader2 className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4" />}
+              {isToggling ? "Stopping..." : "Stop"}
             </button>
           ) : (
-            <button className="btn btn-primary btn-ripple flex-1 text-sm py-2">
-              <Play className="w-4 h-4" />
-              Start
+            <button
+              onClick={handleStart}
+              disabled={isToggling}
+              className="btn btn-primary btn-ripple flex-1 text-sm py-2"
+            >
+              {isToggling ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+              {isToggling ? "Starting..." : "Start"}
             </button>
           )}
         </div>

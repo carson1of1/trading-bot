@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import yaml
+import pandas as pd
 
 from backtest import Backtest1Hour
 from core.cache import get_cache
@@ -506,6 +507,26 @@ async def get_orders(status: str = "open"):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/bot/start")
+async def start_bot():
+    """Start the trading bot."""
+    global _bot_state
+    _bot_state["status"] = "running"
+    _bot_state["last_action"] = "Bot started"
+    _bot_state["last_action_time"] = datetime.now().isoformat()
+    return {"success": True, "status": "running"}
+
+
+@app.post("/api/bot/stop")
+async def stop_bot():
+    """Stop the trading bot."""
+    global _bot_state
+    _bot_state["status"] = "stopped"
+    _bot_state["last_action"] = "Bot stopped"
+    _bot_state["last_action_time"] = datetime.now().isoformat()
+    return {"success": True, "status": "stopped"}
+
+
 @app.get("/api/settings", response_model=SettingsResponse)
 async def get_settings():
     """Get current bot settings."""
@@ -529,24 +550,61 @@ async def run_scanner(top_n: int = 10):
     """Run volatility scanner and return top N symbols."""
     try:
         from core.scanner import VolatilityScanner
+        from core.data import YFinanceDataFetcher
 
         config = load_config()
         universe = load_universe()
         symbols = collect_scanner_symbols(universe)
 
-        scanner = VolatilityScanner(config.get("volatility_scanner", {}))
-        results = scanner.scan(symbols, top_n=top_n)
+        # Fetch historical data for all symbols
+        fetcher = YFinanceDataFetcher()
+        historical_data = {}
 
-        scanner_results = [
-            ScannerResult(
-                symbol=r["symbol"],
-                atr_ratio=round(r.get("atr_ratio", 0), 4),
-                volume_ratio=round(r.get("volume_ratio", 0), 2),
-                composite_score=round(r.get("composite_score", 0), 4),
-                current_price=round(r.get("current_price", 0), 2)
-            )
-            for r in results
-        ]
+        for symbol in symbols[:20]:  # Limit to first 20 to avoid timeout
+            try:
+                df = fetcher.get_historical_data(symbol, timeframe="1Hour", limit=200)
+                if df is not None and not df.empty:
+                    historical_data[symbol] = df
+            except Exception:
+                continue
+
+        if not historical_data:
+            return ScannerResponse(results=[], scanned_at=datetime.now().isoformat())
+
+        # Run scanner
+        scanner_config = config.get("volatility_scanner", {})
+        scanner_config["top_n"] = top_n
+        scanner = VolatilityScanner(scanner_config)
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        top_symbols = scanner.scan_historical(today, list(historical_data.keys()), historical_data)
+
+        # Build results with current prices
+        scanner_results = []
+        for symbol in top_symbols:
+            df = historical_data.get(symbol)
+            if df is not None and not df.empty:
+                current_price = float(df['close'].iloc[-1])
+                # Calculate ATR ratio
+                high = df['high'].tail(14)
+                low = df['low'].tail(14)
+                close = df['close'].tail(14)
+                tr = pd.concat([high - low, abs(high - close.shift(1)), abs(low - close.shift(1))], axis=1).max(axis=1)
+                atr = tr.mean()
+                atr_ratio = atr / current_price if current_price > 0 else 0
+
+                # Volume ratio
+                vol_avg = df['volume'].tail(20).mean()
+                vol_recent = df['volume'].tail(5).mean()
+                vol_ratio = vol_recent / vol_avg if vol_avg > 0 else 1
+
+                scanner_results.append(ScannerResult(
+                    symbol=symbol,
+                    atr_ratio=round(atr_ratio, 4),
+                    volume_ratio=round(vol_ratio, 2),
+                    composite_score=round(atr_ratio * vol_ratio, 4),
+                    current_price=round(current_price, 2)
+                ))
 
         return ScannerResponse(
             results=scanner_results,

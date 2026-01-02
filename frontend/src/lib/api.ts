@@ -173,6 +173,26 @@ export async function getBotStatus(): Promise<BotStatus> {
   return response.json();
 }
 
+export async function startBot(): Promise<{ success: boolean; status: string }> {
+  const response = await fetch(`${API_BASE_URL}/api/bot/start`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to start bot: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function stopBot(): Promise<{ success: boolean; status: string }> {
+  const response = await fetch(`${API_BASE_URL}/api/bot/stop`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to stop bot: ${response.status}`);
+  }
+  return response.json();
+}
+
 export async function getOrders(status: string = "open"): Promise<OrdersData> {
   const response = await fetch(`${API_BASE_URL}/api/orders?status=${status}`);
   if (!response.ok) {
