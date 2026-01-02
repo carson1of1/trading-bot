@@ -88,3 +88,95 @@ export async function runBacktest(
 
   return response.json();
 }
+
+// =============================================================================
+// Live Trading Types
+// =============================================================================
+
+export interface AccountData {
+  equity: number;
+  cash: number;
+  buying_power: number;
+  portfolio_value: number;
+  daily_pnl: number;
+  daily_pnl_percent: number;
+}
+
+export interface Position {
+  symbol: string;
+  qty: number;
+  side: string;
+  avg_entry_price: number;
+  current_price: number;
+  market_value: number;
+  unrealized_pl: number;
+  unrealized_plpc: number;
+}
+
+export interface PositionsData {
+  positions: Position[];
+  total_unrealized_pl: number;
+}
+
+export interface BotStatus {
+  status: "running" | "stopped" | "error";
+  mode: "PAPER" | "LIVE" | "DRY_RUN" | "BACKTEST";
+  last_action: string | null;
+  last_action_time: string | null;
+  kill_switch_triggered: boolean;
+}
+
+export interface Order {
+  id: string;
+  symbol: string;
+  qty: number;
+  side: string;
+  type: string;
+  status: string;
+  limit_price: number | null;
+  stop_price: number | null;
+  filled_qty: number;
+  filled_avg_price: number | null;
+  submitted_at: string | null;
+  filled_at: string | null;
+}
+
+export interface OrdersData {
+  orders: Order[];
+}
+
+// =============================================================================
+// Live Trading API Functions
+// =============================================================================
+
+export async function getAccount(): Promise<AccountData> {
+  const response = await fetch(`${API_BASE_URL}/api/account`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch account: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function getPositions(): Promise<PositionsData> {
+  const response = await fetch(`${API_BASE_URL}/api/positions`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch positions: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function getBotStatus(): Promise<BotStatus> {
+  const response = await fetch(`${API_BASE_URL}/api/bot/status`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch bot status: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function getOrders(status: string = "open"): Promise<OrdersData> {
+  const response = await fetch(`${API_BASE_URL}/api/orders?status=${status}`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch orders: ${response.status}`);
+  }
+  return response.json();
+}

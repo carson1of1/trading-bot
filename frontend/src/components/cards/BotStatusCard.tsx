@@ -1,28 +1,14 @@
 "use client";
 
-import { useState } from "react";
-import { Play, Square, Clock } from "lucide-react";
-
-type BotStatus = "running" | "paused" | "error";
-type BotMode = "PAPER" | "LIVE" | "DRY_RUN";
-
-interface BotState {
-  status: BotStatus;
-  mode: BotMode;
-  lastAction: string;
-  lastActionTime: string;
-}
-
-// Mock data - will be replaced with API
-const mockBotState: BotState = {
-  status: "running",
-  mode: "PAPER",
-  lastAction: "Bought 10 AAPL @ $189.45",
-  lastActionTime: "2 min ago",
-};
+import { Play, Square, Clock, AlertTriangle } from "lucide-react";
+import { usePolling } from "@/hooks/usePolling";
+import { getBotStatus, BotStatus } from "@/lib/api";
 
 export function BotStatusCard() {
-  const [botState] = useState<BotState>(mockBotState);
+  const { data: botState, isLoading, error } = usePolling<BotStatus>({
+    fetcher: getBotStatus,
+    interval: 3000,
+  });
 
   const statusConfig = {
     running: {
@@ -30,10 +16,10 @@ export function BotStatusCard() {
       bgColor: "bg-emerald",
       label: "Running",
     },
-    paused: {
+    stopped: {
       color: "text-amber",
       bgColor: "bg-amber",
-      label: "Paused",
+      label: "Stopped",
     },
     error: {
       color: "text-red",
@@ -44,51 +30,100 @@ export function BotStatusCard() {
 
   const modeConfig = {
     PAPER: { className: "badge-emerald" },
-    LIVE: { className: "badge-red" },
+    LIVE: { className: "badge-red badge-live" },
     DRY_RUN: { className: "badge-neutral" },
+    BACKTEST: { className: "badge-neutral" },
   };
 
-  const config = statusConfig[botState.status];
+  // Loading state
+  if (isLoading && !botState) {
+    return (
+      <div className="glass-gradient p-5 h-full animate-pulse">
+        <div className="h-4 bg-gray-700 rounded w-1/3 mb-6"></div>
+        <div className="h-6 bg-gray-700 rounded w-1/2 mb-4"></div>
+        <div className="h-4 bg-gray-700 rounded w-2/3"></div>
+      </div>
+    );
+  }
+
+  // Error state
+  if (error || !botState) {
+    return (
+      <div className="glass-gradient p-5 h-full">
+        <div className="flex items-center gap-2 text-red">
+          <AlertTriangle className="w-5 h-5" />
+          <span>Failed to load bot status</span>
+        </div>
+      </div>
+    );
+  }
+
+  const config = statusConfig[botState.status] || statusConfig.stopped;
+  const isRunning = botState.status === "running";
+  const modeStyle = modeConfig[botState.mode] || modeConfig.DRY_RUN;
+
+  // Format last action time
+  const formatTime = (isoTime: string | null) => {
+    if (!isoTime) return "";
+    const date = new Date(isoTime);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    if (diffMins < 1) return "Just now";
+    if (diffMins < 60) return `${diffMins} min ago`;
+    const diffHours = Math.floor(diffMins / 60);
+    if (diffHours < 24) return `${diffHours} hr ago`;
+    return date.toLocaleDateString();
+  };
 
   return (
-    <div className="glass glass-hover p-5 opacity-0 animate-slide-up stagger-3 h-full">
+    <div className="glass-gradient p-5 opacity-0 animate-slide-up stagger-3 h-full">
       <div className="flex flex-col h-full">
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-sm font-medium text-text-secondary">Bot Status</h3>
-          <span className={`badge ${modeConfig[botState.mode].className}`}>
+          <span className={`badge ${modeStyle.className} ${isRunning ? "badge-pulse" : ""}`}>
             {botState.mode}
           </span>
         </div>
 
         {/* Status indicator */}
         <div className="flex items-center gap-3 mb-6">
-          <div className={`relative w-3 h-3 rounded-full ${config.bgColor} pulse-dot`} />
+          <div className={`relative w-3 h-3 rounded-full ${config.bgColor} ${isRunning ? "pulse-dot" : ""}`} />
           <span className={`text-lg font-semibold ${config.color}`}>
             {config.label}
           </span>
+          {botState.kill_switch_triggered && (
+            <span className="badge badge-red text-xs">Kill Switch</span>
+          )}
         </div>
 
         {/* Last action */}
         <div className="flex-1">
-          <div className="flex items-start gap-2 text-sm">
-            <Clock className="w-4 h-4 text-text-muted mt-0.5 flex-shrink-0" />
-            <div>
-              <p className="text-text-secondary">{botState.lastAction}</p>
-              <p className="text-text-muted text-xs mt-1">{botState.lastActionTime}</p>
+          {botState.last_action ? (
+            <div className="flex items-start gap-2 text-sm">
+              <Clock className="w-4 h-4 text-text-muted mt-0.5 flex-shrink-0 icon-wiggle" />
+              <div>
+                <p className="text-text-secondary">{botState.last_action}</p>
+                <p className="text-text-muted text-xs mt-1">
+                  {formatTime(botState.last_action_time)}
+                </p>
+              </div>
             </div>
-          </div>
+          ) : (
+            <p className="text-text-muted text-sm">No recent activity</p>
+          )}
         </div>
 
         {/* Control buttons */}
         <div className="flex gap-2 mt-4 pt-4 border-t border-border">
-          {botState.status === "running" ? (
-            <button className="btn btn-danger flex-1 text-sm py-2">
+          {isRunning ? (
+            <button className="btn btn-danger btn-ripple flex-1 text-sm py-2">
               <Square className="w-4 h-4" />
               Stop
             </button>
           ) : (
-            <button className="btn btn-primary flex-1 text-sm py-2">
+            <button className="btn btn-primary btn-ripple flex-1 text-sm py-2">
               <Play className="w-4 h-4" />
               Start
             </button>
