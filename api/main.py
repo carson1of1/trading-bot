@@ -1,0 +1,330 @@
+"""
+FastAPI Backend Server for Trading Bot
+
+Provides REST API endpoints for running backtests with scanner-selected symbols.
+"""
+
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+import yaml
+
+from backtest import Backtest1Hour
+
+
+# Pydantic models for request/response
+class BacktestRequest(BaseModel):
+    """Request model for backtest endpoint."""
+    top_n: int = Field(default=10, ge=1, le=50, description="Number of top volatile stocks to scan")
+    days: int = Field(default=60, ge=7, le=365, description="Number of days to backtest")
+    longs_only: bool = Field(default=False, description="Only take LONG positions")
+    shorts_only: bool = Field(default=False, description="Only take SHORT positions")
+    initial_capital: float = Field(default=100000.0, ge=1000, le=10000000, description="Starting capital")
+
+
+class TradeResult(BaseModel):
+    """Individual trade result."""
+    symbol: str
+    direction: str
+    entry_date: str
+    exit_date: str
+    entry_price: float
+    exit_price: float
+    shares: int
+    pnl: float
+    pnl_pct: float
+    exit_reason: str
+    strategy: str
+    bars_held: int
+
+
+class BacktestMetrics(BaseModel):
+    """Backtest performance metrics."""
+    initial_capital: float
+    final_value: float
+    total_return_pct: float
+    total_pnl: float
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    win_rate: float
+    profit_factor: float
+    avg_pnl: float
+    avg_win: float
+    avg_loss: float
+    max_drawdown: float
+    sharpe_ratio: float
+    best_trade: float
+    worst_trade: float
+    avg_bars_held: float
+
+
+class EquityCurvePoint(BaseModel):
+    """Single point on equity curve."""
+    timestamp: str
+    portfolio_value: float
+
+
+class BacktestResponse(BaseModel):
+    """Response model for backtest endpoint."""
+    success: bool
+    metrics: Optional[BacktestMetrics] = None
+    equity_curve: List[EquityCurvePoint] = []
+    trades: List[TradeResult] = []
+    symbols_scanned: List[str] = []
+    error: Optional[str] = None
+
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="Trading Bot API",
+    description="REST API for running backtests with scanner-selected symbols",
+    version="1.0.0"
+)
+
+# Add CORS middleware for frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def load_config() -> Dict:
+    """Load configuration from config.yaml."""
+    config_path = Path(__file__).parent.parent / "config.yaml"
+    if config_path.exists():
+        with open(config_path, "r") as f:
+            return yaml.safe_load(f)
+    return {}
+
+
+def load_universe() -> Dict:
+    """Load universe from universe.yaml."""
+    universe_path = Path(__file__).parent.parent / "universe.yaml"
+    if universe_path.exists():
+        with open(universe_path, "r") as f:
+            return yaml.safe_load(f)
+    return {}
+
+
+def collect_scanner_symbols(universe: Dict) -> List[str]:
+    """Collect all symbols from scanner_universe in universe.yaml."""
+    scanner_universe = universe.get("scanner_universe", {})
+    all_symbols = []
+
+    for category, symbols in scanner_universe.items():
+        if isinstance(symbols, list):
+            all_symbols.extend(symbols)
+
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_symbols = []
+    for symbol in all_symbols:
+        if symbol not in seen:
+            seen.add(symbol)
+            unique_symbols.append(symbol)
+
+    return unique_symbols
+
+
+def format_backtest_results(results: Dict, symbols_scanned: List[str]) -> BacktestResponse:
+    """
+    Transform backtest output dict into API response format.
+
+    Args:
+        results: Raw backtest results from Backtest1Hour.run()
+        symbols_scanned: List of symbols that were included in the scan
+
+    Returns:
+        Formatted BacktestResponse
+    """
+    if not results:
+        return BacktestResponse(
+            success=False,
+            error="Backtest returned no results"
+        )
+
+    # Format metrics
+    raw_metrics = results.get("metrics", {})
+    metrics = BacktestMetrics(
+        initial_capital=round(raw_metrics.get("initial_capital", 0), 2),
+        final_value=round(raw_metrics.get("final_value", 0), 2),
+        total_return_pct=round(raw_metrics.get("total_return_pct", 0), 2),
+        total_pnl=round(raw_metrics.get("total_pnl", 0), 2),
+        total_trades=raw_metrics.get("total_trades", 0),
+        winning_trades=raw_metrics.get("winning_trades", 0),
+        losing_trades=raw_metrics.get("losing_trades", 0),
+        win_rate=round(raw_metrics.get("win_rate", 0), 2),
+        profit_factor=round(raw_metrics.get("profit_factor", 0), 2),
+        avg_pnl=round(raw_metrics.get("avg_pnl", 0), 2),
+        avg_win=round(raw_metrics.get("avg_win", 0), 2),
+        avg_loss=round(raw_metrics.get("avg_loss", 0), 2),
+        max_drawdown=round(raw_metrics.get("max_drawdown", 0), 2),
+        sharpe_ratio=round(raw_metrics.get("sharpe_ratio", 0), 2),
+        best_trade=round(raw_metrics.get("best_trade", 0), 2),
+        worst_trade=round(raw_metrics.get("worst_trade", 0), 2),
+        avg_bars_held=round(raw_metrics.get("avg_bars_held", 0), 1)
+    )
+
+    # Format equity curve - sample to max 50 points
+    equity_curve = []
+    raw_equity = results.get("equity_curve")
+
+    if raw_equity is not None and len(raw_equity) > 0:
+        # Convert DataFrame to list of dicts if needed
+        if hasattr(raw_equity, "to_dict"):
+            equity_records = raw_equity.to_dict("records")
+        else:
+            equity_records = raw_equity
+
+        # Sample to max 50 points
+        max_points = 50
+        if len(equity_records) > max_points:
+            step = len(equity_records) / max_points
+            sampled_indices = [int(i * step) for i in range(max_points)]
+            # Always include the last point
+            if sampled_indices[-1] != len(equity_records) - 1:
+                sampled_indices[-1] = len(equity_records) - 1
+            equity_records = [equity_records[i] for i in sampled_indices]
+
+        for record in equity_records:
+            timestamp = record.get("timestamp", "")
+            if hasattr(timestamp, "isoformat"):
+                timestamp = timestamp.isoformat()
+            elif hasattr(timestamp, "strftime"):
+                timestamp = timestamp.strftime("%Y-%m-%dT%H:%M:%S")
+            else:
+                timestamp = str(timestamp)
+
+            equity_curve.append(EquityCurvePoint(
+                timestamp=timestamp,
+                portfolio_value=round(record.get("portfolio_value", 0), 2)
+            ))
+
+    # Format trades - sort by date descending
+    trades = []
+    raw_trades = results.get("trades", [])
+
+    # Sort by exit_date descending
+    sorted_trades = sorted(
+        raw_trades,
+        key=lambda t: str(t.get("exit_date", "")),
+        reverse=True
+    )
+
+    for trade in sorted_trades:
+        entry_date = trade.get("entry_date", "")
+        exit_date = trade.get("exit_date", "")
+
+        # Convert timestamps to strings
+        if hasattr(entry_date, "isoformat"):
+            entry_date = entry_date.isoformat()
+        elif hasattr(entry_date, "strftime"):
+            entry_date = entry_date.strftime("%Y-%m-%dT%H:%M:%S")
+        else:
+            entry_date = str(entry_date)
+
+        if hasattr(exit_date, "isoformat"):
+            exit_date = exit_date.isoformat()
+        elif hasattr(exit_date, "strftime"):
+            exit_date = exit_date.strftime("%Y-%m-%dT%H:%M:%S")
+        else:
+            exit_date = str(exit_date)
+
+        trades.append(TradeResult(
+            symbol=trade.get("symbol", ""),
+            direction=trade.get("direction", "LONG"),
+            entry_date=entry_date,
+            exit_date=exit_date,
+            entry_price=round(trade.get("entry_price", 0), 2),
+            exit_price=round(trade.get("exit_price", 0), 2),
+            shares=int(trade.get("shares", 0)),
+            pnl=round(trade.get("pnl", 0), 2),
+            pnl_pct=round(trade.get("pnl_pct", 0), 2),
+            exit_reason=trade.get("exit_reason", ""),
+            strategy=trade.get("strategy", ""),
+            bars_held=int(trade.get("bars_held", 0))
+        ))
+
+    return BacktestResponse(
+        success=True,
+        metrics=metrics,
+        equity_curve=equity_curve,
+        trades=trades,
+        symbols_scanned=symbols_scanned
+    )
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+
+@app.post("/api/backtest", response_model=BacktestResponse)
+async def run_backtest(request: BacktestRequest):
+    """
+    Run a backtest with scanner-selected symbols.
+
+    The scanner will select the top N volatile stocks from the scanner_universe
+    each day during the backtest period.
+    """
+    try:
+        # Load config and universe
+        config = load_config()
+        universe = load_universe()
+
+        # Set scanner enabled with top_n from request
+        if "volatility_scanner" not in config:
+            config["volatility_scanner"] = {}
+        config["volatility_scanner"]["enabled"] = True
+        config["volatility_scanner"]["top_n"] = request.top_n
+
+        # Calculate date range
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=request.days)).strftime("%Y-%m-%d")
+
+        # Collect all symbols from scanner_universe
+        symbols = collect_scanner_symbols(universe)
+
+        if not symbols:
+            return BacktestResponse(
+                success=False,
+                error="No symbols found in scanner_universe"
+            )
+
+        # Create and run backtest
+        backtester = Backtest1Hour(
+            initial_capital=request.initial_capital,
+            config=config,
+            longs_only=request.longs_only,
+            shorts_only=request.shorts_only,
+            scanner_enabled=True
+        )
+
+        results = backtester.run(symbols, start_date, end_date)
+
+        # Format and return results
+        return format_backtest_results(results, symbols)
+
+    except Exception as e:
+        return BacktestResponse(
+            success=False,
+            error=str(e)
+        )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
