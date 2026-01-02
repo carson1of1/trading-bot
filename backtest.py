@@ -1034,21 +1034,39 @@ class Backtest1Hour:
                 all_data, start_date, end_date
             )
 
-        for symbol in symbols:
-            logger.info(f"Processing {symbol}...")
+        # Phase 1: Parallel data fetching and signal generation
+        logger.info("Generating signals for all symbols in parallel...")
+        signals_data = {}
 
-            # Fetch data
-            if self.scanner_enabled and symbol in all_data:
-                data = all_data[symbol]
+        def process_symbol(sym):
+            """Fetch data and generate signals for a symbol."""
+            if self.scanner_enabled and sym in all_data:
+                data = all_data[sym]
             else:
-                data = self.fetch_data(symbol, start_date, end_date)
+                data = self.fetch_data(sym, start_date, end_date)
 
             if data is None or len(data) < 30:
-                logger.warning(f"Insufficient data for {symbol}")
+                return sym, None
+
+            # Generate signals (stateless per-symbol)
+            data = self.generate_signals(sym, data)
+            return sym, data
+
+        with ThreadPoolExecutor(max_workers=15) as executor:
+            futures = {executor.submit(process_symbol, sym): sym for sym in symbols}
+            for future in as_completed(futures):
+                symbol_result, data = future.result()
+                if data is not None:
+                    signals_data[symbol_result] = data
+
+        logger.info(f"Generated signals for {len(signals_data)} symbols")
+
+        # Phase 2: Sequential trade simulation (must maintain portfolio state)
+        for symbol in symbols:
+            if symbol not in signals_data:
                 continue
 
-            # Generate signals
-            data = self.generate_signals(symbol, data)
+            data = signals_data[symbol]
 
             # Simulate trades
             trades = self.simulate_trades(symbol, data)
