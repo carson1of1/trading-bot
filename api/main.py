@@ -152,6 +152,27 @@ class BotStatusResponse(BaseModel):
     kill_switch_triggered: bool = False
 
 
+class OrderResponse(BaseModel):
+    """Single order response."""
+    id: str
+    symbol: str
+    qty: float
+    side: str
+    type: str
+    status: str
+    limit_price: Optional[float] = None
+    stop_price: Optional[float] = None
+    filled_qty: float = 0
+    filled_avg_price: Optional[float] = None
+    submitted_at: Optional[str] = None
+    filled_at: Optional[str] = None
+
+
+class OrdersResponse(BaseModel):
+    """List of orders response."""
+    orders: List[OrderResponse]
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Trading Bot API",
@@ -424,6 +445,38 @@ async def get_bot_status():
             last_action_time=_bot_state["last_action_time"],
             kill_switch_triggered=_bot_state["kill_switch_triggered"]
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/orders", response_model=OrdersResponse)
+async def get_orders(status: str = "open"):
+    """Get orders with optional status filter."""
+    try:
+        broker = get_broker()
+        orders = broker.list_orders(status=status)
+
+        order_list = [
+            OrderResponse(
+                id=order.id,
+                symbol=order.symbol,
+                qty=order.qty,
+                side=order.side,
+                type=order.type,
+                status=order.status,
+                limit_price=order.limit_price,
+                stop_price=order.stop_price,
+                filled_qty=order.filled_qty,
+                filled_avg_price=order.filled_avg_price,
+                submitted_at=order.submitted_at.isoformat() if order.submitted_at else None,
+                filled_at=order.filled_at.isoformat() if order.filled_at else None
+            )
+            for order in orders
+        ]
+
+        return OrdersResponse(orders=order_list)
+    except BrokerAPIError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
