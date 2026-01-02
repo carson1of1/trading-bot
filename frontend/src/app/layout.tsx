@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Outfit, Space_Mono } from "next/font/google";
 import "./globals.css";
+import { ParticleField } from "@/components/ui/ParticleField";
 
 const outfit = Outfit({
   variable: "--font-outfit",
@@ -28,6 +29,8 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${outfit.variable} ${spaceMono.variable} antialiased`}>
+        {/* Floating particle field */}
+        <ParticleField />
         {children}
       </body>
     </html>

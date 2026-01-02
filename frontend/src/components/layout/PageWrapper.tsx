@@ -10,7 +10,7 @@ interface PageWrapperProps {
 
 export function PageWrapper({ children, title, subtitle }: PageWrapperProps) {
   return (
-    <div className="min-h-screen pb-24">
+    <div className="min-h-screen pb-24 page-transition">
       {/* Page header */}
       {title && (
         <header className="px-6 pt-8 pb-6">

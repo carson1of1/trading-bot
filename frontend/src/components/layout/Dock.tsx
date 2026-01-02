@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -79,25 +79,6 @@ const dockCategories: DockCategory[] = [
 export function Dock() {
   const pathname = usePathname();
   const [hoveredCategory, setHoveredCategory] = useState<string | null>(null);
-  const [isVisible, setIsVisible] = useState(true);
-  const [lastScrollY, setLastScrollY] = useState(0);
-
-  useEffect(() => {
-    const handleScroll = () => {
-      const currentScrollY = window.scrollY;
-
-      if (currentScrollY > lastScrollY && currentScrollY > 100) {
-        setIsVisible(false);
-      } else {
-        setIsVisible(true);
-      }
-
-      setLastScrollY(currentScrollY);
-    };
-
-    window.addEventListener("scroll", handleScroll, { passive: true });
-    return () => window.removeEventListener("scroll", handleScroll);
-  }, [lastScrollY]);
 
   const isActive = (category: DockCategory) => {
     if (category.href) {
@@ -109,15 +90,11 @@ export function Dock() {
   const isItemActive = (href: string) => pathname === href;
 
   return (
-    <div
-      className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-50 transition-all duration-300 ${
-        isVisible ? "translate-y-0 opacity-100" : "translate-y-full opacity-0"
-      }`}
-    >
+    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50">
       <nav
         className="glass px-3 py-2.5 flex items-center gap-1 animate-dock-in"
         style={{
-          boxShadow: "0 0 40px rgba(0, 0, 0, 0.5), 0 0 60px rgba(16, 185, 129, 0.1)",
+          boxShadow: "0 0 40px rgba(0, 0, 0, 0.5), 0 0 60px rgba(16, 185, 129, 0.08), 0 0 80px rgba(59, 130, 246, 0.05)",
         }}
       >
         {dockCategories.map((category) => (

@@ -43,7 +43,7 @@ export function EquityCurveChart({ data }: EquityCurveChartProps) {
   }) => {
     if (active && payload && payload.length) {
       return (
-        <div className="glass px-3 py-2 border border-border">
+        <div className="chart-tooltip glass px-3 py-2 border border-border">
           <p className="text-xs text-text-muted">{label}</p>
           <p className="text-sm font-semibold text-emerald mono">
             {formatValue(payload[0].value)}
@@ -55,7 +55,7 @@ export function EquityCurveChart({ data }: EquityCurveChartProps) {
   };
 
   return (
-    <div className="glass glass-hover p-5 opacity-0 animate-slide-up stagger-4 h-full">
+    <div className="glass-gradient p-5 opacity-0 animate-slide-up stagger-4 h-full">
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-medium text-text-secondary">Equity Curve</h3>
@@ -64,10 +64,10 @@ export function EquityCurveChart({ data }: EquityCurveChartProps) {
             <button
               key={range}
               onClick={() => setSelectedRange(range)}
-              className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${
+              className={`px-3 py-1 text-xs font-medium rounded-md transition-all hover:scale-105 ${
                 selectedRange === range
-                  ? "bg-emerald text-black"
-                  : "text-text-muted hover:text-white"
+                  ? "bg-blue text-white"
+                  : "text-text-muted hover:text-white hover:bg-surface-2"
               }`}
             >
               {range}
@@ -77,7 +77,7 @@ export function EquityCurveChart({ data }: EquityCurveChartProps) {
       </div>
 
       {/* Chart */}
-      <div className="h-48">
+      <div className="h-48 chart-container cursor-crosshair">
         {mounted ? (
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart

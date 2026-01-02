@@ -76,7 +76,7 @@ export default function AnalyticsPage() {
     <PageWrapper title="Analytics" subtitle="Analyze your trading performance">
       <div className="space-y-6">
         {/* Equity Curve */}
-        <div className="glass p-5 opacity-0 animate-slide-up stagger-1">
+        <div className="glass glass-hover p-5 opacity-0 animate-slide-up stagger-1">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-sm font-medium text-text-secondary">
               Equity Curve
@@ -86,10 +86,10 @@ export default function AnalyticsPage() {
                 <button
                   key={range}
                   onClick={() => setSelectedRange(range)}
-                  className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${
+                  className={`px-3 py-1 text-xs font-medium rounded-md transition-all hover:scale-105 ${
                     selectedRange === range
-                      ? "bg-emerald text-black"
-                      : "text-text-muted hover:text-white"
+                      ? "bg-blue text-white"
+                      : "text-text-muted hover:text-white hover:bg-surface-2"
                   }`}
                 >
                   {range}
@@ -139,7 +139,7 @@ export default function AnalyticsPage() {
         </div>
 
         {/* Trade Distribution by Hour */}
-        <div className="glass p-5 opacity-0 animate-slide-up stagger-2">
+        <div className="glass glass-hover p-5 opacity-0 animate-slide-up stagger-2">
           <h3 className="text-sm font-medium text-text-secondary mb-4">
             Trade Distribution by Hour
           </h3>
@@ -219,7 +219,7 @@ export default function AnalyticsPage() {
         </div>
 
         {/* Drawdown Chart */}
-        <div className="glass p-5 opacity-0 animate-slide-up stagger-3">
+        <div className="glass glass-hover p-5 opacity-0 animate-slide-up stagger-3">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-sm font-medium text-text-secondary">
               Drawdown

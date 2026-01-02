@@ -17,7 +17,7 @@ export function MiniPositionsTable({ positions }: MiniPositionsTableProps) {
   const displayPositions = positions.slice(0, 5);
 
   return (
-    <div className="glass glass-hover p-5 opacity-0 animate-slide-up stagger-5">
+    <div className="glass-gradient p-5 opacity-0 animate-slide-up stagger-5">
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-medium text-text-secondary">
@@ -25,7 +25,7 @@ export function MiniPositionsTable({ positions }: MiniPositionsTableProps) {
         </h3>
         <Link
           href="/positions"
-          className="flex items-center gap-1 text-xs text-emerald hover:text-emerald/80 transition-colors"
+          className="flex items-center gap-1 text-xs text-emerald link-underline"
         >
           View all
           <ArrowRight className="w-3 h-3" />
@@ -34,7 +34,7 @@ export function MiniPositionsTable({ positions }: MiniPositionsTableProps) {
 
       {/* Table */}
       {displayPositions.length > 0 ? (
-        <table className="data-table">
+        <table className="data-table table-animate-rows">
           <thead>
             <tr>
               <th>Symbol</th>
