@@ -16,3 +16,4 @@ from .broker import (
     create_broker,
 )
 from .entry_gate import EntryGate
+from .risk import RiskManager
