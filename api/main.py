@@ -18,6 +18,38 @@ from pydantic import BaseModel, Field
 import yaml
 
 from backtest import Backtest1Hour
+from core.cache import get_cache
+from core.broker import create_broker, BrokerInterface, BrokerAPIError
+from core.config import get_global_config
+
+# Broker singleton for API
+_broker: Optional[BrokerInterface] = None
+
+
+def get_broker() -> BrokerInterface:
+    """Get or create broker singleton."""
+    global _broker
+    if _broker is None:
+        _broker = create_broker()
+    return _broker
+
+
+# Bot state tracking (simple in-memory for now)
+_bot_state = {
+    "status": "stopped",
+    "last_action": None,
+    "last_action_time": None,
+    "kill_switch_triggered": False
+}
+
+
+def update_bot_state(status: str = None, last_action: str = None):
+    """Update bot state."""
+    if status:
+        _bot_state["status"] = status
+    if last_action:
+        _bot_state["last_action"] = last_action
+        _bot_state["last_action_time"] = datetime.now().isoformat()
 
 
 # Pydantic models for request/response
@@ -81,6 +113,43 @@ class BacktestResponse(BaseModel):
     trades: List[TradeResult] = []
     symbols_scanned: List[str] = []
     error: Optional[str] = None
+
+
+class AccountResponse(BaseModel):
+    """Account information response."""
+    equity: float
+    cash: float
+    buying_power: float
+    portfolio_value: float
+    daily_pnl: float
+    daily_pnl_percent: float
+
+
+class PositionResponse(BaseModel):
+    """Single position response."""
+    symbol: str
+    qty: float
+    side: str
+    avg_entry_price: float
+    current_price: float
+    market_value: float
+    unrealized_pl: float
+    unrealized_plpc: float
+
+
+class PositionsResponse(BaseModel):
+    """List of positions response."""
+    positions: List[PositionResponse]
+    total_unrealized_pl: float
+
+
+class BotStatusResponse(BaseModel):
+    """Bot status response."""
+    status: str  # 'running', 'stopped', 'error'
+    mode: str  # 'PAPER', 'LIVE', 'DRY_RUN', 'BACKTEST'
+    last_action: Optional[str] = None
+    last_action_time: Optional[str] = None
+    kill_switch_triggered: bool = False
 
 
 # Initialize FastAPI app
@@ -270,6 +339,93 @@ def format_backtest_results(results: Dict, symbols_scanned: List[str]) -> Backte
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+
+@app.get("/api/cache/stats")
+async def cache_stats():
+    """Get cache statistics."""
+    cache = get_cache()
+    stats = cache.get_cache_stats()
+    return stats
+
+
+@app.post("/api/cache/clear")
+async def clear_cache():
+    """Clear all cached data."""
+    cache = get_cache()
+    cache.clear()
+    return {"success": True, "message": "Cache cleared"}
+
+
+@app.get("/api/account", response_model=AccountResponse)
+async def get_account():
+    """Get current account information."""
+    try:
+        broker = get_broker()
+        account = broker.get_account()
+        return AccountResponse(
+            equity=round(account.equity, 2),
+            cash=round(account.cash, 2),
+            buying_power=round(account.buying_power, 2),
+            portfolio_value=round(account.portfolio_value, 2),
+            daily_pnl=round(account.daily_pnl, 2),
+            daily_pnl_percent=round(account.daily_pnl_percent * 100, 2)
+        )
+    except BrokerAPIError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/positions", response_model=PositionsResponse)
+async def get_positions():
+    """Get all open positions."""
+    try:
+        broker = get_broker()
+        positions = broker.get_positions()
+
+        position_list = [
+            PositionResponse(
+                symbol=pos.symbol,
+                qty=pos.qty,
+                side=pos.side,
+                avg_entry_price=round(pos.avg_entry_price, 2),
+                current_price=round(pos.current_price, 2),
+                market_value=round(pos.market_value, 2),
+                unrealized_pl=round(pos.unrealized_pl, 2),
+                unrealized_plpc=round(pos.unrealized_plpc * 100, 2)
+            )
+            for pos in positions
+        ]
+
+        total_pl = sum(pos.unrealized_pl for pos in positions)
+
+        return PositionsResponse(
+            positions=position_list,
+            total_unrealized_pl=round(total_pl, 2)
+        )
+    except BrokerAPIError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bot/status", response_model=BotStatusResponse)
+async def get_bot_status():
+    """Get current bot status."""
+    try:
+        config = get_global_config()
+        mode = config.get_mode()
+
+        return BotStatusResponse(
+            status=_bot_state["status"],
+            mode=mode,
+            last_action=_bot_state["last_action"],
+            last_action_time=_bot_state["last_action_time"],
+            kill_switch_triggered=_bot_state["kill_switch_triggered"]
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/backtest", response_model=BacktestResponse)
