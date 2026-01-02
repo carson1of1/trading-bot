@@ -301,7 +301,7 @@ class TradingBot:
 
             if signal and signal.get('action') != 'HOLD':
                 confidence = signal.get('confidence', 0)
-                threshold = self.config.get('entry_gate', {}).get('confidence_threshold', 60)
+                threshold = self.strategy_manager.confidence_threshold
 
                 if signal['action'] == 'BUY' and confidence >= threshold:
                     return {
@@ -408,7 +408,7 @@ class TradingBot:
             # 2. Hard stop (tiered exit via exit manager)
             if self.exit_manager:
                 atr = 0.0  # Would need to calculate from data
-                exit_action = self.exit_manager.evaluate_exit(symbol, bar_low, atr)
+                exit_action = self.exit_manager.evaluate_exit(symbol, current_price, atr)
                 if exit_action:
                     return {
                         'exit': True,
