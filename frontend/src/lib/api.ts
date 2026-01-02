@@ -124,6 +124,20 @@ export interface BotStatus {
   last_action: string | null;
   last_action_time: string | null;
   kill_switch_triggered: boolean;
+  watchlist: string[] | null;
+}
+
+// Bot start response with scanner integration
+export interface BotStartResponse {
+  status: "started";
+  watchlist: string[];
+  scanner_ran_at: string;
+  message: string;
+}
+
+export interface BotStartError {
+  reason: "market_closed" | "no_results" | "scanner_error" | "bot_start_error";
+  message: string;
 }
 
 export interface Order {
@@ -173,13 +187,17 @@ export async function getBotStatus(): Promise<BotStatus> {
   return response.json();
 }
 
-export async function startBot(): Promise<{ success: boolean; status: string }> {
+export async function startBot(): Promise<BotStartResponse> {
   const response = await fetch(`${API_BASE_URL}/api/bot/start`, {
     method: "POST",
   });
+
   if (!response.ok) {
-    throw new Error(`Failed to start bot: ${response.status}`);
+    const errorData = await response.json();
+    const error = errorData.detail as BotStartError;
+    throw new Error(error.message || "Failed to start bot");
   }
+
   return response.json();
 }
 
