@@ -22,6 +22,10 @@ from backtest import Backtest1Hour
 from core.cache import get_cache
 from core.broker import create_broker, BrokerInterface, BrokerAPIError
 from core.config import get_global_config
+from core.market_hours import is_market_open, get_market_status_message
+from core.scanner import VolatilityScanner
+from core.data import YFinanceDataFetcher
+import subprocess
 
 # Broker singleton for API
 _broker: Optional[BrokerInterface] = None
@@ -40,7 +44,8 @@ _bot_state = {
     "status": "stopped",
     "last_action": None,
     "last_action_time": None,
-    "kill_switch_triggered": False
+    "kill_switch_triggered": False,
+    "watchlist": None
 }
 
 
@@ -151,6 +156,15 @@ class BotStatusResponse(BaseModel):
     last_action: Optional[str] = None
     last_action_time: Optional[str] = None
     kill_switch_triggered: bool = False
+    watchlist: Optional[List[str]] = None
+
+
+class BotStartResponse(BaseModel):
+    """Response for bot start endpoint."""
+    status: str
+    watchlist: List[str]
+    scanner_ran_at: str
+    message: str
 
 
 class OrderResponse(BaseModel):
@@ -469,7 +483,8 @@ async def get_bot_status():
             mode=mode,
             last_action=_bot_state["last_action"],
             last_action_time=_bot_state["last_action_time"],
-            kill_switch_triggered=_bot_state["kill_switch_triggered"]
+            kill_switch_triggered=_bot_state["kill_switch_triggered"],
+            watchlist=_bot_state.get("watchlist")
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -507,14 +522,121 @@ async def get_orders(status: str = "open"):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/bot/start")
+@app.post("/api/bot/start", response_model=BotStartResponse)
 async def start_bot():
-    """Start the trading bot."""
+    """
+    Start the trading bot with scanner-selected stocks.
+
+    Flow:
+    1. Check if market is open
+    2. Run volatility scanner on available stocks
+    3. Start bot with scanned symbols
+
+    Returns 400 if market closed, scanner fails, or no stocks found.
+    """
     global _bot_state
-    _bot_state["status"] = "running"
-    _bot_state["last_action"] = "Bot started"
-    _bot_state["last_action_time"] = datetime.now().isoformat()
-    return {"success": True, "status": "running"}
+
+    # Step 1: Check market hours
+    if not is_market_open():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "market_closed",
+                "message": get_market_status_message()
+            }
+        )
+
+    # Step 2: Run scanner
+    try:
+        universe = load_universe()
+        scanner_symbols = collect_scanner_symbols(universe)
+
+        config = load_config()
+        scanner_config = config.get('volatility_scanner', {})
+        scanner = VolatilityScanner(scanner_config)
+
+        # Fetch data and scan
+        fetcher = YFinanceDataFetcher()
+
+        # Get historical data for scanning (last 14 days of hourly data)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=14)
+
+        historical_data = {}
+        for symbol in scanner_symbols[:100]:  # Limit to avoid timeout
+            try:
+                data = fetcher.fetch_historical_data(
+                    symbol,
+                    start=start_date.strftime('%Y-%m-%d'),
+                    end=end_date.strftime('%Y-%m-%d'),
+                    interval='1h'
+                )
+                if data is not None and not data.empty:
+                    historical_data[symbol] = data
+            except Exception:
+                continue
+
+        # Run scan
+        results = scanner.scan_historical(
+            date=end_date.strftime('%Y-%m-%d'),
+            symbols=list(historical_data.keys()),
+            historical_data=historical_data
+        )
+
+        if not results:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "reason": "no_results",
+                    "message": "Scanner found no stocks meeting volatility threshold. This is unexpected with 900+ stocks - check data feed."
+                }
+            )
+
+        # Extract symbols from results (results is a list of symbol strings)
+        if isinstance(results[0], dict):
+            watchlist = [r['symbol'] for r in results[:10]]  # Top 10
+        else:
+            watchlist = results[:10]  # Already a list of symbols
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "scanner_error",
+                "message": f"Scanner failed: {str(e)}"
+            }
+        )
+
+    # Step 3: Start bot with scanned symbols
+    try:
+        symbols_arg = ",".join(watchlist)
+        subprocess.Popen(
+            ["python3", "bot.py", "--symbols", symbols_arg],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+
+        _bot_state["status"] = "running"
+        _bot_state["watchlist"] = watchlist
+        update_bot_state(status="running", last_action=f"Started with scanner: {', '.join(watchlist)}")
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "reason": "bot_start_error",
+                "message": f"Failed to start bot process: {str(e)}"
+            }
+        )
+
+    return BotStartResponse(
+        status="started",
+        watchlist=watchlist,
+        scanner_ran_at=datetime.now().isoformat(),
+        message=f"Bot started with {len(watchlist)} scanned stocks: {', '.join(watchlist)}"
+    )
 
 
 @app.post("/api/bot/stop")

@@ -122,3 +122,127 @@ class TestMarketHoursCheck:
             mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
             message = get_market_status_message()
             assert "closed" in message.lower() or "weekend" in message.lower() or "saturday" in message.lower()
+
+
+class TestBotStartWithScanner:
+    """Test POST /api/bot/start runs scanner first."""
+
+    @pytest.fixture
+    def client(self):
+        """Create test client."""
+        from api.main import app
+        from fastapi.testclient import TestClient
+        return TestClient(app)
+
+    def test_start_bot_runs_scanner_first(self, client):
+        """POST /api/bot/start should run scanner before starting bot."""
+        with patch('api.main.VolatilityScanner') as MockScanner, \
+             patch('api.main.is_market_open', return_value=True), \
+             patch('api.main.subprocess.Popen') as mock_popen, \
+             patch('api.main.YFinanceDataFetcher') as MockFetcher:
+
+            # Mock scanner returning results
+            mock_scanner_instance = MagicMock()
+            mock_scanner_instance.scan_historical.return_value = [
+                {'symbol': 'NVDA', 'composite_score': 0.95},
+                {'symbol': 'TSLA', 'composite_score': 0.90},
+                {'symbol': 'AMD', 'composite_score': 0.85},
+            ]
+            MockScanner.return_value = mock_scanner_instance
+
+            # Mock fetcher
+            mock_fetcher_instance = MagicMock()
+            mock_fetcher_instance.fetch_historical_data.return_value = MagicMock(empty=False)
+            MockFetcher.return_value = mock_fetcher_instance
+
+            response = client.post("/api/bot/start")
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "started"
+            assert "watchlist" in data
+            assert "NVDA" in data["watchlist"]
+
+    def test_start_bot_fails_when_market_closed(self, client):
+        """Should return 400 with reason='market_closed' outside trading hours."""
+        with patch('api.main.is_market_open', return_value=False), \
+             patch('api.main.get_market_status_message', return_value="Market closed: Saturday."):
+
+            response = client.post("/api/bot/start")
+
+            assert response.status_code == 400
+            data = response.json()
+            assert data["detail"]["reason"] == "market_closed"
+            assert "Saturday" in data["detail"]["message"]
+
+    def test_start_bot_fails_when_scanner_returns_empty(self, client):
+        """Should return 400 with reason='no_results' if scanner finds nothing."""
+        with patch('api.main.VolatilityScanner') as MockScanner, \
+             patch('api.main.is_market_open', return_value=True), \
+             patch('api.main.YFinanceDataFetcher') as MockFetcher:
+
+            # Mock scanner returning empty
+            mock_scanner_instance = MagicMock()
+            mock_scanner_instance.scan_historical.return_value = []
+            MockScanner.return_value = mock_scanner_instance
+
+            # Mock fetcher
+            mock_fetcher_instance = MagicMock()
+            mock_fetcher_instance.fetch_historical_data.return_value = MagicMock(empty=False)
+            MockFetcher.return_value = mock_fetcher_instance
+
+            response = client.post("/api/bot/start")
+
+            assert response.status_code == 400
+            data = response.json()
+            assert data["detail"]["reason"] == "no_results"
+
+    def test_start_bot_fails_on_scanner_api_error(self, client):
+        """Should return 400 with reason='scanner_error' on data fetch failure."""
+        with patch('api.main.VolatilityScanner') as MockScanner, \
+             patch('api.main.is_market_open', return_value=True), \
+             patch('api.main.YFinanceDataFetcher') as MockFetcher:
+
+            # Mock scanner raising exception
+            mock_scanner_instance = MagicMock()
+            mock_scanner_instance.scan_historical.side_effect = Exception("YFinance API timeout")
+            MockScanner.return_value = mock_scanner_instance
+
+            # Mock fetcher
+            mock_fetcher_instance = MagicMock()
+            mock_fetcher_instance.fetch_historical_data.return_value = MagicMock(empty=False)
+            MockFetcher.return_value = mock_fetcher_instance
+
+            response = client.post("/api/bot/start")
+
+            assert response.status_code == 400
+            data = response.json()
+            assert data["detail"]["reason"] == "scanner_error"
+            assert "YFinance" in data["detail"]["message"]
+
+    def test_start_bot_returns_watchlist_on_success(self, client):
+        """Response should include list of scanned symbols and timestamp."""
+        with patch('api.main.VolatilityScanner') as MockScanner, \
+             patch('api.main.is_market_open', return_value=True), \
+             patch('api.main.subprocess.Popen'), \
+             patch('api.main.YFinanceDataFetcher') as MockFetcher:
+
+            mock_scanner_instance = MagicMock()
+            mock_scanner_instance.scan_historical.return_value = [
+                {'symbol': 'NVDA', 'composite_score': 0.95},
+                {'symbol': 'TSLA', 'composite_score': 0.90},
+            ]
+            MockScanner.return_value = mock_scanner_instance
+
+            # Mock fetcher
+            mock_fetcher_instance = MagicMock()
+            mock_fetcher_instance.fetch_historical_data.return_value = MagicMock(empty=False)
+            MockFetcher.return_value = mock_fetcher_instance
+
+            response = client.post("/api/bot/start")
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["watchlist"] == ["NVDA", "TSLA"]
+            assert "scanner_ran_at" in data
+            assert "message" in data
