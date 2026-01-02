@@ -15,3 +15,4 @@ from .broker import (
     BrokerAPIError,
     create_broker,
 )
+from .entry_gate import EntryGate
