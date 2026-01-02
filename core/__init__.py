@@ -17,3 +17,4 @@ from .broker import (
 )
 from .entry_gate import EntryGate
 from .risk import RiskManager, ExitManager, PositionExitState, create_exit_manager
+from .scanner import VolatilityScanner

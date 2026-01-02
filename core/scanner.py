@@ -1,0 +1,310 @@
+"""
+Volatility Scanner - Dynamic stock selection based on volatility metrics.
+
+Scans a list of symbols for the most volatile stocks and returns the top N
+for trading. Used by backtesting with NO LOOK-AHEAD BIAS.
+
+Volatility Score Formula:
+    vol_score = (
+        (ATR_14 / price * 100) * 0.5 +      # ATR as % of price (50%)
+        (daily_range_pct) * 0.3 +            # (High-Low)/Close (30%)
+        (volume / avg_volume_20) * 0.2       # Volume ratio (20%)
+    )
+"""
+
+import logging
+from typing import List, Dict, Optional
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import pytz
+
+
+class VolatilityScanner:
+    """
+    Scans for the most volatile stocks in the market.
+
+    Uses historical data for backtesting with NO LOOK-AHEAD BIAS.
+    Applies price, volume, and symbol filters before ranking.
+    """
+
+    # Default configuration
+    DEFAULT_CONFIG = {
+        'top_n': 10,
+        'min_price': 5,
+        'max_price': 1000,
+        'min_volume': 500_000,
+        'weights': {
+            'atr_pct': 0.5,
+            'daily_range_pct': 0.3,
+            'volume_ratio': 0.2
+        },
+        'lookback_days': 14,  # Days for ATR calculation
+    }
+
+    def __init__(self, config: Dict = None):
+        """
+        Initialize the volatility scanner.
+
+        Args:
+            config: Configuration dict with:
+                - top_n: Number of stocks to return (default: 10)
+                - min_price: Minimum stock price (default: $5)
+                - max_price: Maximum stock price (default: $1000)
+                - min_volume: Minimum average volume (default: 500,000)
+                - weights: Dict of scoring weights
+                    - atr_pct: Weight for ATR % (default: 0.5)
+                    - daily_range_pct: Weight for daily range % (default: 0.3)
+                    - volume_ratio: Weight for volume ratio (default: 0.2)
+                - lookback_days: Days for ATR calculation (default: 14)
+        """
+        self.config = {**self.DEFAULT_CONFIG, **(config or {})}
+        self.logger = logging.getLogger(__name__)
+
+        # Extract configuration
+        self.top_n = self.config['top_n']
+        self.min_price = self.config['min_price']
+        self.max_price = self.config['max_price']
+        self.min_volume = self.config['min_volume']
+        self.weights = self.config['weights']
+        self.lookback_days = self.config['lookback_days']
+
+        self.market_tz = pytz.timezone('America/New_York')
+
+        self.logger.info(
+            f"VolatilityScanner initialized: "
+            f"top_n={self.top_n}, min_price=${self.min_price}, "
+            f"min_volume={self.min_volume:,}"
+        )
+
+    def scan_historical(self, date: str, symbols: List[str],
+                        historical_data: Dict[str, pd.DataFrame]) -> List[str]:
+        """
+        Scan for most volatile stocks on a historical date (for backtesting).
+
+        CRITICAL: NO LOOK-AHEAD BIAS
+        - Only uses data available up to 'date'
+        - Uses 14-day rolling ATR% to rank stocks
+        - Filters applied based on data as of that date
+
+        Args:
+            date: Date string in YYYY-MM-DD format (target date)
+            symbols: List of all symbols to consider
+            historical_data: Dict mapping symbol -> DataFrame with OHLCV data
+                           Must have columns: timestamp, open, high, low, close, volume
+
+        Returns:
+            List of top N most volatile symbols as of that date
+        """
+        target_date = pd.to_datetime(date)
+        if target_date.tzinfo is None:
+            target_date = self.market_tz.localize(target_date)
+
+        self.logger.debug(f"Historical scan for {date} across {len(symbols)} symbols")
+
+        scored_symbols = []
+
+        for symbol in symbols:
+            df = historical_data.get(symbol)
+            if df is None or df.empty:
+                continue
+
+            try:
+                # Filter to data available before target date (NO LOOK-AHEAD)
+                if 'timestamp' in df.columns:
+                    df_available = df[df['timestamp'] <= target_date].copy()
+                else:
+                    # Assume index is datetime
+                    df_available = df[df.index <= target_date].copy()
+
+                # Need sufficient data for ATR calculation
+                min_bars = self.lookback_days * 7  # ~7 bars per day for hourly data
+                if len(df_available) < min_bars:
+                    continue
+
+                # Get lookback window
+                df_lookback = df_available.tail(min_bars * 2)  # Extra buffer
+
+                if len(df_lookback) < 10:
+                    continue
+
+                # Calculate volatility score
+                score = self._calculate_volatility_score(df_lookback)
+
+                # Get last price (as of target date)
+                last_price = df_lookback['close'].iloc[-1]
+
+                # Apply price filter
+                if last_price < self.min_price or last_price > self.max_price:
+                    continue
+
+                # Apply volume filter (average of available data)
+                avg_volume = df_lookback['volume'].mean()
+                if avg_volume < self.min_volume:
+                    continue
+
+                scored_symbols.append({
+                    'symbol': symbol,
+                    'vol_score': score,
+                    'price': last_price,
+                    'avg_volume': avg_volume
+                })
+
+            except Exception as e:
+                self.logger.debug(f"Error scoring {symbol} for {date}: {e}")
+                continue
+
+        # Sort by volatility score (highest first)
+        scored_symbols.sort(key=lambda x: x['vol_score'], reverse=True)
+
+        # Return top N
+        result = [s['symbol'] for s in scored_symbols[:self.top_n]]
+
+        self.logger.debug(
+            f"Historical scan for {date}: found {len(scored_symbols)} valid symbols, "
+            f"returning top {len(result)}: {result}"
+        )
+
+        return result
+
+    def _calculate_volatility_score(self, df: pd.DataFrame) -> float:
+        """
+        Calculate volatility score from OHLCV data.
+
+        Formula:
+            vol_score = (
+                (ATR_14 / price * 100) * 0.5 +      # ATR as % of price (50%)
+                (daily_range_pct) * 0.3 +            # (High-Low)/Close (30%)
+                (volume / avg_volume_20) * 0.2       # Volume ratio (20%)
+            )
+
+        Args:
+            df: DataFrame with OHLCV columns (assumes data is sorted by time)
+
+        Returns:
+            Volatility score (higher = more volatile)
+        """
+        try:
+            df = df.copy()
+
+            # Calculate True Range components
+            df['prev_close'] = df['close'].shift(1)
+            df['hl'] = df['high'] - df['low']
+            df['hc'] = abs(df['high'] - df['prev_close'])
+            df['lc'] = abs(df['low'] - df['prev_close'])
+            df['tr'] = df[['hl', 'hc', 'lc']].max(axis=1)
+
+            # ATR (14-period rolling)
+            atr = df['tr'].rolling(self.lookback_days).mean().iloc[-1]
+            last_price = df['close'].iloc[-1]
+
+            # ATR as percentage of price
+            atr_pct = (atr / last_price * 100) if last_price > 0 else 0
+
+            # Daily range percentage (average)
+            df['range_pct'] = ((df['high'] - df['low']) / df['close'] * 100)
+            avg_range_pct = df['range_pct'].mean()
+
+            # Volume ratio (recent 5 bars vs 20-bar average)
+            if len(df) >= 20:
+                avg_volume_20 = df['volume'].tail(20).mean()
+            else:
+                avg_volume_20 = df['volume'].mean()
+
+            recent_volume = df['volume'].tail(5).mean()
+            volume_ratio = (recent_volume / avg_volume_20) if avg_volume_20 > 0 else 1.0
+
+            # Cap volume ratio at 5 to prevent outliers from dominating
+            volume_ratio = min(volume_ratio, 5.0)
+
+            # Composite score using weights
+            score = (
+                atr_pct * self.weights.get('atr_pct', 0.5) +
+                avg_range_pct * self.weights.get('daily_range_pct', 0.3) +
+                volume_ratio * self.weights.get('volume_ratio', 0.2)
+            )
+
+            return score
+
+        except Exception as e:
+            self.logger.debug(f"Error calculating volatility score: {e}")
+            return 0.0
+
+    def _apply_filters(self, candidates: List[Dict]) -> List[Dict]:
+        """
+        Apply price, volume, and other filters to candidates.
+
+        Args:
+            candidates: List of candidate dicts with price, volume, symbol
+
+        Returns:
+            Filtered list of candidates
+        """
+        filtered = []
+
+        for c in candidates:
+            symbol = c.get('symbol', '')
+            price = c.get('price', 0)
+            volume = c.get('volume', 0)
+
+            # Symbol validation
+            if not symbol or len(symbol) > 5:
+                continue
+
+            # Price filter
+            if price < self.min_price:
+                self.logger.debug(f"Filtered {symbol}: price ${price:.2f} < ${self.min_price}")
+                continue
+
+            if price > self.max_price:
+                self.logger.debug(f"Filtered {symbol}: price ${price:.2f} > ${self.max_price}")
+                continue
+
+            # Volume filter
+            if volume < self.min_volume:
+                self.logger.debug(f"Filtered {symbol}: volume {volume:,} < {self.min_volume:,}")
+                continue
+
+            filtered.append(c)
+
+        return filtered
+
+    def get_config(self) -> Dict:
+        """
+        Return current scanner configuration.
+
+        Returns:
+            Dict with all configuration values
+        """
+        return {
+            'top_n': self.top_n,
+            'min_price': self.min_price,
+            'max_price': self.max_price,
+            'min_volume': self.min_volume,
+            'weights': self.weights,
+            'lookback_days': self.lookback_days
+        }
+
+    def validate_symbols(self, symbols: List[str]) -> List[str]:
+        """
+        Validate a list of symbols against scanner filters.
+
+        Useful for checking if manually specified symbols meet criteria.
+
+        Args:
+            symbols: List of symbols to validate
+
+        Returns:
+            List of symbols that pass filters
+        """
+        valid = []
+
+        for symbol in symbols:
+            # Basic validation
+            if not symbol or len(symbol) > 5:
+                continue
+            if not all(c.isalnum() for c in symbol):
+                continue
+            valid.append(symbol)
+
+        return valid
