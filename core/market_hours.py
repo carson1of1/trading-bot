@@ -3,6 +3,55 @@ from datetime import datetime, time, timedelta
 import logging
 
 
+# Market timezone
+ET = pytz.timezone('America/New_York')
+
+# Regular market hours
+MARKET_OPEN = time(9, 30)
+MARKET_CLOSE = time(16, 0)
+
+
+def is_market_open() -> bool:
+    """
+    Check if US stock market is currently open.
+
+    Returns:
+        True if market is open (9:30 AM - 4:00 PM ET, weekdays)
+    """
+    now = datetime.now(ET)
+
+    # Check if weekend (Saturday=5, Sunday=6)
+    if now.weekday() >= 5:
+        return False
+
+    # Check if within trading hours
+    current_time = now.time()
+    return MARKET_OPEN <= current_time <= MARKET_CLOSE
+
+
+def get_market_status_message() -> str:
+    """
+    Get a human-readable message about market status.
+
+    Returns:
+        Message explaining why market is open or closed
+    """
+    now = datetime.now(ET)
+    current_time = now.time()
+
+    if now.weekday() >= 5:
+        day_name = "Saturday" if now.weekday() == 5 else "Sunday"
+        return f"Market closed: {day_name}. Trading resumes Monday 9:30 AM ET."
+
+    if current_time < MARKET_OPEN:
+        return f"Market closed: Pre-market. Opens at 9:30 AM ET (currently {now.strftime('%I:%M %p')} ET)."
+
+    if current_time > MARKET_CLOSE:
+        return f"Market closed: After hours. Closed at 4:00 PM ET (currently {now.strftime('%I:%M %p')} ET)."
+
+    return "Market is open."
+
+
 class MarketHours:
     """Handle NYSE market hours validation and calculations"""
 
