@@ -5,5 +5,8 @@ This module provides the base TradingStrategy interface and concrete strategy im
 """
 
 from strategies.base import TradingStrategy
+from strategies.breakout import BreakoutStrategy
+from strategies.mean_reversion import MeanReversionStrategy
+from strategies.momentum import MomentumStrategy
 
-__all__ = ['TradingStrategy']
+__all__ = ['TradingStrategy', 'BreakoutStrategy', 'MeanReversionStrategy', 'MomentumStrategy']
