@@ -180,3 +180,49 @@ export async function getOrders(status: string = "open"): Promise<OrdersData> {
   }
   return response.json();
 }
+
+// =============================================================================
+// Settings Types and API
+// =============================================================================
+
+export interface Settings {
+  mode: string;
+  risk_per_trade: number;
+  max_positions: number;
+  stop_loss_pct: number;
+  take_profit_pct: number;
+  strategies_enabled: string[];
+}
+
+export async function getSettings(): Promise<Settings> {
+  const response = await fetch(`${API_BASE_URL}/api/settings`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch settings: ${response.status}`);
+  }
+  return response.json();
+}
+
+// =============================================================================
+// Scanner Types and API
+// =============================================================================
+
+export interface ScannerResult {
+  symbol: string;
+  atr_ratio: number;
+  volume_ratio: number;
+  composite_score: number;
+  current_price: number;
+}
+
+export interface ScannerData {
+  results: ScannerResult[];
+  scanned_at: string;
+}
+
+export async function runScanner(topN: number = 10): Promise<ScannerData> {
+  const response = await fetch(`${API_BASE_URL}/api/scanner/scan?top_n=${topN}`);
+  if (!response.ok) {
+    throw new Error(`Failed to run scanner: ${response.status}`);
+  }
+  return response.json();
+}

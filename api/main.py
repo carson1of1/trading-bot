@@ -173,6 +173,31 @@ class OrdersResponse(BaseModel):
     orders: List[OrderResponse]
 
 
+class SettingsResponse(BaseModel):
+    """Bot settings/configuration response."""
+    mode: str
+    risk_per_trade: float
+    max_positions: int
+    stop_loss_pct: float
+    take_profit_pct: float
+    strategies_enabled: List[str]
+
+
+class ScannerResult(BaseModel):
+    """Single scanner result."""
+    symbol: str
+    atr_ratio: float
+    volume_ratio: float
+    composite_score: float
+    current_price: float
+
+
+class ScannerResponse(BaseModel):
+    """Scanner results response."""
+    results: List[ScannerResult]
+    scanned_at: str
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Trading Bot API",
@@ -477,6 +502,56 @@ async def get_orders(status: str = "open"):
         return OrdersResponse(orders=order_list)
     except BrokerAPIError as e:
         raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/settings", response_model=SettingsResponse)
+async def get_settings():
+    """Get current bot settings."""
+    try:
+        config = load_config()
+
+        return SettingsResponse(
+            mode=config.get("mode", "DRY_RUN"),
+            risk_per_trade=config.get("risk", {}).get("risk_per_trade", 0.02),
+            max_positions=config.get("risk", {}).get("max_open_positions", 5),
+            stop_loss_pct=config.get("exit_rules", {}).get("hard_stop_loss", 0.02),
+            take_profit_pct=config.get("exit_rules", {}).get("partial_take_profit", {}).get("threshold", 0.02),
+            strategies_enabled=[s["name"] for s in config.get("strategies", []) if s.get("enabled", False)]
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/scanner/scan", response_model=ScannerResponse)
+async def run_scanner(top_n: int = 10):
+    """Run volatility scanner and return top N symbols."""
+    try:
+        from core.scanner import VolatilityScanner
+
+        config = load_config()
+        universe = load_universe()
+        symbols = collect_scanner_symbols(universe)
+
+        scanner = VolatilityScanner(config.get("volatility_scanner", {}))
+        results = scanner.scan(symbols, top_n=top_n)
+
+        scanner_results = [
+            ScannerResult(
+                symbol=r["symbol"],
+                atr_ratio=round(r.get("atr_ratio", 0), 4),
+                volume_ratio=round(r.get("volume_ratio", 0), 2),
+                composite_score=round(r.get("composite_score", 0), 4),
+                current_price=round(r.get("current_price", 0), 2)
+            )
+            for r in results
+        ]
+
+        return ScannerResponse(
+            results=scanner_results,
+            scanned_at=datetime.now().isoformat()
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -33,8 +33,23 @@ def mock_config():
     config_data = {
         'mode': 'DRY_RUN',
         'trading': {},
-        'risk_management': {},
-        'strategies': [],
+        'risk': {
+            'risk_per_trade': 0.02,
+            'max_position_size_pct': 0.20,
+            'stop_loss_pct': 0.02,
+            'take_profit_pct': 0.04,
+            'max_open_positions': 5
+        },
+        'exit_rules': {
+            'hard_stop_loss': 0.02,
+            'partial_take_profit': {
+                'threshold': 0.02
+            }
+        },
+        'strategies': [
+            {'name': 'Momentum', 'enabled': True},
+            {'name': 'MeanReversion', 'enabled': True}
+        ],
         'broker': {
             'fake_broker': {
                 'initial_cash': 100000,
@@ -327,6 +342,65 @@ class TestErrorHandling:
                 response = client.get("/api/positions")
 
                 assert response.status_code == 503
+
+
+# =============================================================================
+# SETTINGS ENDPOINT TESTS
+# =============================================================================
+
+class TestSettingsEndpoint:
+    """Tests for /api/settings endpoint."""
+
+    def test_get_settings_success(self, mock_config):
+        """Should return settings with correct fields."""
+        import api.main as api_module
+        from fastapi.testclient import TestClient
+
+        # Mock load_config to return test config
+        test_config = {
+            'mode': 'DRY_RUN',
+            'risk': {'risk_per_trade': 0.02, 'max_open_positions': 5},
+            'exit_rules': {
+                'hard_stop_loss': 0.02,
+                'partial_take_profit': {'threshold': 0.02}
+            },
+            'strategies': [{'name': 'Momentum', 'enabled': True}]
+        }
+
+        with patch.object(api_module, 'load_config', return_value=test_config):
+            client = TestClient(api_module.app)
+            response = client.get("/api/settings")
+
+            assert response.status_code == 200
+            data = response.json()
+
+            assert "mode" in data
+            assert "risk_per_trade" in data
+            assert "max_positions" in data
+            assert "stop_loss_pct" in data
+            assert "take_profit_pct" in data
+            assert "strategies_enabled" in data
+            assert data["mode"] == "DRY_RUN"
+
+
+# =============================================================================
+# SCANNER ENDPOINT TESTS
+# =============================================================================
+
+class TestScannerEndpoint:
+    """Tests for /api/scanner/scan endpoint."""
+
+    @pytest.mark.skip(reason="Scanner requires external data - tested manually")
+    def test_scanner_returns_results(self, client):
+        """Should return scanner results with correct structure."""
+        response = client.get("/api/scanner/scan?top_n=5")
+
+        assert response.status_code == 200
+        data = response.json()
+
+        assert "results" in data
+        assert "scanned_at" in data
+        assert isinstance(data["results"], list)
 
 
 if __name__ == '__main__':
