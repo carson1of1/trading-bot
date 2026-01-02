@@ -64,12 +64,13 @@ class TradingBot:
     - Kill switch on daily loss limit
     """
 
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: str = None, scanner_symbols: list = None):
         """
         Initialize the trading bot.
 
         Args:
             config_path: Path to config.yaml. Defaults to config.yaml in bot directory.
+            scanner_symbols: Optional list of symbols from scanner (overrides config).
         """
         self.bot_dir = Path(__file__).parent
 
@@ -96,9 +97,14 @@ class TradingBot:
 
         static_watchlist = universe.get('proven_symbols', [])
 
-        # Check if volatility scanner is enabled
-        scanner_config = self.config.get('volatility_scanner', {})
-        if scanner_config.get('enabled', False):
+        # Check for scanner symbols override (from CLI)
+        if scanner_symbols:
+            self.scanner = None
+            self.watchlist = scanner_symbols
+            logger.info(f"Using scanner-provided watchlist: {self.watchlist}")
+        # Check if volatility scanner is enabled in config
+        elif self.config.get('volatility_scanner', {}).get('enabled', False):
+            scanner_config = self.config.get('volatility_scanner', {})
             self.scanner = VolatilityScanner(scanner_config)
             scanned_symbols = self.scanner.scan()
             if scanned_symbols:
@@ -779,10 +785,19 @@ class TradingBot:
 def main():
     """Main entry point for trading bot."""
     parser = argparse.ArgumentParser(description='Trading Bot')
-    parser.add_argument('--config', help='Path to config.yaml')
+    parser.add_argument('--config', type=str, default=None,
+                        help='Path to configuration file')
+    parser.add_argument('--symbols', type=str, default=None,
+                        help='Comma-separated list of symbols from scanner (overrides config)')
     args = parser.parse_args()
 
-    bot = TradingBot(config_path=args.config)
+    # Parse symbols if provided
+    scanner_symbols = None
+    if args.symbols:
+        scanner_symbols = [s.strip() for s in args.symbols.split(',')]
+        print(f"[SCANNER] Using {len(scanner_symbols)} symbols from scanner: {scanner_symbols}")
+
+    bot = TradingBot(config_path=args.config, scanner_symbols=scanner_symbols)
 
     try:
         if bot.start():
