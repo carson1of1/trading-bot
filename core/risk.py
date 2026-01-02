@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from typing import Dict, Optional, Tuple
 import logging
 import pytz
 
@@ -840,3 +842,537 @@ class RiskManager:
         self.daily_pnl = 0.0
         self.positions_risk.clear()
         self.logger.info("Daily risk metrics reset")
+
+
+# =============================================================================
+# EXIT MANAGER - Tiered Exit Logic System (Dec 18, 2025, TIGHTENED Dec 29, 2025)
+# =============================================================================
+#
+# TIERED EXIT LOGIC (TIGHTENED Dec 29, 2025):
+# 1. Unrealized PnL < +0.40%: No trailing, only hard stop-loss (-0.50%)
+# 2. Unrealized PnL >= +0.40%: PROFIT FLOOR ACTIVE - locks in +0.15% minimum
+# 3. Unrealized PnL >= +0.60%: ATR TRAILING ACTIVE - trails by ATR(14) x 1.5
+# 4. Unrealized PnL >= +1.00%: PARTIAL TAKE PROFIT - close 50% of position
+#
+# KEY FEATURES:
+# - Profit protection floor (non-decreasing hard stop at +0.15% once +0.40% reached)
+# - ATR-based trailing stops (volatility-aware, not fixed percentage)
+# - Partial profit taking at +1.0%
+# - All exits are programmatic, logged, and backtestable
+# =============================================================================
+
+
+@dataclass
+class PositionExitState:
+    """
+    Track exit state for a single position.
+
+    This state persists across price updates and ensures:
+    - Profit floor only tightens (never loosens)
+    - Trailing stop only tightens (never loosens)
+    - Partial take profit executes exactly once
+    """
+    symbol: str
+    entry_price: float
+    entry_time: datetime
+    quantity: int
+
+    # Exit thresholds (percentages as decimals, e.g., 0.0125 for 1.25%)
+    profit_floor_activation_pct: float = 0.0125  # +1.25%
+    profit_floor_lock_pct: float = 0.005         # +0.50%
+    trailing_activation_pct: float = 0.0175      # +1.75%
+    partial_tp_pct: float = 0.02                 # +2.00%
+    partial_tp_size: float = 0.50                # Close 50% at partial TP
+    hard_stop_pct: float = 0.005                 # -0.50% hard stop (from entry)
+
+    # State tracking
+    profit_floor_active: bool = False
+    profit_floor_price: float = 0.0              # Locked floor price (only goes UP)
+    trailing_active: bool = False
+    trailing_stop_price: float = 0.0             # Trailing stop (only goes UP)
+    partial_tp_executed: bool = False
+    partial_tp_qty: int = 0                      # Shares closed at partial TP
+
+    # Peak tracking for trailing
+    peak_price: float = 0.0
+    peak_unrealized_pnl_pct: float = 0.0
+
+    # ATR for volatility-aware trailing
+    current_atr: float = 0.0
+    atr_multiplier: float = 2.0
+
+    # Minimum hold time (Dec 29, 2025)
+    min_hold_bars: int = 12                    # Minimum bars before non-stop exits
+    min_hold_bypass_loss_pct: float = 0.003    # Allow early exit if loss > 0.30%
+    bars_held: int = 0                         # Current bars held
+
+    # Logging
+    last_update_time: datetime = field(default_factory=lambda: datetime.now(pytz.UTC))
+
+    def __post_init__(self):
+        """Initialize peak price to entry price."""
+        if self.peak_price == 0.0:
+            self.peak_price = self.entry_price
+
+
+class ExitManager:
+    """
+    Manages tiered exit logic for all positions.
+
+    USAGE:
+        exit_mgr = ExitManager(bot_settings)
+
+        # On each price update:
+        action = exit_mgr.evaluate_exit(symbol, current_price, current_atr)
+
+        # action is one of:
+        # - None: No action needed
+        # - {'action': 'partial_tp', 'qty': 50, 'reason': '...'}
+        # - {'action': 'full_exit', 'reason': '...'}
+    """
+
+    # Exit reasons (for logging and backtesting)
+    REASON_PROFIT_FLOOR = 'profit_floor'
+    REASON_ATR_TRAILING = 'atr_trailing'
+    REASON_PARTIAL_TP = 'partial_tp'
+    REASON_HARD_STOP = 'hard_stop'
+
+    def __init__(self, bot_settings: dict = None):
+        """
+        Initialize exit manager with configuration.
+
+        Args:
+            bot_settings: Bot configuration dict with 'risk' section
+        """
+        self.logger = logging.getLogger(__name__)
+        self.positions: Dict[str, PositionExitState] = {}
+
+        # Load settings from config
+        risk_settings = (bot_settings or {}).get('risk', {})
+
+        # Exit thresholds (convert from percentage to decimal)
+        self.profit_floor_activation_pct = risk_settings.get('profit_floor_activation_pct', 1.25) / 100
+        self.profit_floor_lock_pct = risk_settings.get('trailing_stop_min_profit_floor', 0.50) / 100
+        self.trailing_activation_pct = risk_settings.get('trailing_activation_pct', 1.75) / 100
+        self.partial_tp_pct = risk_settings.get('partial_tp_pct', 2.0) / 100
+        self.partial_tp_size = risk_settings.get('partial_tp_size', 0.50)  # 50% default
+        self.hard_stop_pct = risk_settings.get('hard_stop_pct', 0.50) / 100
+
+        # ATR settings
+        self.atr_multiplier = risk_settings.get('atr_trailing_multiplier', 2.0)
+
+        # Minimum hold time settings (Dec 29, 2025)
+        # Analysis showed short trades (<=10 bars) lose money, long trades (>30 bars) profit
+        self.min_hold_bars = risk_settings.get('min_hold_bars', 12)
+        self.min_hold_bypass_loss_pct = risk_settings.get('min_hold_bypass_loss_pct', 0.30) / 100  # 0.30%
+
+        self.logger.info(
+            f"ExitManager initialized: "
+            f"profit_floor={self.profit_floor_activation_pct*100:.2f}%->{self.profit_floor_lock_pct*100:.2f}%, "
+            f"trailing_activation={self.trailing_activation_pct*100:.2f}%, "
+            f"partial_tp={self.partial_tp_pct*100:.2f}%@{self.partial_tp_size*100:.0f}%, "
+            f"hard_stop=-{self.hard_stop_pct*100:.2f}%, "
+            f"ATR_mult={self.atr_multiplier}, "
+            f"min_hold={self.min_hold_bars} bars"
+        )
+
+    def register_position(self, symbol: str, entry_price: float, quantity: int,
+                         entry_time: datetime = None) -> PositionExitState:
+        """
+        Register a new position for exit management.
+
+        Args:
+            symbol: Stock symbol
+            entry_price: Entry price per share
+            quantity: Number of shares
+            entry_time: Entry timestamp (defaults to now)
+
+        Returns:
+            PositionExitState object for the position
+        """
+        if entry_time is None:
+            entry_time = datetime.now(pytz.UTC)
+
+        state = PositionExitState(
+            symbol=symbol,
+            entry_price=entry_price,
+            entry_time=entry_time,
+            quantity=quantity,
+            profit_floor_activation_pct=self.profit_floor_activation_pct,
+            profit_floor_lock_pct=self.profit_floor_lock_pct,
+            trailing_activation_pct=self.trailing_activation_pct,
+            partial_tp_pct=self.partial_tp_pct,
+            partial_tp_size=self.partial_tp_size,
+            hard_stop_pct=self.hard_stop_pct,
+            atr_multiplier=self.atr_multiplier,
+            peak_price=entry_price,
+            min_hold_bars=self.min_hold_bars,
+            min_hold_bypass_loss_pct=self.min_hold_bypass_loss_pct,
+            bars_held=0
+        )
+
+        self.positions[symbol] = state
+
+        self.logger.info(
+            f"EXIT_MGR | {symbol} | REGISTERED | "
+            f"Entry: ${entry_price:.2f}, Qty: {quantity}, "
+            f"Hard Stop: ${entry_price * (1 - self.hard_stop_pct):.2f} (-{self.hard_stop_pct*100:.2f}%), "
+            f"Min Hold: {self.min_hold_bars} bars"
+        )
+
+        return state
+
+    def unregister_position(self, symbol: str) -> bool:
+        """
+        Remove a position from exit management.
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            True if position was removed, False if not found
+        """
+        if symbol in self.positions:
+            del self.positions[symbol]
+            self.logger.info(f"EXIT_MGR | {symbol} | UNREGISTERED")
+            return True
+        return False
+
+    def update_quantity(self, symbol: str, new_quantity: int) -> bool:
+        """
+        Update quantity after partial close.
+
+        Args:
+            symbol: Stock symbol
+            new_quantity: New total quantity
+
+        Returns:
+            True if updated, False if position not found
+        """
+        if symbol in self.positions:
+            old_qty = self.positions[symbol].quantity
+            self.positions[symbol].quantity = new_quantity
+            self.logger.info(f"EXIT_MGR | {symbol} | QTY_UPDATE | {old_qty} -> {new_quantity}")
+            return True
+        return False
+
+    def increment_bars_held(self, symbol: str) -> int:
+        """
+        Increment the bars held counter for a position.
+
+        Called once per bar to track hold time.
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            New bars_held count, or -1 if position not found
+        """
+        if symbol in self.positions:
+            self.positions[symbol].bars_held += 1
+            return self.positions[symbol].bars_held
+        return -1
+
+    def evaluate_exit(self, symbol: str, current_price: float,
+                     current_atr: float = None) -> Optional[dict]:
+        """
+        Evaluate exit conditions for a position.
+
+        This is the CORE METHOD called on every price update.
+
+        Args:
+            symbol: Stock symbol
+            current_price: Current market price
+            current_atr: Current ATR(14) value (optional but recommended)
+
+        Returns:
+            None if no action needed, or dict with:
+            - action: 'partial_tp' or 'full_exit'
+            - qty: Shares to close (for partial_tp)
+            - reason: Exit reason (for logging)
+            - stop_price: Stop price that triggered exit
+            - unrealized_pnl_pct: P&L percentage at trigger
+        """
+        if symbol not in self.positions:
+            return None
+
+        state = self.positions[symbol]
+        entry_price = state.entry_price
+
+        # Calculate current unrealized P&L
+        unrealized_pnl_pct = (current_price - entry_price) / entry_price
+
+        # Update ATR if provided
+        if current_atr is not None and current_atr > 0:
+            state.current_atr = current_atr
+
+        # Update peak tracking
+        if current_price > state.peak_price:
+            state.peak_price = current_price
+            state.peak_unrealized_pnl_pct = unrealized_pnl_pct
+
+        state.last_update_time = datetime.now(pytz.UTC)
+
+        # ================================================================
+        # TIER 0: HARD STOP (-0.50% from entry) - Always active
+        # ================================================================
+        hard_stop_price = entry_price * (1 - state.hard_stop_pct)
+        if current_price <= hard_stop_price:
+            self._log_exit_trigger(
+                symbol, self.REASON_HARD_STOP,
+                current_price, hard_stop_price, unrealized_pnl_pct
+            )
+            return {
+                'action': 'full_exit',
+                'reason': self.REASON_HARD_STOP,
+                'stop_price': hard_stop_price,
+                'unrealized_pnl_pct': unrealized_pnl_pct,
+                'qty': state.quantity
+            }
+
+        # ================================================================
+        # MINIMUM HOLD TIME CHECK (Dec 29, 2025)
+        # Analysis showed short trades (<=10 bars) lose money, long trades profit
+        # Block non-stop exits until min_hold_bars is reached
+        # Exception: allow early exit if loss exceeds bypass threshold
+        # ================================================================
+        if state.bars_held < state.min_hold_bars:
+            # Check if we should bypass minimum hold due to significant loss
+            bypass_for_loss = unrealized_pnl_pct < -state.min_hold_bypass_loss_pct
+
+            if not bypass_for_loss:
+                # Not enough bars held and no bypass condition - skip all exits
+                # (Hard stop already checked above, so we're safe from catastrophic loss)
+                return None
+
+            # Log bypass
+            self.logger.debug(
+                f"EXIT_MGR | {symbol} | MIN_HOLD_BYPASS | "
+                f"Bars: {state.bars_held}/{state.min_hold_bars}, "
+                f"Loss: {unrealized_pnl_pct*100:.2f}% < -{state.min_hold_bypass_loss_pct*100:.2f}%"
+            )
+
+        # ================================================================
+        # TIER 1: PROFIT FLOOR CHECK (activates at +0.40%)
+        # Once active, enforces minimum +0.15% profit (non-decreasing floor)
+        # ================================================================
+        if not state.profit_floor_active:
+            # Check if we should activate profit floor
+            if unrealized_pnl_pct >= state.profit_floor_activation_pct:
+                state.profit_floor_active = True
+                # Set initial floor at locked profit level
+                state.profit_floor_price = entry_price * (1 + state.profit_floor_lock_pct)
+
+                self.logger.info(
+                    f"EXIT_MGR | {symbol} | PROFIT_FLOOR_ACTIVATED | "
+                    f"Current: +{unrealized_pnl_pct*100:.2f}%, "
+                    f"Floor locked at: ${state.profit_floor_price:.2f} (+{state.profit_floor_lock_pct*100:.2f}%)"
+                )
+
+        if state.profit_floor_active:
+            # Floor only moves UP (tightens), never loosens
+            # As price rises, we can raise the floor (but never lower it)
+            new_floor = entry_price * (1 + state.profit_floor_lock_pct)
+            if new_floor > state.profit_floor_price:
+                state.profit_floor_price = new_floor
+
+            # Check if price hit the floor
+            if current_price <= state.profit_floor_price:
+                self._log_exit_trigger(
+                    symbol, self.REASON_PROFIT_FLOOR,
+                    current_price, state.profit_floor_price, unrealized_pnl_pct
+                )
+                return {
+                    'action': 'full_exit',
+                    'reason': self.REASON_PROFIT_FLOOR,
+                    'stop_price': state.profit_floor_price,
+                    'unrealized_pnl_pct': unrealized_pnl_pct,
+                    'qty': state.quantity
+                }
+
+        # ================================================================
+        # TIER 2: ATR TRAILING STOP (activates at +1.75%)
+        # Uses ATR(14) x 2.0 for volatility-aware trailing
+        # ================================================================
+        if not state.trailing_active:
+            # Check if we should activate trailing stop
+            if unrealized_pnl_pct >= state.trailing_activation_pct:
+                state.trailing_active = True
+
+                # Calculate initial trailing stop using ATR
+                if state.current_atr > 0:
+                    trail_distance = state.current_atr * state.atr_multiplier
+                else:
+                    # Fallback: use 1% if no ATR available
+                    trail_distance = current_price * 0.01
+                    self.logger.warning(
+                        f"EXIT_MGR | {symbol} | NO_ATR | Using 1% fallback for trailing"
+                    )
+
+                state.trailing_stop_price = current_price - trail_distance
+
+                # Ensure trailing stop is at least at profit floor level
+                if state.profit_floor_active:
+                    state.trailing_stop_price = max(
+                        state.trailing_stop_price,
+                        state.profit_floor_price
+                    )
+
+                self.logger.info(
+                    f"EXIT_MGR | {symbol} | TRAILING_ACTIVATED | "
+                    f"Current: ${current_price:.2f} (+{unrealized_pnl_pct*100:.2f}%), "
+                    f"Trail: ${state.trailing_stop_price:.2f}, "
+                    f"ATR: ${state.current_atr:.2f}, Distance: ${trail_distance:.2f}"
+                )
+
+        if state.trailing_active:
+            # Update trailing stop (only tightens, never loosens)
+            if state.current_atr > 0:
+                trail_distance = state.current_atr * state.atr_multiplier
+            else:
+                trail_distance = current_price * 0.01
+
+            new_trail = current_price - trail_distance
+
+            # Trailing stop only moves UP
+            if new_trail > state.trailing_stop_price:
+                old_trail = state.trailing_stop_price
+                state.trailing_stop_price = new_trail
+                self.logger.debug(
+                    f"EXIT_MGR | {symbol} | TRAIL_TIGHTENED | "
+                    f"${old_trail:.2f} -> ${new_trail:.2f}"
+                )
+
+            # Ensure trailing is never below profit floor
+            if state.profit_floor_active:
+                state.trailing_stop_price = max(
+                    state.trailing_stop_price,
+                    state.profit_floor_price
+                )
+
+            # Check if price hit trailing stop
+            if current_price <= state.trailing_stop_price:
+                self._log_exit_trigger(
+                    symbol, self.REASON_ATR_TRAILING,
+                    current_price, state.trailing_stop_price, unrealized_pnl_pct
+                )
+                return {
+                    'action': 'full_exit',
+                    'reason': self.REASON_ATR_TRAILING,
+                    'stop_price': state.trailing_stop_price,
+                    'unrealized_pnl_pct': unrealized_pnl_pct,
+                    'qty': state.quantity
+                }
+
+        # ================================================================
+        # TIER 3: PARTIAL TAKE PROFIT (at +2.00%)
+        # Close 50% of position, move stop to breakeven on remainder
+        # ================================================================
+        if not state.partial_tp_executed:
+            if unrealized_pnl_pct >= state.partial_tp_pct:
+                # Calculate shares to close (50% of remaining)
+                partial_qty = int(state.quantity * state.partial_tp_size)
+
+                if partial_qty > 0:
+                    state.partial_tp_executed = True
+                    state.partial_tp_qty = partial_qty
+
+                    # After partial TP, raise profit floor to at least breakeven
+                    # This ensures the remaining position doesn't go negative
+                    state.profit_floor_price = max(
+                        state.profit_floor_price,
+                        entry_price  # Breakeven
+                    )
+
+                    self.logger.info(
+                        f"EXIT_MGR | {symbol} | PARTIAL_TP_TRIGGERED | "
+                        f"Current: ${current_price:.2f} (+{unrealized_pnl_pct*100:.2f}%), "
+                        f"Closing: {partial_qty} shares, "
+                        f"Remaining: {state.quantity - partial_qty} shares, "
+                        f"New floor: ${state.profit_floor_price:.2f}"
+                    )
+
+                    return {
+                        'action': 'partial_tp',
+                        'reason': self.REASON_PARTIAL_TP,
+                        'stop_price': current_price,  # Exit at current price
+                        'unrealized_pnl_pct': unrealized_pnl_pct,
+                        'qty': partial_qty
+                    }
+
+        # No exit triggered
+        return None
+
+    def _log_exit_trigger(self, symbol: str, reason: str,
+                         current_price: float, stop_price: float,
+                         unrealized_pnl_pct: float):
+        """
+        Log exit trigger for accountability and backtesting.
+
+        REQUIRED LOGGING (per spec):
+        - Symbol
+        - Exit reason
+        - Unrealized PnL at trigger
+        - Stop price
+        """
+        state = self.positions.get(symbol)
+        entry_price = state.entry_price if state else 0
+
+        self.logger.info(
+            f"EXIT_MGR | {symbol} | EXIT_TRIGGERED | "
+            f"Reason: {reason}, "
+            f"Entry: ${entry_price:.2f}, "
+            f"Current: ${current_price:.2f}, "
+            f"Stop: ${stop_price:.2f}, "
+            f"PnL: {unrealized_pnl_pct*100:+.2f}%"
+        )
+
+    def get_position_state(self, symbol: str) -> Optional[PositionExitState]:
+        """Get the current exit state for a position."""
+        return self.positions.get(symbol)
+
+    def get_all_states(self) -> Dict[str, PositionExitState]:
+        """Get all position exit states."""
+        return self.positions.copy()
+
+    def get_status_summary(self, symbol: str) -> Optional[dict]:
+        """
+        Get a human-readable status summary for a position.
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            Dict with status information or None if position not found
+        """
+        state = self.positions.get(symbol)
+        if not state:
+            return None
+
+        return {
+            'symbol': symbol,
+            'entry_price': state.entry_price,
+            'quantity': state.quantity,
+            'peak_price': state.peak_price,
+            'profit_floor_active': state.profit_floor_active,
+            'profit_floor_price': state.profit_floor_price,
+            'trailing_active': state.trailing_active,
+            'trailing_stop_price': state.trailing_stop_price,
+            'partial_tp_executed': state.partial_tp_executed,
+            'partial_tp_qty': state.partial_tp_qty,
+            'current_atr': state.current_atr,
+            'hard_stop_price': state.entry_price * (1 - state.hard_stop_pct)
+        }
+
+
+def create_exit_manager(bot_settings: dict = None) -> ExitManager:
+    """
+    Factory function to create ExitManager with proper configuration.
+
+    Args:
+        bot_settings: Bot configuration dict
+
+    Returns:
+        Configured ExitManager instance
+    """
+    return ExitManager(bot_settings)
