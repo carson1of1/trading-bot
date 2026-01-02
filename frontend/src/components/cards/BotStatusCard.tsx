@@ -6,33 +6,39 @@ import { usePolling } from "@/hooks/usePolling";
 import { getBotStatus, startBot, stopBot, BotStatus } from "@/lib/api";
 
 export function BotStatusCard() {
-  const [isToggling, setIsToggling] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+
   const { data: botState, isLoading, error, refetch } = usePolling<BotStatus>({
     fetcher: getBotStatus,
     interval: 3000,
   });
 
   const handleStart = async () => {
-    setIsToggling(true);
+    setIsStarting(true);
+    setStartError(null);
+
     try {
-      await startBot();
+      const result = await startBot();
+      console.log("Bot started with watchlist:", result.watchlist);
       await refetch();
     } catch (err) {
-      console.error("Failed to start bot:", err);
+      setStartError(err instanceof Error ? err.message : "Failed to start bot");
     } finally {
-      setIsToggling(false);
+      setIsStarting(false);
     }
   };
 
   const handleStop = async () => {
-    setIsToggling(true);
+    setIsStopping(true);
     try {
       await stopBot();
       await refetch();
     } catch (err) {
       console.error("Failed to stop bot:", err);
     } finally {
-      setIsToggling(false);
+      setIsStopping(false);
     }
   };
 
@@ -114,15 +120,36 @@ export function BotStatusCard() {
         </div>
 
         {/* Status indicator */}
-        <div className="flex items-center gap-3 mb-6">
+        <div className="flex items-center gap-3 mb-4">
           <div className={`relative w-3 h-3 rounded-full ${config.bgColor} ${isRunning ? "pulse-dot" : ""}`} />
           <span className={`text-lg font-semibold ${config.color}`}>
-            {config.label}
+            {isStarting ? "Scanning..." : config.label}
           </span>
           {botState.kill_switch_triggered && (
             <span className="badge badge-red text-xs">Kill Switch</span>
           )}
         </div>
+
+        {/* Watchlist display when running */}
+        {isRunning && botState.watchlist && botState.watchlist.length > 0 && (
+          <div className="mb-4">
+            <p className="text-xs text-text-muted mb-2">Trading:</p>
+            <div className="flex flex-wrap gap-1">
+              {botState.watchlist.map((symbol) => (
+                <span key={symbol} className="badge badge-neutral text-xs">
+                  {symbol}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Start error display */}
+        {startError && (
+          <div className="mb-4 p-2 bg-red/10 border border-red/20 rounded text-sm text-red">
+            {startError}
+          </div>
+        )}
 
         {/* Last action */}
         <div className="flex-1">
@@ -146,20 +173,29 @@ export function BotStatusCard() {
           {isRunning ? (
             <button
               onClick={handleStop}
-              disabled={isToggling}
+              disabled={isStopping}
               className="btn btn-danger btn-ripple flex-1 text-sm py-2"
             >
-              {isToggling ? <Loader2 className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4" />}
-              {isToggling ? "Stopping..." : "Stop"}
+              {isStopping ? <Loader2 className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4" />}
+              {isStopping ? "Stopping..." : "Stop"}
             </button>
           ) : (
             <button
               onClick={handleStart}
-              disabled={isToggling}
-              className="btn btn-primary btn-ripple flex-1 text-sm py-2"
+              disabled={isStarting}
+              className="btn btn-primary btn-ripple flex-1 text-sm py-2 disabled:opacity-50"
             >
-              {isToggling ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-              {isToggling ? "Starting..." : "Start"}
+              {isStarting ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Scanning...
+                </>
+              ) : (
+                <>
+                  <Play className="w-4 h-4" />
+                  Start
+                </>
+              )}
             </button>
           )}
         </div>
