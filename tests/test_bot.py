@@ -426,8 +426,8 @@ proven_symbols:
             'entry_time': datetime.now()
         }
 
-        # Price rises 5% above entry (above 4% take profit)
-        result = bot.check_exit('AAPL', position, 105.0, bar_high=106.0, bar_low=104.0)
+        # Price rises 9% above entry (above 8% take profit from config)
+        result = bot.check_exit('AAPL', position, 109.0, bar_high=110.0, bar_low=108.0)
 
         assert result is not None
         assert result['exit'] is True
@@ -442,7 +442,7 @@ proven_symbols:
             'entry_price': 100.0,
             'qty': 100,
             'direction': 'LONG',
-            'entry_time': datetime.now() - timedelta(hours=50)  # Exceed 48 hours
+            'entry_time': datetime.now() - timedelta(hours=170)  # Exceed 168 hours (1 week)
         }
 
         result = bot.check_exit('AAPL', position, 101.0)

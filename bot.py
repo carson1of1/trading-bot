@@ -419,15 +419,18 @@ class TradingBot:
 
         exit_config = self.config.get('exit_manager', {})
         trailing_config = self.config.get('trailing_stop', {})
+        risk_config = self.config.get('risk_management', {})
 
-        # Get thresholds from config
-        hard_stop_pct = abs(exit_config.get('tier_0_hard_stop', -0.02))
+        # Get thresholds from config (matching backtest.py defaults)
+        hard_stop_pct = abs(exit_config.get('tier_0_hard_stop', -0.05))  # 5% default
         profit_floor_pct = exit_config.get('tier_1_profit_floor', 0.02)
-        max_hold_hours = exit_config.get('max_hold_hours', 48)
+        max_hold_hours = exit_config.get('max_hold_hours', 168)  # 1 week default
+        take_profit_pct = risk_config.get('take_profit_pct', 8.0) / 100  # 8% default
 
         trailing_enabled = trailing_config.get('enabled', True)
-        trailing_activation = trailing_config.get('activation_pct', 0.5) / 100
-        trailing_trail = trailing_config.get('trail_pct', 0.5) / 100
+        trailing_activation = trailing_config.get('activation_pct', 0.25) / 100  # 0.25% default
+        trailing_trail = trailing_config.get('trail_pct', 0.25) / 100  # 0.25% default
+        trailing_move_to_breakeven = trailing_config.get('move_to_breakeven', True)
 
         # Update price tracking
         if symbol not in self.highest_prices:
@@ -450,12 +453,16 @@ class TradingBot:
         # ============ EXIT CHECKS ============
 
         if direction == 'LONG':
-            # 1. Trailing stop check
+            # 1. Trailing stop check (matches backtest.py logic)
             if trailing_enabled:
                 profit_pct = (highest - entry_price) / entry_price
                 if not self.trailing_stops[symbol]['activated'] and profit_pct >= trailing_activation:
                     self.trailing_stops[symbol]['activated'] = True
-                    self.trailing_stops[symbol]['price'] = entry_price  # Breakeven
+                    # Use config to decide breakeven vs trailing from peak
+                    if trailing_move_to_breakeven:
+                        self.trailing_stops[symbol]['price'] = entry_price
+                    else:
+                        self.trailing_stops[symbol]['price'] = highest * (1 - trailing_trail)
 
                 if self.trailing_stops[symbol]['activated']:
                     new_trail = highest * (1 - trailing_trail)
@@ -493,8 +500,8 @@ class TradingBot:
                     'qty': qty
                 }
 
-            # 4. Take profit
-            tp_price = entry_price * (1 + profit_floor_pct * 2)  # 2:1 R:R
+            # 4. Take profit (uses take_profit_pct from risk_management config)
+            tp_price = entry_price * (1 + take_profit_pct)
             if bar_high >= tp_price:
                 return {
                     'exit': True,
@@ -504,7 +511,31 @@ class TradingBot:
                 }
 
         else:  # SHORT
-            # Similar logic but inverted
+            # 1. Trailing stop check for SHORT (matches backtest.py logic)
+            if trailing_enabled:
+                profit_pct = (entry_price - lowest) / entry_price
+                if not self.trailing_stops[symbol]['activated'] and profit_pct >= trailing_activation:
+                    self.trailing_stops[symbol]['activated'] = True
+                    if trailing_move_to_breakeven:
+                        self.trailing_stops[symbol]['price'] = entry_price
+                    else:
+                        self.trailing_stops[symbol]['price'] = lowest * (1 + trailing_trail)
+
+                if self.trailing_stops[symbol]['activated']:
+                    new_trail = lowest * (1 + trailing_trail)
+                    # For shorts, lower trail price is better
+                    if new_trail < self.trailing_stops[symbol]['price'] or self.trailing_stops[symbol]['price'] == 0:
+                        self.trailing_stops[symbol]['price'] = new_trail
+
+                    if bar_high >= self.trailing_stops[symbol]['price']:
+                        return {
+                            'exit': True,
+                            'reason': 'trailing_stop',
+                            'price': self.trailing_stops[symbol]['price'],
+                            'qty': qty
+                        }
+
+            # 2. Hard stop for SHORT
             stop_price = entry_price * (1 + hard_stop_pct)
             if bar_high >= stop_price:
                 return {
@@ -514,7 +545,8 @@ class TradingBot:
                     'qty': qty
                 }
 
-            tp_price = entry_price * (1 - profit_floor_pct * 2)
+            # 3. Take profit for SHORT (uses take_profit_pct from risk_management config)
+            tp_price = entry_price * (1 - take_profit_pct)
             if bar_low <= tp_price:
                 return {
                     'exit': True,

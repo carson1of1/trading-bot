@@ -147,9 +147,9 @@ class Backtest1Hour:
         # Strategy manager
         self.strategy_manager = StrategyManager(self.config)
 
-        # Default risk settings
-        self.default_stop_loss_pct = risk_config.get('stop_loss_pct', 2.0) / 100
-        self.default_take_profit_pct = risk_config.get('take_profit_pct', 4.0) / 100
+        # Default risk settings (defaults match config.yaml expectations)
+        self.default_stop_loss_pct = risk_config.get('stop_loss_pct', 5.0) / 100
+        self.default_take_profit_pct = risk_config.get('take_profit_pct', 8.0) / 100
 
         # Max hold hours from config
         self.max_hold_hours = exit_config.get('max_hold_hours', self.DEFAULT_MAX_HOLD_BARS)
@@ -163,11 +163,11 @@ class Backtest1Hour:
         self.eod_close_bar_hour = 15  # Close on bars starting at 3 PM or later
         self.eod_close_enabled = exit_config.get('eod_close', False)  # Read from config
 
-        # Trailing stop configuration
+        # Trailing stop configuration (defaults match config.yaml expectations)
         trailing_config = self.config.get('trailing_stop', {})
         self.trailing_stop_enabled = trailing_config.get('enabled', True)
-        self.trailing_activation_pct = trailing_config.get('activation_pct', 0.5) / 100
-        self.trailing_trail_pct = trailing_config.get('trail_pct', 0.5) / 100
+        self.trailing_activation_pct = trailing_config.get('activation_pct', 0.25) / 100  # 0.25%
+        self.trailing_trail_pct = trailing_config.get('trail_pct', 0.25) / 100  # 0.25%
         self.trailing_move_to_breakeven = trailing_config.get('move_to_breakeven', True)
 
         # State tracking
