@@ -16,10 +16,12 @@ import { runBacktest, BacktestResponse, StrategyBreakdown, ExitReasonBreakdown, 
 
 const TOP_N_OPTIONS = [5, 10, 15, 20, 25];
 const DAYS_OPTIONS = [7, 14, 30, 60, 90, 180, 365];
+const CAPITAL_OPTIONS = [5000, 10000, 25000, 50000, 100000];
 
 export default function BacktestPage() {
   const [topN, setTopN] = useState(10);
   const [days, setDays] = useState(30);
+  const [initialCapital, setInitialCapital] = useState(10000);
   const [sideFilter, setSideFilter] = useState<"both" | "longs" | "shorts">("both");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -41,6 +43,7 @@ export default function BacktestPage() {
         days,
         longs_only: sideFilter === "longs",
         shorts_only: sideFilter === "shorts",
+        initial_capital: initialCapital,
       });
       setResults(response);
     } catch (err) {
@@ -121,6 +124,28 @@ export default function BacktestPage() {
             </div>
           </div>
 
+          {/* Starting Capital Selection */}
+          <div className="mb-6">
+            <label className="block text-sm text-text-secondary mb-2">
+              Starting Capital
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {CAPITAL_OPTIONS.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setInitialCapital(c)}
+                  className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-all ${
+                    initialCapital === c
+                      ? "bg-emerald text-black"
+                      : "bg-surface-2 text-text-secondary hover:text-white"
+                  }`}
+                >
+                  ${(c / 1000).toFixed(0)}k
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Side Filter */}
           <div className="mb-6">
             <label className="block text-sm text-text-secondary mb-2">
@@ -195,9 +220,9 @@ export default function BacktestPage() {
               {/* Summary Cards */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 opacity-0 animate-slide-up stagger-2">
                 <div className="glass p-4">
-                  <p className="text-xs text-text-muted uppercase mb-1">Total P&L</p>
-                  <p className={`text-xl font-bold mono ${(results.metrics?.total_pnl ?? 0) >= 0 ? "text-emerald" : "text-red"}`}>
-                    ${(results.metrics?.total_pnl ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  <p className="text-xs text-text-muted uppercase mb-1">Total Return</p>
+                  <p className={`text-xl font-bold mono ${(results.metrics?.total_return_pct ?? 0) >= 0 ? "text-emerald" : "text-red"}`}>
+                    {(results.metrics?.total_return_pct ?? 0) >= 0 ? "+" : ""}{(results.metrics?.total_return_pct ?? 0).toFixed(2)}%
                   </p>
                 </div>
                 <div className="glass p-4">
