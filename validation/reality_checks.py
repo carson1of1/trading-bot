@@ -18,12 +18,32 @@ import json
 import pandas as pd
 import numpy as np
 
+import yaml
+
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from backtest import Backtest1Hour
 
 
 logger = logging.getLogger(__name__)
+
+
+def _load_symbols_from_universe() -> List[str]:
+    """Load symbols from universe.yaml."""
+    universe_path = Path(__file__).parent.parent / 'universe.yaml'
+    with open(universe_path, 'r') as f:
+        universe = yaml.safe_load(f)
+
+    scanner_universe = universe.get('scanner_universe', {})
+    all_symbols = []
+    for category, symbols in scanner_universe.items():
+        if isinstance(symbols, list):
+            all_symbols.extend(symbols)
+
+    # Deduplicate
+    seen = set()
+    unique = [s for s in all_symbols if isinstance(s, str) and not (s in seen or seen.add(s))]
+    return unique
 
 
 @dataclass
@@ -57,13 +77,14 @@ class CostSensitivityAnalyzer:
         end_date: str = '2024-12-31',
         quick_mode: bool = False,
     ):
-        self.symbols = symbols or ['SPY']
+        self.symbols = symbols if symbols is not None else _load_symbols_from_universe()
         self.start_date = start_date
         self.end_date = end_date
         self.quick_mode = quick_mode
 
         if quick_mode:
-            self.symbols = self.symbols[:5]
+            self.symbols = self.symbols[:20]
+            logger.info(f"Quick mode: using {len(self.symbols)} symbols")
 
     def run(self) -> Dict[str, Any]:
         """Run cost sensitivity analysis."""
@@ -145,13 +166,14 @@ class DelaySensitivityAnalyzer:
         end_date: str = '2024-12-31',
         quick_mode: bool = False,
     ):
-        self.symbols = symbols or ['SPY']
+        self.symbols = symbols if symbols is not None else _load_symbols_from_universe()
         self.start_date = start_date
         self.end_date = end_date
         self.quick_mode = quick_mode
 
         if quick_mode:
-            self.symbols = self.symbols[:5]
+            self.symbols = self.symbols[:20]
+            logger.info(f"Quick mode: using {len(self.symbols)} symbols")
 
     def run(self) -> Dict[str, Any]:
         """Run delay sensitivity analysis."""
@@ -203,11 +225,12 @@ class RegimeSplitAnalyzer:
         symbols: List[str] = None,
         quick_mode: bool = False,
     ):
-        self.symbols = symbols or ['SPY']
+        self.symbols = symbols if symbols is not None else _load_symbols_from_universe()
         self.quick_mode = quick_mode
 
         if quick_mode:
-            self.symbols = self.symbols[:5]
+            self.symbols = self.symbols[:20]
+            logger.info(f"Quick mode: using {len(self.symbols)} symbols")
 
     def run(self) -> Dict[str, Any]:
         """Run regime split analysis."""
@@ -292,13 +315,14 @@ class ShortDisableAnalyzer:
         end_date: str = '2024-12-31',
         quick_mode: bool = False,
     ):
-        self.symbols = symbols or ['SPY']
+        self.symbols = symbols if symbols is not None else _load_symbols_from_universe()
         self.start_date = start_date
         self.end_date = end_date
         self.quick_mode = quick_mode
 
         if quick_mode:
-            self.symbols = self.symbols[:5]
+            self.symbols = self.symbols[:20]
+            logger.info(f"Quick mode: using {len(self.symbols)} symbols")
 
     def run(self) -> Dict[str, Any]:
         """Run short disable analysis."""

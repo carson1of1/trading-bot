@@ -242,25 +242,25 @@ class TestQuickMode:
         many_symbols = [f'SYM{i}' for i in range(50)]
         analyzer = CostSensitivityAnalyzer(symbols=many_symbols, quick_mode=True)
 
-        assert len(analyzer.symbols) <= 5
+        assert len(analyzer.symbols) <= 20
 
     def test_delay_analyzer_limits_symbols(self):
         """Test delay analyzer limits symbols in quick mode."""
         many_symbols = [f'SYM{i}' for i in range(50)]
         analyzer = DelaySensitivityAnalyzer(symbols=many_symbols, quick_mode=True)
 
-        assert len(analyzer.symbols) <= 5
+        assert len(analyzer.symbols) <= 20
 
     def test_regime_analyzer_limits_symbols(self):
         """Test regime analyzer limits symbols in quick mode."""
         many_symbols = [f'SYM{i}' for i in range(50)]
         analyzer = RegimeSplitAnalyzer(symbols=many_symbols, quick_mode=True)
 
-        assert len(analyzer.symbols) <= 5
+        assert len(analyzer.symbols) <= 20
 
     def test_short_analyzer_limits_symbols(self):
         """Test short analyzer limits symbols in quick mode."""
         many_symbols = [f'SYM{i}' for i in range(50)]
         analyzer = ShortDisableAnalyzer(symbols=many_symbols, quick_mode=True)
 
-        assert len(analyzer.symbols) <= 5
+        assert len(analyzer.symbols) <= 20
