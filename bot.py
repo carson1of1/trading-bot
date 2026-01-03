@@ -485,16 +485,21 @@ class TradingBot:
                         }
 
             # 2. Hard stop (tiered exit via exit manager)
-            if self.exit_manager:
+            # FIX (Jan 2026): Only call ExitManager when tiered exits enabled (matches backtest.py:692)
+            if self.use_tiered_exits and self.exit_manager:
                 # Calculate ATR from historical data for proper trailing stops
                 atr = self._calculate_atr(data, period=14) if data is not None else 0.0
                 # FIX (Jan 2026): Use bar_low instead of current_price to match backtest behavior
                 # This ensures stops trigger on intra-bar lows, not just on close
                 exit_action = self.exit_manager.evaluate_exit(symbol, bar_low, atr)
                 if exit_action:
+                    # FIX (Jan 2026): Normalize 'hard_stop' to 'stop_loss' to match backtest.py:699-701
+                    reason = exit_action.get('reason', 'exit_manager')
+                    if reason == 'hard_stop':
+                        reason = 'stop_loss'
                     return {
                         'exit': True,
-                        'reason': exit_action.get('reason', 'exit_manager'),
+                        'reason': reason,
                         'price': exit_action.get('stop_price', current_price),
                         'qty': exit_action.get('qty', qty)
                     }
@@ -507,7 +512,7 @@ class TradingBot:
                 if bar_low <= stop_price:
                     return {
                         'exit': True,
-                        'reason': 'hard_stop',
+                        'reason': 'stop_loss',  # FIX (Jan 2026): Match backtest.py naming
                         'price': stop_price,
                         'qty': qty
                     }
@@ -557,7 +562,7 @@ class TradingBot:
                 if bar_high >= stop_price:
                     return {
                         'exit': True,
-                        'reason': 'hard_stop',
+                        'reason': 'stop_loss',  # FIX (Jan 2026): Match backtest.py naming
                         'price': stop_price,
                         'qty': qty
                     }

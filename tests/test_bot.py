@@ -414,7 +414,8 @@ proven_symbols:
 
         assert result is not None
         assert result['exit'] is True
-        assert result['reason'] == 'hard_stop'
+        # FIX (Jan 2026): Changed from 'hard_stop' to 'stop_loss' to match backtest.py naming
+        assert result['reason'] == 'stop_loss'
 
     def test_check_exit_take_profit_long(self, bot_with_mocks):
         """check_exit triggers take profit for LONG position."""
