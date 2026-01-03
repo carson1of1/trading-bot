@@ -136,14 +136,17 @@ class TradingBot:
 
         # Initialize ExitManager with proper format (matching backtest.py)
         # ExitManager expects {'risk': {settings}} format with percentages as whole numbers
+        # FIX (Jan 2026): Aligned default values to match backtest.py exactly
         exit_config = self.config.get('exit_manager', {})
         exit_settings = {
-            'hard_stop_pct': abs(exit_config.get('tier_0_hard_stop', -0.05)) * 100,
+            'hard_stop_pct': abs(exit_config.get('tier_0_hard_stop', -0.02)) * 100,  # Default -2% matches backtest
             'profit_floor_pct': exit_config.get('tier_1_profit_floor', 0.02) * 100,
             'trailing_activation_pct': exit_config.get('tier_2_atr_trailing', 0.03) * 100,
             'partial_tp_pct': exit_config.get('tier_3_partial_take', 0.04) * 100,
         }
         self.exit_manager = ExitManager({'risk': exit_settings})
+        # FIX (Jan 2026): Track tiered exits enabled state to match backtest.py behavior
+        self.use_tiered_exits = exit_config.get('enabled', True)
         self.market_hours = MarketHours()
 
         # Strategy Manager
@@ -422,9 +425,10 @@ class TradingBot:
         risk_config = self.config.get('risk_management', {})
 
         # Get thresholds from config (matching backtest.py defaults)
-        hard_stop_pct = abs(exit_config.get('tier_0_hard_stop', -0.05))  # 5% default
+        # FIX (Jan 2026): Aligned all defaults to match backtest.py exactly
+        hard_stop_pct = abs(exit_config.get('tier_0_hard_stop', -0.02))  # 2% default matches backtest
         profit_floor_pct = exit_config.get('tier_1_profit_floor', 0.02)
-        max_hold_hours = exit_config.get('max_hold_hours', 168)  # 1 week default
+        max_hold_hours = exit_config.get('max_hold_hours', 48)  # 48 hours default matches backtest
         take_profit_pct = risk_config.get('take_profit_pct', 8.0) / 100  # 8% default
 
         trailing_enabled = trailing_config.get('enabled', True)
@@ -481,7 +485,9 @@ class TradingBot:
             if self.exit_manager:
                 # Calculate ATR from historical data for proper trailing stops
                 atr = self._calculate_atr(data, period=14) if data is not None else 0.0
-                exit_action = self.exit_manager.evaluate_exit(symbol, current_price, atr)
+                # FIX (Jan 2026): Use bar_low instead of current_price to match backtest behavior
+                # This ensures stops trigger on intra-bar lows, not just on close
+                exit_action = self.exit_manager.evaluate_exit(symbol, bar_low, atr)
                 if exit_action:
                     return {
                         'exit': True,
@@ -490,15 +496,18 @@ class TradingBot:
                         'qty': exit_action.get('qty', qty)
                     }
 
-            # 3. Simple stop loss fallback
-            stop_price = entry_price * (1 - hard_stop_pct)
-            if bar_low <= stop_price:
-                return {
-                    'exit': True,
-                    'reason': 'hard_stop',
-                    'price': stop_price,
-                    'qty': qty
-                }
+            # 3. Simple stop loss fallback - only when tiered exits disabled (matches backtest.py)
+            # FIX (Jan 2026): This was running even with ExitManager active, causing double-check
+            # In backtest.py, this only runs when use_tiered_exits is False
+            if not self.use_tiered_exits:
+                stop_price = entry_price * (1 - hard_stop_pct)
+                if bar_low <= stop_price:
+                    return {
+                        'exit': True,
+                        'reason': 'hard_stop',
+                        'price': stop_price,
+                        'qty': qty
+                    }
 
             # 4. Take profit (uses take_profit_pct from risk_management config)
             tp_price = entry_price * (1 + take_profit_pct)
@@ -535,15 +544,17 @@ class TradingBot:
                             'qty': qty
                         }
 
-            # 2. Hard stop for SHORT
-            stop_price = entry_price * (1 + hard_stop_pct)
-            if bar_high >= stop_price:
-                return {
-                    'exit': True,
-                    'reason': 'hard_stop',
-                    'price': stop_price,
-                    'qty': qty
-                }
+            # 2. Hard stop for SHORT - only when tiered exits disabled (matches backtest.py)
+            # FIX (Jan 2026): Aligned with LONG logic above
+            if not self.use_tiered_exits:
+                stop_price = entry_price * (1 + hard_stop_pct)
+                if bar_high >= stop_price:
+                    return {
+                        'exit': True,
+                        'reason': 'hard_stop',
+                        'price': stop_price,
+                        'qty': qty
+                    }
 
             # 3. Take profit for SHORT (uses take_profit_pct from risk_management config)
             tp_price = entry_price * (1 - take_profit_pct)
