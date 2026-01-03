@@ -147,6 +147,9 @@ class TradingBot:
         self.exit_manager = ExitManager({'risk': exit_settings})
         # FIX (Jan 2026): Track tiered exits enabled state to match backtest.py behavior
         self.use_tiered_exits = exit_config.get('enabled', True)
+        # FIX (Jan 2026): Add EOD close logic to match backtest.py
+        self.eod_close_enabled = exit_config.get('eod_close', False)
+        self.eod_close_bar_hour = 15  # 3 PM ET (15:00) - close before market close
         self.market_hours = MarketHours()
 
         # Strategy Manager
@@ -510,14 +513,17 @@ class TradingBot:
                     }
 
             # 4. Take profit (uses take_profit_pct from risk_management config)
-            tp_price = entry_price * (1 + take_profit_pct)
-            if bar_high >= tp_price:
-                return {
-                    'exit': True,
-                    'reason': 'take_profit',
-                    'price': tp_price,
-                    'qty': qty
-                }
+            # FIX (Jan 2026): Only check take profit when tiered exits disabled (matches backtest.py:710)
+            # With tiered exits enabled, ExitManager handles profit-taking via tiered system
+            if not self.use_tiered_exits:
+                tp_price = entry_price * (1 + take_profit_pct)
+                if bar_high >= tp_price:
+                    return {
+                        'exit': True,
+                        'reason': 'take_profit',
+                        'price': tp_price,
+                        'qty': qty
+                    }
 
         else:  # SHORT
             # 1. Trailing stop check for SHORT (matches backtest.py logic)
@@ -566,7 +572,21 @@ class TradingBot:
                     'qty': qty
                 }
 
-        # 5. Max hold time check
+        # 5. EOD close check (matches backtest.py:729-736)
+        # FIX (Jan 2026): Add EOD close logic to match backtest behavior
+        if self.eod_close_enabled:
+            import pytz
+            market_tz = pytz.timezone('America/New_York')
+            current_time = datetime.now(market_tz)
+            if current_time.hour >= self.eod_close_bar_hour:
+                return {
+                    'exit': True,
+                    'reason': 'eod_close',
+                    'price': current_price,
+                    'qty': qty
+                }
+
+        # 6. Max hold time check
         elapsed_hours = (datetime.now() - entry_time).total_seconds() / 3600
         if elapsed_hours >= max_hold_hours:
             return {
@@ -595,8 +615,9 @@ class TradingBot:
         """
         try:
             # Calculate position size
+            # FIX (Jan 2026): Default 5.0% matches backtest.py:151 (was 2.0%, causing mismatch)
             risk_config = self.config.get('risk_management', {})
-            stop_loss_pct = risk_config.get('stop_loss_pct', 2.0) / 100
+            stop_loss_pct = risk_config.get('stop_loss_pct', 5.0) / 100
 
             if direction == 'LONG':
                 stop_price = price * (1 - stop_loss_pct)
@@ -625,8 +646,9 @@ class TradingBot:
                 fill_price = float(order.filled_avg_price) if hasattr(order, 'filled_avg_price') and order.filled_avg_price else price
                 fill_qty = int(order.filled_qty) if hasattr(order, 'filled_qty') and order.filled_qty else qty
 
-                # Register with exit manager
-                if self.exit_manager:
+                # Register with exit manager (LONG only when tiered exits enabled)
+                # FIX (Jan 2026): Match backtest.py:922-923 - only register LONG with tiered exits
+                if direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
                     self.exit_manager.register_position(
                         symbol=symbol,
                         entry_price=fill_price,
@@ -735,8 +757,9 @@ class TradingBot:
                 if pnl < 0 and self.entry_gate:
                     self.entry_gate.record_loss(datetime.now())
 
-                # Unregister from exit manager
-                if self.exit_manager:
+                # Unregister from exit manager (LONG only when tiered exits enabled)
+                # FIX (Jan 2026): Match registration logic - only LONG with tiered exits
+                if direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
                     self.exit_manager.unregister_position(symbol)
 
                 # Cleanup

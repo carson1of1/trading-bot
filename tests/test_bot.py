@@ -393,8 +393,10 @@ proven_symbols:
             mock_broker_instance = MagicMock()
             mock_broker.return_value = mock_broker_instance
             bot = TradingBot(config_path=str(config_path))
-            # Disable exit manager for simpler testing
+            # Disable exit manager for simpler testing of legacy exit paths
             bot.exit_manager = None
+            # FIX (Jan 2026): Disable tiered exits to test legacy hard_stop/take_profit
+            bot.use_tiered_exits = False
             return bot
 
     def test_check_exit_hard_stop_long(self, bot_with_mocks):
