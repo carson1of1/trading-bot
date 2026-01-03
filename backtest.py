@@ -40,6 +40,7 @@ from core import (
     FakeBroker,
     RiskManager,
     TechnicalIndicators,
+    TradeLogger,
     VolatilityScanner,
     YFinanceDataFetcher,
 )
@@ -388,7 +389,50 @@ class Backtest1Hour:
             unique_symbols.update(syms)
         logger.info(f"Scanner selected {len(unique_symbols)} unique symbols across all days")
 
+        # NEW (Jan 2026): Log scan results for each day for live/backtest comparison
+        self._log_daily_scans(daily_scans, symbol_daily_scores, top_n)
+
         return daily_scans
+
+    def _log_daily_scans(self, daily_scans: Dict[str, List[str]],
+                         symbol_daily_scores: Dict[str, Dict[str, Dict]],
+                         top_n: int):
+        """
+        Log daily scan results to database for live/backtest comparison.
+
+        NEW (Jan 2026): Enables verification of scanner output alignment.
+        """
+        try:
+            trade_logger = TradeLogger()
+            scanner_config = self.scanner.get_config() if self.scanner else {}
+
+            for date_str, selected_symbols in daily_scans.items():
+                # Rebuild scored list for this date
+                all_scores = []
+                for symbol, date_scores in symbol_daily_scores.items():
+                    if date_str in date_scores:
+                        score_data = date_scores[date_str]
+                        all_scores.append({
+                            'symbol': symbol,
+                            'vol_score': score_data['score'],
+                            'price': score_data['price'],
+                            'avg_volume': score_data['volume']
+                        })
+
+                # Sort by score for consistent logging
+                all_scores.sort(key=lambda x: x['vol_score'], reverse=True)
+
+                trade_logger.log_scan_result({
+                    'scan_date': date_str,
+                    'mode': 'BACKTEST',
+                    'symbols_scanned': len(symbol_daily_scores),
+                    'selected_symbols': selected_symbols,
+                    'all_scores': all_scores[:50],  # Top 50 to keep size reasonable
+                    'config': scanner_config
+                })
+
+        except Exception as e:
+            logger.debug(f"Could not log backtest scan results: {e}")
 
     def _is_symbol_scanned_for_date(self, symbol: str, timestamp) -> bool:
         """Check if a symbol was in the scanned list for a given date."""

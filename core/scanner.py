@@ -384,7 +384,38 @@ class VolatilityScanner:
             f"Scanner selected top {len(result)} symbols: {result}"
         )
 
+        # NEW (Jan 2026): Log scan results for live/backtest comparison
+        self._log_scan_result(
+            scan_date=datetime.now().strftime('%Y-%m-%d'),
+            mode='LIVE',  # Will be overridden if PAPER mode detected
+            symbols_scanned=len(symbols),
+            selected_symbols=result,
+            all_scores=scored_symbols
+        )
+
         return result
+
+    def _log_scan_result(self, scan_date: str, mode: str, symbols_scanned: int,
+                         selected_symbols: List[str], all_scores: List[Dict]):
+        """
+        Log scan results to database for live/backtest comparison.
+
+        NEW (Jan 2026): Enables verification of scanner output alignment.
+        """
+        try:
+            from .logger import TradeLogger
+
+            logger = TradeLogger()
+            logger.log_scan_result({
+                'scan_date': scan_date,
+                'mode': mode,
+                'symbols_scanned': symbols_scanned,
+                'selected_symbols': selected_symbols,
+                'all_scores': all_scores[:50],  # Top 50 to keep size reasonable
+                'config': self.get_config()
+            })
+        except Exception as e:
+            self.logger.debug(f"Could not log scan result: {e}")
 
     def validate_symbols(self, symbols: List[str]) -> List[str]:
         """

@@ -212,6 +212,26 @@ class TradeLogger:
                     )
                 ''')
 
+                # NEW (Jan 2026): Create scans table for scanner result logging
+                # Enables comparison of scanner output between live and backtest
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS scans (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME,
+                        scan_date TEXT,
+                        mode TEXT,
+                        symbols_scanned INTEGER,
+                        symbols_selected INTEGER,
+                        selected_symbols TEXT,
+                        all_scores TEXT,
+                        config TEXT,
+                        session_id TEXT
+                    )
+                ''')
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_scans_date ON scans(scan_date)
+                ''')
+
                 conn.commit()
 
         except Exception as e:
@@ -561,6 +581,101 @@ class TradeLogger:
 
         except Exception as e:
             self.logger.error(f"Error logging signal: {e}")
+
+    def log_scan_result(self, scan_data: Dict[str, Any]):
+        """
+        Log scanner results for live/backtest comparison.
+
+        NEW (Jan 2026): Enables verification of scanner output alignment
+        between live trading and backtesting.
+
+        Args:
+            scan_data: Dict with:
+                - scan_date: Date of the scan (YYYY-MM-DD)
+                - mode: 'LIVE', 'PAPER', 'BACKTEST', 'DRY_RUN'
+                - symbols_scanned: Total symbols considered
+                - selected_symbols: List of top N symbols selected
+                - all_scores: List of dicts with symbol, score, price, volume
+                - config: Scanner configuration dict
+        """
+        try:
+            timestamp = datetime.now()
+            session_id = timestamp.strftime('%Y%m%d')
+
+            scan_date = scan_data.get('scan_date', timestamp.strftime('%Y-%m-%d'))
+            mode = scan_data.get('mode', 'UNKNOWN')
+            symbols_scanned = scan_data.get('symbols_scanned', 0)
+            selected_symbols = scan_data.get('selected_symbols', [])
+            all_scores = scan_data.get('all_scores', [])
+            config = scan_data.get('config', {})
+
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
+
+                cursor.execute('''
+                    INSERT INTO scans (
+                        timestamp, scan_date, mode, symbols_scanned,
+                        symbols_selected, selected_symbols, all_scores,
+                        config, session_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    timestamp,
+                    scan_date,
+                    mode,
+                    symbols_scanned,
+                    len(selected_symbols),
+                    json.dumps(selected_symbols),
+                    json.dumps(all_scores),
+                    json.dumps(config),
+                    session_id
+                ))
+
+                conn.commit()
+
+            self.logger.info(
+                f"SCAN [{mode}] {scan_date}: {len(selected_symbols)}/{symbols_scanned} symbols selected - "
+                f"Top: {selected_symbols[:5]}{'...' if len(selected_symbols) > 5 else ''}"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error logging scan result: {e}")
+
+    def get_scan_history(self, days: int = 30, mode: str = None) -> pd.DataFrame:
+        """
+        Get scan history for comparison between live and backtest.
+
+        NEW (Jan 2026): Enables verification of scanner alignment.
+
+        Args:
+            days: Number of days to look back
+            mode: Optional filter for mode ('LIVE', 'BACKTEST', etc.)
+
+        Returns:
+            DataFrame with scan history
+        """
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                if mode:
+                    query = '''
+                        SELECT * FROM scans
+                        WHERE timestamp >= datetime('now', ?)
+                        AND mode = ?
+                        ORDER BY scan_date DESC, timestamp DESC
+                    '''
+                    df = pd.read_sql_query(query, conn, params=[f'-{days} days', mode])
+                else:
+                    query = '''
+                        SELECT * FROM scans
+                        WHERE timestamp >= datetime('now', ?)
+                        ORDER BY scan_date DESC, timestamp DESC
+                    '''
+                    df = pd.read_sql_query(query, conn, params=[f'-{days} days'])
+
+            return df
+
+        except Exception as e:
+            self.logger.error(f"Error fetching scan history: {e}")
+            return pd.DataFrame()
 
     def _update_session_stats(self, trade_data: Dict[str, Any]):
         """Update session statistics"""
