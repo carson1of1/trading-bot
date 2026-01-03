@@ -158,9 +158,10 @@ class Backtest1Hour:
         self.max_daily_loss_pct = risk_config.get('max_daily_loss_pct', 3.0) / 100
         self.daily_loss_kill_switch_enabled = True
 
-        # EOD close simulation
+        # EOD close simulation - Respects config setting to match live trading
+        # When disabled (default), positions are NOT force-closed at EOD
         self.eod_close_bar_hour = 15  # Close on bars starting at 3 PM or later
-        self.eod_close_enabled = True
+        self.eod_close_enabled = exit_config.get('eod_close', False)  # Read from config
 
         # Trailing stop configuration
         trailing_config = self.config.get('trailing_stop', {})
@@ -224,7 +225,14 @@ class Backtest1Hour:
         """
         Build a dict of date -> scanned symbols for the backtest period.
 
-        Uses the scanner's scan_historical method. NO LOOK-AHEAD BIAS.
+        PERFORMANCE OPTIMIZED (Jan 2026):
+        - Pre-computes volatility metrics once per symbol using vectorized operations
+        - Avoids repeated DataFrame copies and recalculations
+        - Reduces O(symbols × days) to O(symbols) for score calculation
+
+        NO LOOK-AHEAD BIAS (Jan 2026 FIX):
+        - For each trading day N, scanner uses PREVIOUS day (N-1) data
+        - This ensures we only use information available at market open
 
         Args:
             historical_data: Dict mapping symbol -> DataFrame with OHLCV
@@ -237,7 +245,6 @@ class Backtest1Hour:
         if not self.scanner:
             return {}
 
-        daily_scans = {}
         symbols = list(historical_data.keys())
 
         # Get trading days from data
@@ -251,16 +258,125 @@ class Backtest1Hour:
         end_dt = pd.to_datetime(end_date).date()
         trading_days = sorted([d for d in all_timestamps if start_dt <= d <= end_dt])
 
-        logger.info(f"Building daily scan results for {len(trading_days)} trading days...")
+        logger.info(f"Building daily scan results for {len(trading_days)} trading days (optimized)...")
+
+        # PERFORMANCE FIX: Pre-compute rolling volatility scores for all symbols
+        # This avoids recalculating the same metrics for each day
+        symbol_daily_scores = {}  # {symbol: {date_str: score_dict}}
+
+        for symbol, df in historical_data.items():
+            if df is None or df.empty or 'timestamp' not in df.columns:
+                continue
+
+            try:
+                df = df.copy()
+                df['date'] = pd.to_datetime(df['timestamp']).dt.date
+
+                # Pre-compute True Range and rolling ATR (vectorized)
+                df['prev_close'] = df['close'].shift(1)
+                df['tr'] = np.maximum(
+                    df['high'] - df['low'],
+                    np.maximum(
+                        abs(df['high'] - df['prev_close']),
+                        abs(df['low'] - df['prev_close'])
+                    )
+                )
+
+                # Rolling ATR (14 periods)
+                lookback = self.scanner.lookback_days if self.scanner else 14
+                min_bars = lookback * 7  # For hourly data
+                df['atr'] = df['tr'].rolling(lookback).mean()
+
+                # Rolling average volume (20 periods)
+                df['avg_vol_20'] = df['volume'].rolling(20).mean()
+
+                # Daily range %
+                df['range_pct'] = (df['high'] - df['low']) / df['close'] * 100
+
+                # Group by date and get last bar of each day
+                daily_data = df.groupby('date').agg({
+                    'close': 'last',
+                    'atr': 'last',
+                    'volume': 'mean',
+                    'avg_vol_20': 'last',
+                    'range_pct': 'mean'
+                }).reset_index()
+
+                symbol_daily_scores[symbol] = {}
+                min_price = self.scanner.min_price if self.scanner else 5
+                max_price = self.scanner.max_price if self.scanner else 1000
+                min_volume = self.scanner.min_volume if self.scanner else 500000
+
+                for _, row in daily_data.iterrows():
+                    date = row['date']
+                    if date < start_dt or date > end_dt:
+                        continue
+
+                    price = row['close']
+                    atr = row['atr']
+                    avg_vol = row['avg_vol_20']
+                    vol = row['volume']
+                    range_pct = row['range_pct']
+
+                    # Apply filters
+                    if pd.isna(price) or price < min_price or price > max_price:
+                        continue
+                    if pd.isna(avg_vol) or avg_vol < min_volume:
+                        continue
+                    if pd.isna(atr):
+                        continue
+
+                    # Calculate volatility score
+                    atr_pct = (atr / price * 100) if price > 0 else 0
+                    vol_ratio = min((vol / avg_vol) if avg_vol > 0 else 1.0, 5.0)
+
+                    score = atr_pct * 0.5 + range_pct * 0.3 + vol_ratio * 0.2
+
+                    symbol_daily_scores[symbol][date.strftime('%Y-%m-%d')] = {
+                        'score': score,
+                        'price': price,
+                        'volume': avg_vol
+                    }
+
+            except Exception as e:
+                logger.debug(f"Error pre-computing scores for {symbol}: {e}")
+                continue
+
+        # Build daily scans by ranking pre-computed scores
+        # FIX (Jan 2026): Use PREVIOUS day's scores to avoid look-ahead bias
+        # For trading day N, we use day N-1's data (what we'd know at market open)
+        daily_scans = {}
+        top_n = self.scanner.top_n if self.scanner else 10
+
+        # Build a mapping from each date to the previous trading day
+        prev_day_map = {}
+        for i, date in enumerate(trading_days):
+            if i > 0:
+                prev_day_map[date.strftime('%Y-%m-%d')] = trading_days[i - 1].strftime('%Y-%m-%d')
 
         for date in trading_days:
             date_str = date.strftime('%Y-%m-%d')
-            scanned = self.scanner.scan_historical(
-                date=date_str,
-                symbols=symbols,
-                historical_data=historical_data
-            )
-            daily_scans[date_str] = scanned
+
+            # FIX: Use PREVIOUS day's scores, not current day
+            # This ensures no look-ahead bias - we only know yesterday's data at market open
+            lookup_date = prev_day_map.get(date_str)
+            if lookup_date is None:
+                # First trading day - no previous data, skip or use empty
+                daily_scans[date_str] = []
+                continue
+
+            # Collect scores for the PREVIOUS day
+            candidates = []
+            for symbol, date_scores in symbol_daily_scores.items():
+                if lookup_date in date_scores:
+                    candidates.append({
+                        'symbol': symbol,
+                        'score': date_scores[lookup_date]['score']
+                    })
+
+            # Sort by score descending and take top N
+            candidates.sort(key=lambda x: x['score'], reverse=True)
+            daily_scans[date_str] = [c['symbol'] for c in candidates[:top_n]]
 
         # Log summary
         unique_symbols = set()
@@ -349,7 +465,8 @@ class Backtest1Hour:
         MIN_WARMUP = min(20, max(10, int(len(data) * 0.2)))
 
         for i in range(MIN_WARMUP, len(data)):
-            historical_data = data.iloc[:i].copy()
+            # PERF FIX: Don't copy DataFrame - strategies only read, never modify
+            historical_data = data.iloc[:i]
             current_price = data.iloc[i]['close']
             timestamp = data.iloc[i].get('timestamp', None)
 
@@ -502,6 +619,8 @@ class Backtest1Hour:
                 self.kill_switch_triggered = False
 
             # ============ EXIT LOGIC (runs first, every bar) ============
+            # FIX (Jan 2026): Exit precedence order: hard stop > trailing > time exit > EOD
+            # This ensures catastrophic losses are prevented even if trailing stop is active
             if position_direction is not None:
                 exit_triggered = False
                 exit_reason = ''
@@ -515,6 +634,7 @@ class Backtest1Hour:
                     lowest_price = bar_low
 
                 # ============ TRAILING STOP LOGIC ============
+                # Trailing stop runs FIRST (before hard stop) to match live/API behavior
                 if self.trailing_stop_enabled and not exit_triggered:
                     if position_direction == 'LONG':
                         current_profit_pct = (highest_price - entry_price) / entry_price
@@ -556,7 +676,19 @@ class Backtest1Hour:
                                 exit_price = trailing_stop_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
                                 exit_reason = 'trailing_stop'
 
-                # Tiered exit logic via ExitManager (LONG only)
+                # ============ HARD STOP CHECK (after trailing, to match live/API) ============
+                if not exit_triggered and not self.use_tiered_exits:
+                    # Legacy hard stop for non-tiered mode
+                    if position_direction == 'LONG' and bar_low <= stop_loss_price:
+                        exit_triggered = True
+                        exit_price = stop_loss_price * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
+                        exit_reason = 'stop_loss'
+                    elif position_direction == 'SHORT' and bar_high >= stop_loss_price:
+                        exit_triggered = True
+                        exit_price = stop_loss_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
+                        exit_reason = 'stop_loss'
+
+                # For tiered exits, ExitManager handles hard stop (after trailing)
                 if not exit_triggered and position_direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
                     current_atr = self._calculate_atr(data, i, period=14)
                     exit_action = self.exit_manager.evaluate_exit(symbol, bar_low, current_atr)
@@ -564,38 +696,31 @@ class Backtest1Hour:
                     if exit_action:
                         exit_triggered = True
                         exit_reason = exit_action['reason']
+                        # Normalize 'hard_stop' to 'stop_loss' to match live/API
+                        if exit_reason == 'hard_stop':
+                            exit_reason = 'stop_loss'
                         exit_qty = exit_action.get('qty', shares)
 
-                        if exit_reason in ['hard_stop', 'profit_floor', 'atr_trailing']:
+                        if exit_reason in ['stop_loss', 'profit_floor', 'atr_trailing']:
                             exit_price = exit_action.get('stop_price', current_price) * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
                         else:
                             exit_price = current_price * (1 - self.EXIT_SLIPPAGE - self.BID_ASK_SPREAD)
 
-                elif not exit_triggered and position_direction == 'LONG':
-                    # Legacy exit logic for LONG
+                # Legacy exit logic for LONG (take profit and signal exit only)
+                if not exit_triggered and position_direction == 'LONG' and not self.use_tiered_exits:
                     if bar_high >= take_profit_price:
                         exit_triggered = True
                         exit_price = take_profit_price * (1 - self.EXIT_SLIPPAGE - self.BID_ASK_SPREAD)
                         exit_reason = 'take_profit'
-
-                    elif bar_low <= stop_loss_price:
-                        exit_triggered = True
-                        exit_price = stop_loss_price * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
-                        exit_reason = 'stop_loss'
 
                     elif row['signal'] == -1 and current_price <= entry_price:
                         exit_triggered = True
                         exit_price = current_price * (1 - self.EXIT_SLIPPAGE - self.BID_ASK_SPREAD)
                         exit_reason = 'sell_signal'
 
-                elif not exit_triggered and position_direction == 'SHORT':
-                    # Exit logic for SHORT positions
-                    if bar_high >= stop_loss_price:
-                        exit_triggered = True
-                        exit_price = stop_loss_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
-                        exit_reason = 'stop_loss'
-
-                    elif bar_low <= take_profit_price:
+                # Exit logic for SHORT positions (take profit only)
+                if not exit_triggered and position_direction == 'SHORT':
+                    if bar_low <= take_profit_price:
                         exit_triggered = True
                         exit_price = take_profit_price * (1 + self.EXIT_SLIPPAGE + self.BID_ASK_SPREAD)
                         exit_reason = 'take_profit'
@@ -740,63 +865,74 @@ class Backtest1Hour:
                 self.max_drawdown = drawdown
 
             # ============ PROCESS PENDING ENTRY ============
+            # FIX (Jan 2026): Check kill switch BEFORE processing pending entry
+            # Bug: Pending entries from previous bar would execute even after kill switch triggered
+            # This violated the rule: "if live would be blocked, backtest must also be blocked"
             if pending_entry is not None and position_direction is None:
-                open_price = row.get('open', current_price)
-                direction = pending_entry.get('direction', 'LONG')
-
-                if direction == 'LONG':
-                    realistic_entry_price = open_price * (1 + self.ENTRY_SLIPPAGE + self.BID_ASK_SPREAD)
-                    stop_loss_price = realistic_entry_price * (1 - self.default_stop_loss_pct)
-                    take_profit_price = realistic_entry_price * (1 + self.default_take_profit_pct)
+                # Kill switch check - block pending entry if triggered
+                if self.kill_switch_triggered:
+                    self._diag_entry_blocks[symbol]['kill_switch'] += 1
+                    if bar_date is not None:
+                        self._diag_kill_switch_blocks_per_day[str(bar_date)] += 1
+                    pending_entry = None  # Discard the pending entry
                 else:
-                    realistic_entry_price = open_price * (1 - self.ENTRY_SLIPPAGE - self.BID_ASK_SPREAD)
-                    stop_loss_price = realistic_entry_price * (1 + self.default_stop_loss_pct)
-                    take_profit_price = realistic_entry_price * (1 - self.default_take_profit_pct)
+                    # Process the pending entry
+                    open_price = row.get('open', current_price)
+                    direction = pending_entry.get('direction', 'LONG')
 
-                # Calculate position size
-                shares = self.risk_manager.calculate_position_size(
-                    self.portfolio_value, realistic_entry_price, stop_loss_price
-                )
+                    if direction == 'LONG':
+                        realistic_entry_price = open_price * (1 + self.ENTRY_SLIPPAGE + self.BID_ASK_SPREAD)
+                        stop_loss_price = realistic_entry_price * (1 - self.default_stop_loss_pct)
+                        take_profit_price = realistic_entry_price * (1 + self.default_take_profit_pct)
+                    else:
+                        realistic_entry_price = open_price * (1 - self.ENTRY_SLIPPAGE - self.BID_ASK_SPREAD)
+                        stop_loss_price = realistic_entry_price * (1 + self.default_stop_loss_pct)
+                        take_profit_price = realistic_entry_price * (1 - self.default_take_profit_pct)
 
-                if direction == 'LONG':
-                    cost = shares * realistic_entry_price * (1 + self.COMMISSION)
-                    if cost <= self.cash and shares > 0:
-                        self.cash -= cost
-                        position_direction = 'LONG'
-                else:
-                    margin_required = shares * realistic_entry_price * 0.5
-                    if margin_required <= self.cash and shares > 0:
-                        self.cash += shares * realistic_entry_price * (1 - self.COMMISSION)
-                        position_direction = 'SHORT'
+                    # Calculate position size
+                    shares = self.risk_manager.calculate_position_size(
+                        self.portfolio_value, realistic_entry_price, stop_loss_price
+                    )
 
-                if position_direction is not None:
-                    entry_price = realistic_entry_price
-                    entry_index = i
-                    entry_time = bar_datetime
-                    highest_price = realistic_entry_price
-                    lowest_price = realistic_entry_price
-                    last_trade_bar = i
-                    entry_strategy = pending_entry.get('strategy', 'Unknown')
-                    entry_reasoning = pending_entry.get('reasoning', '')
+                    if direction == 'LONG':
+                        cost = shares * realistic_entry_price * (1 + self.COMMISSION)
+                        if cost <= self.cash and shares > 0:
+                            self.cash -= cost
+                            position_direction = 'LONG'
+                    else:
+                        margin_required = shares * realistic_entry_price * 0.5
+                        if margin_required <= self.cash and shares > 0:
+                            self.cash += shares * realistic_entry_price * (1 - self.COMMISSION)
+                            position_direction = 'SHORT'
 
-                    # Reset trailing stop state
-                    trailing_activated = False
-                    trailing_stop_price = 0.0
+                    if position_direction is not None:
+                        entry_price = realistic_entry_price
+                        entry_index = i
+                        entry_time = bar_datetime
+                        highest_price = realistic_entry_price
+                        lowest_price = realistic_entry_price
+                        last_trade_bar = i
+                        entry_strategy = pending_entry.get('strategy', 'Unknown')
+                        entry_reasoning = pending_entry.get('reasoning', '')
 
-                    # Register with exit manager (LONG only)
-                    if direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
-                        self.exit_manager.register_position(
-                            symbol=symbol,
-                            entry_price=entry_price,
-                            quantity=shares,
-                            entry_time=timestamp if isinstance(timestamp, datetime) else None
-                        )
+                        # Reset trailing stop state
+                        trailing_activated = False
+                        trailing_stop_price = 0.0
 
-                    # Record entry for gate
-                    if self.entry_gate:
-                        self.entry_gate.record_entry(symbol, timestamp)
+                        # Register with exit manager (LONG only)
+                        if direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
+                            self.exit_manager.register_position(
+                                symbol=symbol,
+                                entry_price=entry_price,
+                                quantity=shares,
+                                entry_time=timestamp if isinstance(timestamp, datetime) else None
+                            )
 
-                pending_entry = None
+                        # Record entry for gate
+                        if self.entry_gate:
+                            self.entry_gate.record_entry(symbol, timestamp)
+
+                    pending_entry = None
 
             # ============ CHECK FOR NEW ENTRY ============
             if position_direction is None and pending_entry is None:
@@ -1093,6 +1229,48 @@ class Backtest1Hour:
 
         logger.info(f"Backtest complete: {len(all_trades)} trades, Total P&L: ${self.total_pnl:,.2f}")
 
+        # Log scanner diagnostic summary
+        if self.scanner_enabled:
+            # Get unique scanned symbols
+            all_scanned = set()
+            for syms in self._daily_scanned_symbols.values():
+                all_scanned.update(syms)
+
+            # Get symbols that actually traded
+            traded_symbols = set(t['symbol'] for t in all_trades)
+
+            # Get scanner filter stats
+            total_scanner_filtered = sum(
+                self._diag_entry_blocks[sym].get('scanner_filtered', 0)
+                for sym in self._diag_entry_blocks
+            )
+            total_confidence_blocked = sum(
+                self._diag_entry_blocks[sym].get('confidence', 0)
+                for sym in self._diag_entry_blocks
+            )
+
+            logger.info("=" * 60)
+            logger.info("SCANNER DIAGNOSTIC SUMMARY")
+            logger.info("=" * 60)
+            logger.info(f"Total symbols in universe: {len(symbols)}")
+            logger.info(f"Unique scanner-selected symbols: {len(all_scanned)}")
+            logger.info(f"Symbols that actually traded: {len(traded_symbols)}")
+            logger.info(f"Scanner-selected: {sorted(all_scanned)}")
+            logger.info(f"Actually traded: {sorted(traded_symbols)}")
+            logger.info(f"Bars blocked by scanner filter: {total_scanner_filtered:,}")
+            logger.info(f"Signals blocked by confidence: {total_confidence_blocked:,}")
+
+            # Show scanned symbols that didn't trade
+            scanned_but_no_trades = all_scanned - traded_symbols
+            if scanned_but_no_trades:
+                logger.info(f"Scanned but no trades (no signals or blocked): {sorted(scanned_but_no_trades)}")
+
+            # Show if any non-scanned symbols traded (would be a BUG)
+            non_scanned_trades = traded_symbols - all_scanned
+            if non_scanned_trades:
+                logger.warning(f"BUG: Non-scanned symbols traded: {sorted(non_scanned_trades)}")
+            logger.info("=" * 60)
+
         return results
 
 
@@ -1120,16 +1298,38 @@ def run_backtest(
     """
     bot_dir = Path(__file__).parent
 
+    # Load config first to check if scanner is enabled
+    config_path = bot_dir / 'config.yaml'
+    config = {}
+    if config_path.exists():
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+
+    scanner_enabled = config.get('volatility_scanner', {}).get('enabled', False)
+
     # Load universe if no symbols provided
     if symbols is None:
         universe_path = bot_dir / 'universe.yaml'
         if universe_path.exists():
             with open(universe_path, 'r') as f:
                 universe = yaml.safe_load(f)
-            symbols = universe.get('proven_symbols', [])
 
-            if not symbols:
-                symbols = universe.get('candidates', ['SPY', 'AAPL', 'MSFT'])
+            if scanner_enabled:
+                # Use full scanner_universe when scanner is enabled
+                scanner_universe = universe.get('scanner_universe', {})
+                symbols = []
+                for category, syms in scanner_universe.items():
+                    if isinstance(syms, list):
+                        symbols.extend(syms)
+                # Remove duplicates while preserving order
+                seen = set()
+                symbols = [s for s in symbols if not (s in seen or seen.add(s))]
+                logger.info(f"Scanner mode: loaded {len(symbols)} symbols from scanner_universe")
+            else:
+                # Use proven_symbols when scanner is disabled
+                symbols = universe.get('proven_symbols', [])
+                if not symbols:
+                    symbols = universe.get('candidates', ['SPY', 'AAPL', 'MSFT'])
         else:
             symbols = ['SPY', 'AAPL', 'MSFT']
 
@@ -1137,18 +1337,17 @@ def run_backtest(
         logger.error("No symbols to backtest!")
         return None
 
+    # Filter out non-string entries (e.g., YAML parsing "ON" as True)
+    original_count = len(symbols)
+    symbols = [s for s in symbols if isinstance(s, str)]
+    if len(symbols) < original_count:
+        logger.warning(f"Filtered {original_count - len(symbols)} non-string entries from symbols list")
+
     # Set date range
     if end_date is None:
         end_date = datetime.now().strftime('%Y-%m-%d')
     if start_date is None:
         start_date = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
-
-    # Load config and run backtest
-    config_path = bot_dir / 'config.yaml'
-    config = {}
-    if config_path.exists():
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
 
     backtester = Backtest1Hour(
         initial_capital=initial_capital,

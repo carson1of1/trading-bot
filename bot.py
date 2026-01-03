@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from core import (
@@ -132,7 +133,17 @@ class TradingBot:
         self.trade_logger = TradeLogger(db_file=db_path)
         self.risk_manager = RiskManager(self.config.get('risk_management', {}))
         self.entry_gate = EntryGate(self.config.get('entry_gate', {}))
-        self.exit_manager = ExitManager(self.config.get('exit_manager', {}))
+
+        # Initialize ExitManager with proper format (matching backtest.py)
+        # ExitManager expects {'risk': {settings}} format with percentages as whole numbers
+        exit_config = self.config.get('exit_manager', {})
+        exit_settings = {
+            'hard_stop_pct': abs(exit_config.get('tier_0_hard_stop', -0.05)) * 100,
+            'profit_floor_pct': exit_config.get('tier_1_profit_floor', 0.02) * 100,
+            'trailing_activation_pct': exit_config.get('tier_2_atr_trailing', 0.03) * 100,
+            'partial_tp_pct': exit_config.get('tier_3_partial_take', 0.04) * 100,
+        }
+        self.exit_manager = ExitManager({'risk': exit_settings})
         self.market_hours = MarketHours()
 
         # Strategy Manager
@@ -257,6 +268,52 @@ class TradingBot:
         self.trailing_stops.pop(symbol, None)
         self.pending_entries.pop(symbol, None)
 
+    def _calculate_atr(self, data: pd.DataFrame, period: int = 14) -> float:
+        """
+        Calculate ATR (Average True Range) from historical data.
+
+        Matches backtest.py implementation to ensure consistency.
+
+        Args:
+            data: DataFrame with high, low, close columns
+            period: ATR period (default 14)
+
+        Returns:
+            ATR value or 0.0 if insufficient data
+        """
+        if data is None or len(data) < period + 1:
+            return 0.0
+
+        try:
+            # Use last period+1 bars for calculation
+            hist_data = data.tail(period + 1).copy()
+            if len(hist_data) < period:
+                return 0.0
+
+            high = hist_data['high'].values
+            low = hist_data['low'].values
+            close = hist_data['close'].values
+
+            # Calculate True Range
+            tr = np.zeros(len(high))
+            for j in range(1, len(high)):
+                prev_close = close[j - 1]
+                tr[j] = max(
+                    high[j] - low[j],
+                    abs(high[j] - prev_close),
+                    abs(low[j] - prev_close)
+                )
+
+            # Average of last 'period' true ranges
+            recent_tr = tr[-period:]
+            atr = np.mean(recent_tr) if len(recent_tr) == period else 0.0
+
+            return float(atr) if not np.isnan(atr) else 0.0
+
+        except Exception as e:
+            logger.debug(f"Error calculating ATR: {e}")
+            return 0.0
+
     def check_entry(self, symbol: str, data: pd.DataFrame, current_price: float) -> dict:
         """
         Check for entry signal using StrategyManager.
@@ -334,7 +391,8 @@ class TradingBot:
             return {**no_signal, 'reasoning': f'Error: {e}'}
 
     def check_exit(self, symbol: str, position: dict, current_price: float,
-                   bar_high: float = None, bar_low: float = None) -> Optional[dict]:
+                   bar_high: float = None, bar_low: float = None,
+                   data: pd.DataFrame = None) -> Optional[dict]:
         """
         Check for exit conditions.
 
@@ -344,6 +402,7 @@ class TradingBot:
             current_price: Current price
             bar_high: High of current bar (optional)
             bar_low: Low of current bar (optional)
+            data: Historical OHLCV data for ATR calculation (optional)
 
         Returns:
             Exit dict with exit=True/False, reason, price, qty or None
@@ -413,7 +472,8 @@ class TradingBot:
 
             # 2. Hard stop (tiered exit via exit manager)
             if self.exit_manager:
-                atr = 0.0  # Would need to calculate from data
+                # Calculate ATR from historical data for proper trailing stops
+                atr = self._calculate_atr(data, period=14) if data is not None else 0.0
                 exit_action = self.exit_manager.evaluate_exit(symbol, current_price, atr)
                 if exit_action:
                     return {
@@ -721,7 +781,7 @@ class TradingBot:
                 bar_high = data['high'].iloc[-1]
                 bar_low = data['low'].iloc[-1]
 
-                exit_signal = self.check_exit(symbol, position, current_price, bar_high, bar_low)
+                exit_signal = self.check_exit(symbol, position, current_price, bar_high, bar_low, data)
 
                 if exit_signal and exit_signal.get('exit'):
                     self.execute_exit(symbol, exit_signal)
