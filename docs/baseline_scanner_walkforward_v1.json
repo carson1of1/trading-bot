@@ -1,0 +1,102 @@
+{
+  "checksum": "5c989be6b5b23a88387a02b75fea4378",
+  "created_at": "2026-01-02T22:04:39.099128",
+  "tag": "baseline_scanner_walkforward_v1",
+  "spec_dict": {
+    "config": {
+      "universe": {
+        "source": "universe.yaml:scanner_universe",
+        "symbol_count": 400,
+        "symbols_hash": "af0c0103b3bbcef7",
+        "categories": [
+          "sp500",
+          "tech_growth",
+          "high_volatility",
+          "biotech",
+          "finance",
+          "energy",
+          "clean_energy",
+          "consumer",
+          "industrial",
+          "reits",
+          "etfs",
+          "cannabis",
+          "spacs_ipos"
+        ]
+      },
+      "scanner": {
+        "enabled": true,
+        "top_n": 10,
+        "min_price": 5,
+        "max_price": 1000,
+        "min_volume": 500000,
+        "lookback_days": 14,
+        "weights": {
+          "atr_pct": 0.5,
+          "daily_range_pct": 0.3,
+          "volume_ratio": 0.2
+        }
+      },
+      "strategies": {
+        "momentum": {
+          "enabled": true,
+          "weight": 0.35
+        },
+        "mean_reversion": {
+          "enabled": true,
+          "weight": 0.25
+        },
+        "breakout": {
+          "enabled": true,
+          "weight": 0.2
+        },
+        "ml_ensemble": {
+          "enabled": false,
+          "weight": 0.0
+        },
+        "vwap": {
+          "enabled": false,
+          "weight": 0.0
+        }
+      },
+      "risk": {
+        "max_position_size_pct": 3.0,
+        "max_portfolio_risk_pct": 15.0,
+        "stop_loss_pct": 5.0,
+        "take_profit_pct": 8.0,
+        "max_daily_loss_pct": 3.0,
+        "max_open_positions": 5
+      },
+      "exits": {
+        "hard_stop_pct": -0.05,
+        "profit_floor_pct": 0.02,
+        "atr_trailing_pct": 0.03,
+        "partial_take_pct": 0.04,
+        "max_hold_hours": 168,
+        "eod_close": false
+      },
+      "trailing_stop": {
+        "enabled": true,
+        "activation_pct": 0.25,
+        "trail_pct": 0.25,
+        "move_to_breakeven": true
+      },
+      "execution": {
+        "slippage_bps": 5,
+        "half_spread_bps": 2,
+        "commission": 0.0
+      },
+      "shorting": {
+        "enabled": true,
+        "shorts_only": false
+      },
+      "entry_gate": {
+        "confidence_threshold": 60,
+        "max_trades_per_symbol_per_day": 3,
+        "min_time_between_trades_minutes": 60
+      }
+    },
+    "checksum": "5c989be6b5b23a88387a02b75fea4378",
+    "created_at": "2026-01-02T22:04:39.099057"
+  }
+}
