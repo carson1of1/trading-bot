@@ -285,6 +285,107 @@ class VolatilityScanner:
             'lookback_days': self.lookback_days
         }
 
+    def scan(self) -> List[str]:
+        """
+        Scan for most volatile stocks using current market data (for live trading).
+
+        This method fetches fresh data and calculates volatility scores,
+        returning the top N most volatile symbols.
+
+        Uses the same scoring logic as scan_historical() for backtest/live alignment.
+
+        Returns:
+            List of top N most volatile symbols
+        """
+        from pathlib import Path
+        import yaml
+
+        # Load scanner universe from universe.yaml
+        bot_dir = Path(__file__).parent.parent
+        universe_path = bot_dir / 'universe.yaml'
+
+        if not universe_path.exists():
+            self.logger.error("universe.yaml not found for scanner")
+            return []
+
+        with open(universe_path, 'r') as f:
+            universe = yaml.safe_load(f)
+
+        # Get scanner universe symbols
+        scanner_universe = universe.get('scanner_universe', {})
+        symbols = []
+        for category, syms in scanner_universe.items():
+            if isinstance(syms, list):
+                symbols.extend(syms)
+
+        # Remove duplicates while preserving order
+        seen = set()
+        symbols = [s for s in symbols if not (s in seen or seen.add(s))]
+
+        if not symbols:
+            self.logger.warning("No symbols in scanner_universe")
+            return []
+
+        self.logger.info(f"Scanning {len(symbols)} symbols for volatility...")
+
+        # Fetch data and score each symbol
+        from .data import YFinanceDataFetcher
+        from datetime import datetime, timedelta
+
+        fetcher = YFinanceDataFetcher()
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=self.lookback_days + 5)
+
+        scored_symbols = []
+
+        for symbol in symbols:
+            try:
+                df = fetcher.get_historical_data_range(
+                    symbol=symbol,
+                    timeframe='1Hour',
+                    start_date=start_date.strftime('%Y-%m-%d'),
+                    end_date=end_date.strftime('%Y-%m-%d')
+                )
+
+                if df is None or len(df) < 20:
+                    continue
+
+                # Calculate volatility score (same as scan_historical)
+                score = self._calculate_volatility_score(df)
+
+                # Get last price and volume
+                last_price = df['close'].iloc[-1]
+                avg_volume = df['volume'].mean()
+
+                # Apply filters
+                if last_price < self.min_price or last_price > self.max_price:
+                    continue
+                if avg_volume < self.min_volume:
+                    continue
+
+                scored_symbols.append({
+                    'symbol': symbol,
+                    'vol_score': score,
+                    'price': last_price,
+                    'avg_volume': avg_volume
+                })
+
+            except Exception as e:
+                self.logger.debug(f"Error scanning {symbol}: {e}")
+                continue
+
+        # Sort by volatility score (highest first)
+        scored_symbols.sort(key=lambda x: x['vol_score'], reverse=True)
+
+        # Return top N
+        result = [s['symbol'] for s in scored_symbols[:self.top_n]]
+
+        self.logger.info(
+            f"Scanner selected top {len(result)} symbols: {result}"
+        )
+
+        return result
+
     def validate_symbols(self, symbols: List[str]) -> List[str]:
         """
         Validate a list of symbols against scanner filters.

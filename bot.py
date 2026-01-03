@@ -568,14 +568,16 @@ class TradingBot:
                     }
 
             # 3. Take profit for SHORT (uses take_profit_pct from risk_management config)
-            tp_price = entry_price * (1 - take_profit_pct)
-            if bar_low <= tp_price:
-                return {
-                    'exit': True,
-                    'reason': 'take_profit',
-                    'price': tp_price,
-                    'qty': qty
-                }
+            # FIX (Jan 2026): Only check take profit when tiered exits disabled (matches backtest.py:722-726)
+            if not self.use_tiered_exits:
+                tp_price = entry_price * (1 - take_profit_pct)
+                if bar_low <= tp_price:
+                    return {
+                        'exit': True,
+                        'reason': 'take_profit',
+                        'price': tp_price,
+                        'qty': qty
+                    }
 
         # 5. EOD close check (matches backtest.py:729-736)
         # FIX (Jan 2026): Add EOD close logic to match backtest behavior
@@ -624,13 +626,22 @@ class TradingBot:
             risk_config = self.config.get('risk_management', {})
             stop_loss_pct = risk_config.get('stop_loss_pct', 5.0) / 100
 
+            # FIX (Jan 2026): Apply estimated slippage before position sizing (matches backtest.py:888-894)
+            # This ensures position sizing uses realistic entry prices like backtest does
+            exec_config = self.config.get('execution', {})
+            slippage_bps = exec_config.get('slippage_bps', 5)  # Default 5 bps = 0.05%
+            half_spread_bps = exec_config.get('half_spread_bps', 2)  # Default 2 bps = 0.02%
+            entry_slippage = (slippage_bps + half_spread_bps) / 10000
+
             if direction == 'LONG':
-                stop_price = price * (1 - stop_loss_pct)
+                realistic_entry_price = price * (1 + entry_slippage)
+                stop_price = realistic_entry_price * (1 - stop_loss_pct)
             else:
-                stop_price = price * (1 + stop_loss_pct)
+                realistic_entry_price = price * (1 - entry_slippage)
+                stop_price = realistic_entry_price * (1 + stop_loss_pct)
 
             qty = self.risk_manager.calculate_position_size(
-                self.portfolio_value, price, stop_price
+                self.portfolio_value, realistic_entry_price, stop_price
             )
 
             if qty <= 0:
@@ -844,7 +855,9 @@ class TradingBot:
 
             # 2. Check exits for all positions
             for symbol, position in list(self.open_positions.items()):
-                data = self.fetch_data(symbol, bars=50)  # Less data needed for exits
+                # FIX (Jan 2026): Use 100 bars to ensure sufficient data for ATR and indicators
+                # Previously 50 bars could cause insufficient warmup for some calculations
+                data = self.fetch_data(symbol, bars=100)
                 if data is None:
                     continue
 

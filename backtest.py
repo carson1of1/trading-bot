@@ -306,6 +306,8 @@ class Backtest1Hour:
                 min_price = self.scanner.min_price if self.scanner else 5
                 max_price = self.scanner.max_price if self.scanner else 1000
                 min_volume = self.scanner.min_volume if self.scanner else 500000
+                # FIX (Jan 2026): Use scanner's configured weights for backtest/live alignment
+                weights = self.scanner.weights if self.scanner else {'atr_pct': 0.5, 'daily_range_pct': 0.3, 'volume_ratio': 0.2}
 
                 for _, row in daily_data.iterrows():
                     date = row['date']
@@ -326,11 +328,13 @@ class Backtest1Hour:
                     if pd.isna(atr):
                         continue
 
-                    # Calculate volatility score
+                    # Calculate volatility score (using scanner weights for alignment)
                     atr_pct = (atr / price * 100) if price > 0 else 0
                     vol_ratio = min((vol / avg_vol) if avg_vol > 0 else 1.0, 5.0)
 
-                    score = atr_pct * 0.5 + range_pct * 0.3 + vol_ratio * 0.2
+                    score = (atr_pct * weights.get('atr_pct', 0.5) +
+                             range_pct * weights.get('daily_range_pct', 0.3) +
+                             vol_ratio * weights.get('volume_ratio', 0.2))
 
                     symbol_daily_scores[symbol][date.strftime('%Y-%m-%d')] = {
                         'score': score,
