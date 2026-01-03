@@ -1,0 +1,45 @@
+{
+  "Split 1 (Q4 2024)": {
+    "test_start": "2024-10-01",
+    "test_end": "2024-12-31",
+    "total_return": 30.630891906337727,
+    "max_drawdown": 12.1258717016468,
+    "profit_factor": 2.05702549805157,
+    "total_trades": 355,
+    "win_rate": 68.16901408450704,
+    "sharpe_ratio": -1.898119618540173
+  },
+  "Split 2 (Q1 2025)": {
+    "test_start": "2025-01-01",
+    "test_end": "2025-03-31",
+    "total_return": 8.907590861629433,
+    "max_drawdown": 12.357889614348606,
+    "profit_factor": 1.2056546922495837,
+    "total_trades": 284,
+    "win_rate": 66.19718309859155,
+    "sharpe_ratio": -2.093177270018478
+  },
+  "Split 3 (Q2 2025)": {
+    "test_start": "2025-04-01",
+    "test_end": "2025-06-30",
+    "total_return": -7.115509242956847,
+    "max_drawdown": 18.873188799916537,
+    "profit_factor": 0.8403047446007333,
+    "total_trades": 281,
+    "win_rate": 64.76868327402136,
+    "sharpe_ratio": -2.424854668903527
+  },
+  "summary": {
+    "splits_run": 3,
+    "avg_return": 10.807657841670105,
+    "std_return": 15.468363215012923,
+    "min_return": -7.115509242956847,
+    "max_return": 30.630891906337727,
+    "avg_drawdown": 14.45231670530398,
+    "max_drawdown": 18.873188799916537,
+    "avg_profit_factor": 1.3676616449672958,
+    "all_profitable": false,
+    "consistency_score": -0.4312410183243367
+  },
+  "generated_at": "2026-01-03T10:41:16.048716"
+}

@@ -3,7 +3,7 @@
 > **WARNING:** This configuration is FROZEN. No parameter changes allowed during OOS test period.
 > Any modification invalidates all test results.
 
-**Created:** 2026-01-02T21:15:24.517768
+**Created:** 2026-01-02T21:28:41.890503
 **Checksum:** `5c989be6b5b23a88387a02b75fea4378`
 
 ---

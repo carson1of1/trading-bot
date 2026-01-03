@@ -1,77 +1,35 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
-import { History, Download, Search } from "lucide-react";
-
-const mockTrades = [
-  {
-    id: 1,
-    date: "2024-12-30 14:32",
-    symbol: "AAPL",
-    side: "LONG",
-    entryPrice: 185.2,
-    exitPrice: 189.45,
-    pnlDollar: 425.0,
-    pnlPercent: 2.29,
-    holdDuration: "2d 4h",
-    strategy: "Momentum",
-  },
-  {
-    id: 2,
-    date: "2024-12-29 10:15",
-    symbol: "TSLA",
-    side: "SHORT",
-    entryPrice: 252.8,
-    exitPrice: 248.3,
-    pnlDollar: 450.0,
-    pnlPercent: 1.78,
-    holdDuration: "1d 6h",
-    strategy: "Mean Reversion",
-  },
-  {
-    id: 3,
-    date: "2024-12-28 09:30",
-    symbol: "NVDA",
-    side: "LONG",
-    entryPrice: 485.0,
-    exitPrice: 478.5,
-    pnlDollar: -325.0,
-    pnlPercent: -1.34,
-    holdDuration: "4h",
-    strategy: "Breakout",
-  },
-  {
-    id: 4,
-    date: "2024-12-27 11:45",
-    symbol: "META",
-    side: "LONG",
-    entryPrice: 510.2,
-    exitPrice: 525.8,
-    pnlDollar: 780.0,
-    pnlPercent: 3.06,
-    holdDuration: "3d 2h",
-    strategy: "Momentum",
-  },
-  {
-    id: 5,
-    date: "2024-12-26 15:20",
-    symbol: "GOOGL",
-    side: "SHORT",
-    entryPrice: 142.5,
-    exitPrice: 145.2,
-    pnlDollar: -270.0,
-    pnlPercent: -1.89,
-    holdDuration: "8h",
-    strategy: "Mean Reversion",
-  },
-];
+import { Download, Search, RefreshCw, AlertCircle } from "lucide-react";
+import { getTradeHistory, TradeHistoryItem } from "@/lib/api";
 
 export default function TradeHistoryPage() {
+  const [trades, setTrades] = useState<TradeHistoryItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [sideFilter, setSideFilter] = useState<"all" | "long" | "short">("all");
 
-  const filteredTrades = mockTrades.filter((trade) => {
+  const fetchTrades = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await getTradeHistory(90); // Last 90 days
+      setTrades(data.trades);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch trade history");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchTrades();
+  }, []);
+
+  const filteredTrades = trades.filter((trade) => {
     const matchesSearch = trade.symbol
       .toLowerCase()
       .includes(searchTerm.toLowerCase());
@@ -112,76 +70,112 @@ export default function TradeHistoryPage() {
             ))}
           </div>
 
+          <button
+            onClick={fetchTrades}
+            disabled={loading}
+            className="btn btn-secondary"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+
           <button className="btn btn-secondary ml-auto">
             <Download className="w-4 h-4" />
             Export CSV
           </button>
         </div>
 
+        {/* Error State */}
+        {error && (
+          <div className="flex items-center gap-3 p-4 mb-6 bg-red-500/10 border border-red-500/20 rounded-lg">
+            <AlertCircle className="w-5 h-5 text-red-400" />
+            <span className="text-red-400">{error}</span>
+          </div>
+        )}
+
+        {/* Loading State */}
+        {loading && (
+          <div className="flex items-center justify-center py-12">
+            <RefreshCw className="w-6 h-6 text-emerald animate-spin" />
+            <span className="ml-3 text-text-secondary">Loading trades...</span>
+          </div>
+        )}
+
+        {/* Empty State */}
+        {!loading && !error && filteredTrades.length === 0 && (
+          <div className="text-center py-12 text-text-muted">
+            {trades.length === 0
+              ? "No trades found. Start trading to see your history here."
+              : "No trades match your filters."}
+          </div>
+        )}
+
         {/* Table */}
-        <div className="overflow-x-auto">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Date/Time</th>
-                <th>Symbol</th>
-                <th>Side</th>
-                <th>Entry</th>
-                <th>Exit</th>
-                <th>P&L $</th>
-                <th>P&L %</th>
-                <th>Duration</th>
-                <th>Strategy</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredTrades.map((trade) => (
-                <tr key={trade.id}>
-                  <td className="text-text-secondary text-sm">{trade.date}</td>
-                  <td>
-                    <span className="font-semibold text-white mono">
-                      {trade.symbol}
-                    </span>
-                  </td>
-                  <td>
-                    <span
-                      className={`badge ${
-                        trade.side === "LONG" ? "badge-emerald" : "badge-red"
+        {!loading && filteredTrades.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Date/Time</th>
+                  <th>Symbol</th>
+                  <th>Side</th>
+                  <th>Entry</th>
+                  <th>Exit</th>
+                  <th>P&L $</th>
+                  <th>P&L %</th>
+                  <th>Duration</th>
+                  <th>Strategy</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredTrades.map((trade) => (
+                  <tr key={trade.id}>
+                    <td className="text-text-secondary text-sm">{trade.date}</td>
+                    <td>
+                      <span className="font-semibold text-white mono">
+                        {trade.symbol}
+                      </span>
+                    </td>
+                    <td>
+                      <span
+                        className={`badge ${
+                          trade.side === "LONG" ? "badge-emerald" : "badge-red"
+                        }`}
+                      >
+                        {trade.side}
+                      </span>
+                    </td>
+                    <td className="mono text-text-secondary">
+                      ${trade.entryPrice.toFixed(2)}
+                    </td>
+                    <td className="mono text-white">
+                      ${trade.exitPrice.toFixed(2)}
+                    </td>
+                    <td
+                      className={`mono font-medium ${
+                        trade.pnlDollar >= 0 ? "pnl-positive" : "pnl-negative"
                       }`}
                     >
-                      {trade.side}
-                    </span>
-                  </td>
-                  <td className="mono text-text-secondary">
-                    ${trade.entryPrice.toFixed(2)}
-                  </td>
-                  <td className="mono text-white">
-                    ${trade.exitPrice.toFixed(2)}
-                  </td>
-                  <td
-                    className={`mono font-medium ${
-                      trade.pnlDollar >= 0 ? "pnl-positive" : "pnl-negative"
-                    }`}
-                  >
-                    {trade.pnlDollar >= 0 ? "+" : ""}${trade.pnlDollar.toFixed(2)}
-                  </td>
-                  <td
-                    className={`mono font-medium ${
-                      trade.pnlPercent >= 0 ? "pnl-positive" : "pnl-negative"
-                    }`}
-                  >
-                    {trade.pnlPercent >= 0 ? "+" : ""}
-                    {trade.pnlPercent.toFixed(2)}%
-                  </td>
-                  <td className="text-text-secondary">{trade.holdDuration}</td>
-                  <td>
-                    <span className="badge badge-neutral">{trade.strategy}</span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                      {trade.pnlDollar >= 0 ? "+" : ""}${trade.pnlDollar.toFixed(2)}
+                    </td>
+                    <td
+                      className={`mono font-medium ${
+                        trade.pnlPercent >= 0 ? "pnl-positive" : "pnl-negative"
+                      }`}
+                    >
+                      {trade.pnlPercent >= 0 ? "+" : ""}
+                      {trade.pnlPercent.toFixed(2)}%
+                    </td>
+                    <td className="text-text-secondary">{trade.holdDuration}</td>
+                    <td>
+                      <span className="badge badge-neutral">{trade.strategy}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </PageWrapper>
   );

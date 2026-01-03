@@ -1,24 +1,11 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
-import { Shield, AlertTriangle, TrendingDown, Briefcase } from "lucide-react";
+import { Shield, AlertTriangle, TrendingDown, Briefcase, RefreshCw, AlertCircle } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell } from "recharts";
 import { useMounted } from "@/lib/utils";
-
-const mockRiskData = {
-  dailyLoss: { current: 320, limit: 1000 },
-  openRisk: 4.2,
-  losingTradesToday: { count: 2, limit: 5 },
-  largestPosition: { symbol: "AAPL", percent: 18.5 },
-  currentDrawdown: 1.8,
-};
-
-const positionSizes = [
-  { symbol: "AAPL", size: 18.5 },
-  { symbol: "MSFT", size: 15.2 },
-  { symbol: "NVDA", size: 12.8 },
-  { symbol: "SPY", size: 8.5 },
-];
+import { getRiskMetrics, RiskMetrics } from "@/lib/api";
 
 const maxPositionSize = 20;
 
@@ -122,123 +109,187 @@ function DrawdownGauge({ value }: { value: number }) {
 
 export default function RiskMonitorPage() {
   const mounted = useMounted();
-  const dailyLossPercent = (mockRiskData.dailyLoss.current / mockRiskData.dailyLoss.limit) * 100;
-  const losingTradesPercent =
-    (mockRiskData.losingTradesToday.count / mockRiskData.losingTradesToday.limit) * 100;
+  const [riskData, setRiskData] = useState<RiskMetrics | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchRiskMetrics = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await getRiskMetrics();
+      setRiskData(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch risk metrics");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchRiskMetrics();
+    // Auto-refresh every 60 seconds
+    const interval = setInterval(fetchRiskMetrics, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Calculate percentages for status indicators
+  const dailyLossPercent = riskData
+    ? (riskData.daily_loss / riskData.daily_loss_limit) * 100
+    : 0;
+  const losingTradesPercent = riskData
+    ? (riskData.losing_trades_today / riskData.losing_trades_limit) * 100
+    : 0;
 
   return (
     <PageWrapper title="Risk Monitor" subtitle="Monitor portfolio risk and exposure">
       <div className="space-y-6">
+        {/* Refresh Button */}
+        <div className="flex justify-end">
+          <button
+            onClick={fetchRiskMetrics}
+            disabled={loading}
+            className="btn btn-secondary"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
+
+        {/* Error State */}
+        {error && (
+          <div className="flex items-center gap-3 p-4 bg-red-500/10 border border-red-500/20 rounded-lg">
+            <AlertCircle className="w-5 h-5 text-red-400" />
+            <span className="text-red-400">{error}</span>
+          </div>
+        )}
+
+        {/* Loading State */}
+        {loading && !riskData && (
+          <div className="flex items-center justify-center py-12">
+            <RefreshCw className="w-6 h-6 text-emerald animate-spin" />
+            <span className="ml-3 text-text-secondary">Loading risk metrics...</span>
+          </div>
+        )}
+
         {/* Top Risk Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 opacity-0 animate-slide-up stagger-1">
-          <RiskCard
-            title="Daily Loss"
-            icon={<TrendingDown className="w-5 h-5 text-text-muted" />}
-            value={`$${mockRiskData.dailyLoss.current}`}
-            subtitle={`Limit: $${mockRiskData.dailyLoss.limit}`}
-            status={dailyLossPercent < 50 ? "safe" : dailyLossPercent < 80 ? "warning" : "danger"}
-          />
-          <RiskCard
-            title="Open Risk"
-            icon={<Shield className="w-5 h-5 text-text-muted" />}
-            value={`${mockRiskData.openRisk}%`}
-            subtitle="Portfolio exposure"
-            status={mockRiskData.openRisk < 5 ? "safe" : mockRiskData.openRisk < 8 ? "warning" : "danger"}
-          />
-          <RiskCard
-            title="Losing Trades Today"
-            icon={<AlertTriangle className="w-5 h-5 text-text-muted" />}
-            value={mockRiskData.losingTradesToday.count.toString()}
-            subtitle={`Lockout at ${mockRiskData.losingTradesToday.limit}`}
-            status={losingTradesPercent < 60 ? "safe" : losingTradesPercent < 80 ? "warning" : "danger"}
-          />
-          <RiskCard
-            title="Largest Position"
-            icon={<Briefcase className="w-5 h-5 text-text-muted" />}
-            value={mockRiskData.largestPosition.symbol}
-            subtitle={`${mockRiskData.largestPosition.percent}% of portfolio`}
-            status={mockRiskData.largestPosition.percent < 15 ? "safe" : mockRiskData.largestPosition.percent < 25 ? "warning" : "danger"}
-          />
-        </div>
+        {riskData && (
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 opacity-0 animate-slide-up stagger-1">
+              <RiskCard
+                title="Daily Loss"
+                icon={<TrendingDown className="w-5 h-5 text-text-muted" />}
+                value={`$${riskData.daily_loss.toFixed(0)}`}
+                subtitle={`Limit: $${riskData.daily_loss_limit}`}
+                status={dailyLossPercent < 50 ? "safe" : dailyLossPercent < 80 ? "warning" : "danger"}
+              />
+              <RiskCard
+                title="Open Risk"
+                icon={<Shield className="w-5 h-5 text-text-muted" />}
+                value={`${riskData.open_risk.toFixed(1)}%`}
+                subtitle="Portfolio exposure"
+                status={riskData.open_risk < 5 ? "safe" : riskData.open_risk < 8 ? "warning" : "danger"}
+              />
+              <RiskCard
+                title="Losing Trades Today"
+                icon={<AlertTriangle className="w-5 h-5 text-text-muted" />}
+                value={riskData.losing_trades_today.toString()}
+                subtitle={`Lockout at ${riskData.losing_trades_limit}`}
+                status={losingTradesPercent < 60 ? "safe" : losingTradesPercent < 80 ? "warning" : "danger"}
+              />
+              <RiskCard
+                title="Largest Position"
+                icon={<Briefcase className="w-5 h-5 text-text-muted" />}
+                value={riskData.largest_position_symbol}
+                subtitle={`${riskData.largest_position_percent.toFixed(1)}% of portfolio`}
+                status={riskData.largest_position_percent < 15 ? "safe" : riskData.largest_position_percent < 25 ? "warning" : "danger"}
+              />
+            </div>
 
-        {/* Position Sizing + Drawdown Gauge */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Position Sizing Visualizer */}
-          <div className="glass p-5 opacity-0 animate-slide-up stagger-2">
-            <h3 className="text-sm font-medium text-text-secondary mb-4">
-              Position Sizes (% of Portfolio)
-            </h3>
-            <div className="h-48">
-              {mounted ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={positionSizes} layout="vertical">
-                    <XAxis
-                      type="number"
-                      domain={[0, 25]}
-                      axisLine={false}
-                      tickLine={false}
-                      tick={{ fill: "#71717a", fontSize: 11 }}
-                      tickFormatter={(v) => `${v}%`}
-                    />
-                    <YAxis
-                      type="category"
-                      dataKey="symbol"
-                      axisLine={false}
-                      tickLine={false}
-                      tick={{ fill: "#ffffff", fontSize: 12, fontFamily: "Space Mono" }}
-                      width={50}
-                    />
-                    <Bar dataKey="size" radius={[0, 4, 4, 0]} barSize={20}>
-                      {positionSizes.map((entry, index) => (
-                        <Cell
-                          key={`cell-${index}`}
-                          fill={
-                            entry.size > maxPositionSize
-                              ? "#ef4444"
-                              : entry.size > maxPositionSize * 0.8
-                              ? "#f59e0b"
-                              : "#10b981"
-                          }
-                          fillOpacity={0.8}
+            {/* Position Sizing + Drawdown Gauge */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Position Sizing Visualizer */}
+              <div className="glass p-5 opacity-0 animate-slide-up stagger-2">
+                <h3 className="text-sm font-medium text-text-secondary mb-4">
+                  Position Sizes (% of Portfolio)
+                </h3>
+                <div className="h-48">
+                  {mounted && riskData.position_sizes.length > 0 ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={riskData.position_sizes} layout="vertical">
+                        <XAxis
+                          type="number"
+                          domain={[0, 25]}
+                          axisLine={false}
+                          tickLine={false}
+                          tick={{ fill: "#71717a", fontSize: 11 }}
+                          tickFormatter={(v) => `${v}%`}
                         />
-                      ))}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-              ) : (
-                <div className="h-full flex items-center justify-center">
-                  <div className="w-6 h-6 border-2 border-emerald border-t-transparent rounded-full animate-spin" />
+                        <YAxis
+                          type="category"
+                          dataKey="symbol"
+                          axisLine={false}
+                          tickLine={false}
+                          tick={{ fill: "#ffffff", fontSize: 12, fontFamily: "Space Mono" }}
+                          width={50}
+                        />
+                        <Bar dataKey="size" radius={[0, 4, 4, 0]} barSize={20}>
+                          {riskData.position_sizes.map((entry, index) => (
+                            <Cell
+                              key={`cell-${index}`}
+                              fill={
+                                entry.size > maxPositionSize
+                                  ? "#ef4444"
+                                  : entry.size > maxPositionSize * 0.8
+                                  ? "#f59e0b"
+                                  : "#10b981"
+                              }
+                              fillOpacity={0.8}
+                            />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : mounted && riskData.position_sizes.length === 0 ? (
+                    <div className="h-full flex items-center justify-center text-text-muted">
+                      No open positions
+                    </div>
+                  ) : (
+                    <div className="h-full flex items-center justify-center">
+                      <div className="w-6 h-6 border-2 border-emerald border-t-transparent rounded-full animate-spin" />
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-            <div className="flex items-center gap-2 mt-2 text-xs text-text-muted">
-              <div className="w-3 h-0.5 bg-red" />
-              <span>Max position limit: {maxPositionSize}%</span>
-            </div>
-          </div>
+                <div className="flex items-center gap-2 mt-2 text-xs text-text-muted">
+                  <div className="w-3 h-0.5 bg-red" />
+                  <span>Max position limit: {maxPositionSize}%</span>
+                </div>
+              </div>
 
-          {/* Drawdown Gauge */}
-          <div className="glass p-5 opacity-0 animate-slide-up stagger-3">
-            <h3 className="text-sm font-medium text-text-secondary mb-6 text-center">
-              Drawdown Gauge
-            </h3>
-            <DrawdownGauge value={mockRiskData.currentDrawdown} />
-            <div className="flex justify-center gap-6 mt-6 text-xs">
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded-full bg-emerald" />
-                <span className="text-text-muted">Safe (0-2%)</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded-full bg-amber" />
-                <span className="text-text-muted">Warning (2-5%)</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded-full bg-red" />
-                <span className="text-text-muted">Danger (5%+)</span>
+              {/* Drawdown Gauge */}
+              <div className="glass p-5 opacity-0 animate-slide-up stagger-3">
+                <h3 className="text-sm font-medium text-text-secondary mb-6 text-center">
+                  Drawdown Gauge
+                </h3>
+                <DrawdownGauge value={riskData.current_drawdown} />
+                <div className="flex justify-center gap-6 mt-6 text-xs">
+                  <div className="flex items-center gap-2">
+                    <div className="w-3 h-3 rounded-full bg-emerald" />
+                    <span className="text-text-muted">Safe (0-2%)</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-3 h-3 rounded-full bg-amber" />
+                    <span className="text-text-muted">Warning (2-5%)</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-3 h-3 rounded-full bg-red" />
+                    <span className="text-text-muted">Danger (5%+)</span>
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-        </div>
+          </>
+        )}
       </div>
     </PageWrapper>
   );

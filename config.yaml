@@ -18,12 +18,12 @@ trading:
   warmup_bars: 200
 
 # Capital Engine - Real position sizes, drawdown control
-# RISK GEOMETRY FIX (Dec 25, 2025): Tighter stops and smaller positions
+# FIX (Jan 2, 2026): Wider stops - 2% stops had 0% win rate, killing returns
 risk_management:
-  max_position_size_pct: 3.0       # REDUCED from 5% - cuts DD immediately
+  max_position_size_pct: 3.0       # Max 3% per position
   max_portfolio_risk_pct: 15.0     # Max 15% total risk
-  stop_loss_pct: 2.0               # 2% stop loss (value is divided by 100 in code)
-  take_profit_pct: 4.0             # 4% take profit (2:1 R:R with 2% stop)
+  stop_loss_pct: 5.0               # 5% stop loss (was 2% - too tight, 0% WR)
+  take_profit_pct: 8.0             # 8% take profit (adjusted for wider stop)
   max_daily_loss_pct: 3.0          # Wider tolerance for daily loss
   max_open_positions: 5            # More positions allowed
 
@@ -43,20 +43,22 @@ promotion_requirements:
   min_trade_count: 30              # At least 30 historical trades
   min_weeks_observed: 2            # Seen across 2+ weeks
 
-# Exit tiers (same logic as 1-min but different holding periods)
+# Exit tiers - FIX (Jan 2, 2026): Wider stops, longer hold, disable EOD close
+# ROOT CAUSE: EOD close killed 55% of trades, 2% stops had 0% win rate
 exit_manager:
-  tier_0_hard_stop: -0.02          # -2% hard stop (wider than 1-min)
+  tier_0_hard_stop: -0.05          # -5% hard stop (was -2%, 0% WR)
   tier_1_profit_floor: 0.02        # +2% profit floor
   tier_2_atr_trailing: 0.03        # +3% ATR trailing
   tier_3_partial_take: 0.04        # +4% partial take profit
-  max_hold_hours: 48               # Max 48 hours (2 days)
+  max_hold_hours: 168              # 1 week (was 48h - too short)
+  eod_close: false                 # DISABLED - was killing profitable trades
 
-# Trailing stop configuration
-# Activates after profit threshold, then trails behind peak price
+# Trailing stop configuration - FIX (Jan 2, 2026): Tighter trailing for faster profit lock
+# Trailing stop exits had 70% win rate - the only profitable exit mechanism
 trailing_stop:
   enabled: true
-  activation_pct: 0.5              # Activate after +0.5% profit
-  trail_pct: 0.5                   # Trail 0.5% behind peak price
+  activation_pct: 0.25             # Activate after +0.25% profit (was 0.5%)
+  trail_pct: 0.25                  # Trail 0.25% behind peak (was 0.5%)
   move_to_breakeven: true          # Move stop to breakeven on activation
 
 # Data quality thresholds for 1-hour

@@ -1,0 +1,86 @@
+broker:
+  live_endpoint: https://api.alpaca.markets
+  paper_endpoint: https://paper-api.alpaca.markets
+capital_allocation:
+  percentage_of_total: 80
+  reserve_cash_pct: 10
+data_quality:
+  min_bars_required: 200
+  stale_threshold_minutes: 60
+  volume_filter_enabled: true
+entry_gate:
+  confidence_threshold: 60
+  daily_loss_guard:
+    enabled: true
+    max_losing_trades_per_day: 3
+  max_trades_per_symbol_per_day: 3
+  min_time_between_trades_minutes: 60
+exit_manager:
+  max_hold_hours: 48
+  tier_0_hard_stop: -0.02
+  tier_1_profit_floor: 0.02
+  tier_2_atr_trailing: 0.03
+  tier_3_partial_take: 0.04
+logging:
+  database: logs/trades_1hour.db
+  detailed_signals: false
+  track_mfe_mae: true
+longs_only: false
+mode: PAPER
+parity_capture:
+  enabled: false
+  flush_interval: 1
+  include_bar_data: true
+  include_indicators: true
+  output_path: logs/parity_capture_1hour.jsonl
+promotion_requirements:
+  min_profit_factor: 1.2
+  min_trade_count: 30
+  min_weeks_observed: 2
+  min_win_rate: 0.45
+purpose: capital
+risk_management:
+  max_daily_loss_pct: 3.0
+  max_open_positions: 5
+  max_portfolio_risk_pct: 15.0
+  max_position_size_pct: 3.0
+  stop_loss_pct: 2.0
+  take_profit_pct: 4.0
+shorts_only: false
+strategies:
+  breakout:
+    enabled: true
+    weight: 0.2
+  mean_reversion:
+    enabled: true
+    weight: 0.25
+  ml_ensemble:
+    enabled: false
+    weight: 0.0
+  momentum:
+    enabled: true
+    weight: 0.35
+  vwap:
+    enabled: false
+    weight: 0.0
+timeframe: 1Hour
+trading:
+  lookback_period: 200
+  warmup_bars: 200
+  watchlist_file: universe.yaml
+trailing_stop:
+  activation_pct: 0.5
+  enabled: true
+  move_to_breakeven: true
+  trail_pct: 0.5
+volatility_scanner:
+  enabled: false
+  min_market_cap: 300000000
+  min_price: 5
+  min_volume: 500000
+  refresh_time: 09:00
+  top_n: 10
+  weights:
+    atr_pct: 0.5
+    daily_range_pct: 0.3
+    volume_ratio: 0.2

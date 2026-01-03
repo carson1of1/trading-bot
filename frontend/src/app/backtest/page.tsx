@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
-import { TestTube, Play, ScanSearch, Loader2 } from "lucide-react";
+import { TestTube, Play, ScanSearch, Loader2, ChevronDown, ChevronRight, TrendingUp, LogOut, BarChart3 } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -12,10 +12,10 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { useMounted } from "@/lib/utils";
-import { runBacktest, BacktestResponse } from "@/lib/api";
+import { runBacktest, BacktestResponse, StrategyBreakdown, ExitReasonBreakdown, SymbolBreakdown } from "@/lib/api";
 
 const TOP_N_OPTIONS = [5, 10, 15, 20, 25];
-const DAYS_OPTIONS = [7, 14, 30, 60, 90];
+const DAYS_OPTIONS = [7, 14, 30, 60, 90, 180, 365];
 
 export default function BacktestPage() {
   const [topN, setTopN] = useState(10);
@@ -25,6 +25,11 @@ export default function BacktestPage() {
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<BacktestResponse | null>(null);
   const mounted = useMounted();
+
+  // Analytics panel expansion state
+  const [strategyExpanded, setStrategyExpanded] = useState(false);
+  const [exitReasonExpanded, setExitReasonExpanded] = useState(false);
+  const [symbolExpanded, setSymbolExpanded] = useState(false);
 
   const handleRunBacktest = async () => {
     setIsLoading(true);
@@ -46,10 +51,19 @@ export default function BacktestPage() {
   };
 
   // Transform equity curve data for the chart
-  const equityCurveData = results?.equity_curve.map((point) => ({
-    date: point.timestamp,
-    value: point.portfolio_value,
-  })) || [];
+  const equityCurveData = results?.equity_curve.map((point) => {
+    // Parse timestamp and format as short date
+    const date = new Date(point.timestamp);
+    const formattedDate = date.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric'
+    });
+    return {
+      date: formattedDate,
+      value: point.portfolio_value,
+      fullTimestamp: point.timestamp, // Keep for tooltip
+    };
+  }) || [];
 
   return (
     <PageWrapper title="Backtesting" subtitle="Test strategies on historical data">
@@ -214,7 +228,7 @@ export default function BacktestPage() {
                 <div className="h-48">
                   {mounted ? (
                     <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={equityCurveData}>
+                      <AreaChart data={equityCurveData} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
                         <defs>
                           <linearGradient id="backtestGradient" x1="0" y1="0" x2="0" y2="1">
                             <stop offset="0%" stopColor="#10b981" stopOpacity={0.3} />
@@ -225,7 +239,8 @@ export default function BacktestPage() {
                           dataKey="date"
                           axisLine={false}
                           tickLine={false}
-                          tick={{ fill: "#71717a", fontSize: 11 }}
+                          tick={{ fill: "#71717a", fontSize: 10 }}
+                          interval="preserveStartEnd"
                         />
                         <YAxis
                           axisLine={false}
@@ -233,15 +248,17 @@ export default function BacktestPage() {
                           tick={{ fill: "#71717a", fontSize: 11 }}
                           tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`}
                           width={55}
+                          domain={['dataMin - 1000', 'dataMax + 1000']}
                         />
                         <Tooltip
-                          content={({ active, payload, label }) => {
+                          content={({ active, payload }) => {
                             if (active && payload && payload.length) {
+                              const data = payload[0].payload;
                               return (
                                 <div className="glass px-3 py-2 border border-border">
-                                  <p className="text-xs text-text-muted">{label}</p>
+                                  <p className="text-xs text-text-muted">{data.date}</p>
                                   <p className="text-sm font-semibold text-emerald mono">
-                                    ${payload[0].value?.toLocaleString()}
+                                    ${Number(payload[0].value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                   </p>
                                 </div>
                               );
@@ -255,6 +272,9 @@ export default function BacktestPage() {
                           stroke="#10b981"
                           strokeWidth={2}
                           fill="url(#backtestGradient)"
+                          dot={false}
+                          activeDot={{ r: 4, fill: "#10b981", stroke: "#fff", strokeWidth: 2 }}
+                          isAnimationActive={false}
                         />
                       </AreaChart>
                     </ResponsiveContainer>
@@ -302,6 +322,171 @@ export default function BacktestPage() {
                   </tbody>
                 </table>
               </div>
+
+              {/* Analytics Panels */}
+              {/* Strategy Performance */}
+              {results.by_strategy && results.by_strategy.length > 0 && (
+                <div className="glass p-5 opacity-0 animate-slide-up stagger-5">
+                  <button
+                    onClick={() => setStrategyExpanded(!strategyExpanded)}
+                    className="flex items-center gap-3 w-full text-left"
+                  >
+                    {strategyExpanded ? (
+                      <ChevronDown className="w-4 h-4 text-text-muted" />
+                    ) : (
+                      <ChevronRight className="w-4 h-4 text-text-muted" />
+                    )}
+                    <div className="p-2 rounded-lg bg-emerald-glow">
+                      <TrendingUp className="w-4 h-4 text-emerald" />
+                    </div>
+                    <h3 className="text-sm font-medium text-text-secondary">
+                      Performance by Strategy
+                    </h3>
+                  </button>
+                  {strategyExpanded && (
+                    <div className="mt-4 overflow-x-auto">
+                      <table className="data-table">
+                        <thead>
+                          <tr>
+                            <th>Strategy</th>
+                            <th>Trades</th>
+                            <th>Win Rate</th>
+                            <th>Total P&L</th>
+                            <th>Avg P&L</th>
+                            <th>Avg MFE%</th>
+                            <th>Avg MAE%</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {results.by_strategy.map((s, i) => (
+                            <tr key={i}>
+                              <td className="font-semibold text-white">{s.strategy}</td>
+                              <td className="text-text-secondary">{s.trades}</td>
+                              <td className={`mono ${s.win_rate >= 50 ? "text-emerald" : "text-red"}`}>
+                                {s.win_rate.toFixed(1)}%
+                              </td>
+                              <td className={`mono font-medium ${s.total_pnl >= 0 ? "pnl-positive" : "pnl-negative"}`}>
+                                {s.total_pnl >= 0 ? "+" : ""}${s.total_pnl.toLocaleString()}
+                              </td>
+                              <td className={`mono ${s.avg_pnl >= 0 ? "text-emerald" : "text-red"}`}>
+                                {s.avg_pnl >= 0 ? "+" : ""}${s.avg_pnl.toFixed(2)}
+                              </td>
+                              <td className="mono text-emerald">{s.avg_mfe_pct.toFixed(2)}%</td>
+                              <td className="mono text-red">{s.avg_mae_pct.toFixed(2)}%</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Exit Reason Breakdown */}
+              {results.by_exit_reason && results.by_exit_reason.length > 0 && (
+                <div className="glass p-5 opacity-0 animate-slide-up stagger-5">
+                  <button
+                    onClick={() => setExitReasonExpanded(!exitReasonExpanded)}
+                    className="flex items-center gap-3 w-full text-left"
+                  >
+                    {exitReasonExpanded ? (
+                      <ChevronDown className="w-4 h-4 text-text-muted" />
+                    ) : (
+                      <ChevronRight className="w-4 h-4 text-text-muted" />
+                    )}
+                    <div className="p-2 rounded-lg bg-amber-500/10">
+                      <LogOut className="w-4 h-4 text-amber-500" />
+                    </div>
+                    <h3 className="text-sm font-medium text-text-secondary">
+                      Exit Reason Breakdown
+                    </h3>
+                  </button>
+                  {exitReasonExpanded && (
+                    <div className="mt-4 overflow-x-auto">
+                      <table className="data-table">
+                        <thead>
+                          <tr>
+                            <th>Exit Reason</th>
+                            <th>Count</th>
+                            <th>% of Trades</th>
+                            <th>Total P&L</th>
+                            <th>Avg P&L</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {results.by_exit_reason.map((e, i) => (
+                            <tr key={i}>
+                              <td className="font-semibold text-white">{e.exit_reason}</td>
+                              <td className="text-text-secondary">{e.count}</td>
+                              <td className="mono text-text-secondary">{e.pct_of_trades.toFixed(1)}%</td>
+                              <td className={`mono font-medium ${e.total_pnl >= 0 ? "pnl-positive" : "pnl-negative"}`}>
+                                {e.total_pnl >= 0 ? "+" : ""}${e.total_pnl.toLocaleString()}
+                              </td>
+                              <td className={`mono ${e.avg_pnl >= 0 ? "text-emerald" : "text-red"}`}>
+                                {e.avg_pnl >= 0 ? "+" : ""}${e.avg_pnl.toFixed(2)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Symbol Performance */}
+              {results.by_symbol && results.by_symbol.length > 0 && (
+                <div className="glass p-5 opacity-0 animate-slide-up stagger-5">
+                  <button
+                    onClick={() => setSymbolExpanded(!symbolExpanded)}
+                    className="flex items-center gap-3 w-full text-left"
+                  >
+                    {symbolExpanded ? (
+                      <ChevronDown className="w-4 h-4 text-text-muted" />
+                    ) : (
+                      <ChevronRight className="w-4 h-4 text-text-muted" />
+                    )}
+                    <div className="p-2 rounded-lg bg-blue-500/10">
+                      <BarChart3 className="w-4 h-4 text-blue-500" />
+                    </div>
+                    <h3 className="text-sm font-medium text-text-secondary">
+                      Performance by Symbol (worst to best)
+                    </h3>
+                  </button>
+                  {symbolExpanded && (
+                    <div className="mt-4 overflow-x-auto max-h-80 overflow-y-auto">
+                      <table className="data-table">
+                        <thead className="sticky top-0 bg-surface-1">
+                          <tr>
+                            <th>Symbol</th>
+                            <th>Trades</th>
+                            <th>Win Rate</th>
+                            <th>Total P&L</th>
+                            <th>Avg P&L</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {results.by_symbol.map((s, i) => (
+                            <tr key={i} className={s.total_pnl < -100 ? "bg-red/5" : s.total_pnl > 500 ? "bg-emerald/5" : ""}>
+                              <td className="font-semibold text-white mono">{s.symbol}</td>
+                              <td className="text-text-secondary">{s.trades}</td>
+                              <td className={`mono ${s.win_rate >= 50 ? "text-emerald" : "text-red"}`}>
+                                {s.win_rate.toFixed(1)}%
+                              </td>
+                              <td className={`mono font-medium ${s.total_pnl >= 0 ? "pnl-positive" : "pnl-negative"}`}>
+                                {s.total_pnl >= 0 ? "+" : ""}${s.total_pnl.toLocaleString()}
+                              </td>
+                              <td className={`mono ${s.avg_pnl >= 0 ? "text-emerald" : "text-red"}`}>
+                                {s.avg_pnl >= 0 ? "+" : ""}${s.avg_pnl.toFixed(2)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
             </>
           ) : (
             <div className="glass p-12 text-center opacity-0 animate-slide-up stagger-2">

@@ -16,6 +16,7 @@ from .reality_checks import (
     RealityCheckSuite,
     run_reality_checks,
 )
+from .run_rolling_walkforward import run_rolling_walkforward, ROLLING_SPLITS
 
 __all__ = [
     # Frozen spec
@@ -37,4 +38,7 @@ __all__ = [
     'ShortDisableAnalyzer',
     'RealityCheckSuite',
     'run_reality_checks',
+    # Rolling walk-forward
+    'run_rolling_walkforward',
+    'ROLLING_SPLITS',
 ]

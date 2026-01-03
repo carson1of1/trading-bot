@@ -1,0 +1,21 @@
+
+> frontend@0.1.0 dev
+> next dev
+
+▲ Next.js 16.1.1 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://192.168.1.109:3000
+- Environments: .env.local
+
+✓ Starting...
+✓ Ready in 669ms
+ GET /backtest 200 in 431ms (compile: 238ms, render: 194ms)
+ GET /backtest 200 in 44ms (compile: 4ms, render: 40ms)
+ GET /backtest 200 in 38ms (compile: 2ms, render: 36ms)
+ GET / 200 in 65ms (compile: 49ms, render: 16ms)
+ GET /positions 200 in 37ms (compile: 23ms, render: 14ms)
+ GET /backtest 200 in 17ms (compile: 5ms, render: 12ms)
+ GET /backtest 200 in 44ms (compile: 2ms, render: 41ms)
+ GET / 200 in 51ms (compile: 2ms, render: 48ms)
+ GET /backtest 200 in 13ms (compile: 2ms, render: 11ms)
+[?25h

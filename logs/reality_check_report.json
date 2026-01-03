@@ -1,0 +1,97 @@
+{
+  "cost_sensitivity": {
+    "0_bps": {
+      "total_return": 3.848691488134675,
+      "profit_factor": 1.1821224672155108,
+      "total_trades": 229,
+      "win_rate": 60.698689956331876,
+      "max_drawdown": 13.842261107913975
+    },
+    "5_bps": {
+      "total_return": 3.848691488134675,
+      "profit_factor": 1.1821224672155108,
+      "total_trades": 229,
+      "win_rate": 60.698689956331876,
+      "max_drawdown": 13.842261107913975
+    },
+    "15_bps": {
+      "total_return": -10.297287470630792,
+      "profit_factor": 0.6532342862239019,
+      "total_trades": 213,
+      "win_rate": 38.967136150234744,
+      "max_drawdown": 22.646856612411074
+    },
+    "is_fragile": "True",
+    "decay_at_15bps": 3.6755294630335578
+  },
+  "delay_sensitivity": {
+    "next_open": {
+      "total_return": 3.848691488134675,
+      "profit_factor": 1.1821224672155108,
+      "total_trades": 229,
+      "description": "Fill at next bar open (current implementation)"
+    },
+    "same_bar": {
+      "total_return": null,
+      "description": "Fill at signal bar close - NOT IMPLEMENTED (unrealistic)"
+    },
+    "next_open_plus_1": {
+      "total_return": null,
+      "description": "Fill at next bar open + 1 bar - NOT IMPLEMENTED"
+    }
+  },
+  "regime_split": {
+    "high_vol": {
+      "months": [
+        "2024-04",
+        "2024-08",
+        "2024-10"
+      ],
+      "total_return": 13.71139015430033,
+      "total_trades": 312,
+      "profit_factor": 1.4622317814679187,
+      "win_rate": 72.11538461538461
+    },
+    "low_vol": {
+      "months": [
+        "2024-01",
+        "2024-02",
+        "2024-03",
+        "2024-05",
+        "2024-06",
+        "2024-07",
+        "2024-09",
+        "2024-11",
+        "2024-12"
+      ],
+      "total_return": 18.553030765475082,
+      "total_trades": 713,
+      "profit_factor": 1.3098517947935433,
+      "win_rate": 65.49789621318372
+    },
+    "regime_dependency": "False"
+  },
+  "short_disable": {
+    "both": {
+      "total_return": 2.8429555636245643,
+      "profit_factor": 1.1067639132032185,
+      "total_trades": 256
+    },
+    "longs_only": {
+      "total_return": 0.3449249694548489,
+      "profit_factor": 1.018435336944191,
+      "total_trades": 187
+    },
+    "shorts_only": {
+      "total_return": 3.380188658755884,
+      "profit_factor": 1.329975344463279,
+      "total_trades": 132
+    },
+    "shorts_helping": "True",
+    "shorts_pf": 1.329975344463279
+  },
+  "warnings": [
+    "FRAGILE: Performance collapses with 15bps friction"
+  ],
+  "generated_at": "2026-01-02T21:47:40.015865"
+}

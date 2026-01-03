@@ -25,6 +25,7 @@ from core.config import get_global_config
 from core.market_hours import is_market_open, get_market_status_message
 from core.scanner import VolatilityScanner
 from core.data import YFinanceDataFetcher
+from core.logger import TradeLogger
 import subprocess
 
 # Broker singleton for API
@@ -82,6 +83,8 @@ class TradeResult(BaseModel):
     exit_reason: str
     strategy: str
     bars_held: int
+    mfe_pct: float = 0.0  # Maximum Favorable Excursion %
+    mae_pct: float = 0.0  # Maximum Adverse Excursion %
 
 
 class BacktestMetrics(BaseModel):
@@ -111,6 +114,37 @@ class EquityCurvePoint(BaseModel):
     portfolio_value: float
 
 
+class StrategyBreakdown(BaseModel):
+    """Performance breakdown by strategy."""
+    strategy: str
+    trades: int
+    wins: int
+    losses: int
+    win_rate: float
+    total_pnl: float
+    avg_pnl: float
+    avg_mfe_pct: float  # Average max favorable excursion
+    avg_mae_pct: float  # Average max adverse excursion
+
+
+class ExitReasonBreakdown(BaseModel):
+    """Performance breakdown by exit reason."""
+    exit_reason: str
+    count: int
+    total_pnl: float
+    avg_pnl: float
+    pct_of_trades: float
+
+
+class SymbolBreakdown(BaseModel):
+    """Performance breakdown by symbol."""
+    symbol: str
+    trades: int
+    total_pnl: float
+    win_rate: float
+    avg_pnl: float
+
+
 class BacktestResponse(BaseModel):
     """Response model for backtest endpoint."""
     success: bool
@@ -118,6 +152,9 @@ class BacktestResponse(BaseModel):
     equity_curve: List[EquityCurvePoint] = []
     trades: List[TradeResult] = []
     symbols_scanned: List[str] = []
+    by_strategy: List[StrategyBreakdown] = []
+    by_exit_reason: List[ExitReasonBreakdown] = []
+    by_symbol: List[SymbolBreakdown] = []  # Sorted worst to best
     error: Optional[str] = None
 
 
@@ -213,6 +250,54 @@ class ScannerResponse(BaseModel):
     scanned_at: str
 
 
+class TradeHistoryItem(BaseModel):
+    """Single trade history item."""
+    id: int
+    date: str
+    symbol: str
+    side: str  # LONG or SHORT
+    entryPrice: float
+    exitPrice: float
+    pnlDollar: float
+    pnlPercent: float
+    holdDuration: str
+    strategy: str
+
+
+class TradeHistoryResponse(BaseModel):
+    """Trade history response."""
+    trades: List[TradeHistoryItem]
+    total_count: int
+
+
+class ActivityItem(BaseModel):
+    """Single activity item for activity feed."""
+    id: int
+    type: str  # 'entry', 'exit', 'system'
+    message: str
+    details: Optional[str] = None
+    timestamp: str
+
+
+class ActivityResponse(BaseModel):
+    """Activity feed response."""
+    activities: List[ActivityItem]
+    total_count: int
+
+
+class RiskMetrics(BaseModel):
+    """Risk monitoring metrics."""
+    daily_loss: float
+    daily_loss_limit: float
+    open_risk: float
+    losing_trades_today: int
+    losing_trades_limit: int
+    largest_position_symbol: str
+    largest_position_percent: float
+    current_drawdown: float
+    position_sizes: List[dict]
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Trading Bot API",
@@ -266,6 +351,133 @@ def collect_scanner_symbols(universe: Dict) -> List[str]:
             unique_symbols.append(symbol)
 
     return unique_symbols
+
+
+def _compute_strategy_breakdown(trades: List[Dict]) -> List[StrategyBreakdown]:
+    """Compute performance breakdown by strategy."""
+    if not trades:
+        return []
+
+    from collections import defaultdict
+
+    strategy_data = defaultdict(lambda: {
+        'trades': 0, 'wins': 0, 'losses': 0,
+        'total_pnl': 0.0, 'mfe_pcts': [], 'mae_pcts': []
+    })
+
+    for trade in trades:
+        strategy = trade.get('strategy', 'Unknown') or 'Unknown'
+        # Normalize strategy name (remove _SHORT suffix for grouping)
+        if strategy.endswith('_SHORT'):
+            strategy = strategy[:-6]
+
+        pnl = trade.get('pnl', 0) or 0
+        strategy_data[strategy]['trades'] += 1
+        strategy_data[strategy]['total_pnl'] += pnl
+        if pnl > 0:
+            strategy_data[strategy]['wins'] += 1
+        elif pnl < 0:
+            strategy_data[strategy]['losses'] += 1
+
+        mfe_pct = trade.get('mfe_pct', 0) or 0
+        mae_pct = trade.get('mae_pct', 0) or 0
+        strategy_data[strategy]['mfe_pcts'].append(mfe_pct)
+        strategy_data[strategy]['mae_pcts'].append(mae_pct)
+
+    result = []
+    for strategy, data in strategy_data.items():
+        trade_count = data['trades']
+        win_rate = (data['wins'] / trade_count * 100) if trade_count > 0 else 0
+        avg_pnl = data['total_pnl'] / trade_count if trade_count > 0 else 0
+        avg_mfe = sum(data['mfe_pcts']) / len(data['mfe_pcts']) if data['mfe_pcts'] else 0
+        avg_mae = sum(data['mae_pcts']) / len(data['mae_pcts']) if data['mae_pcts'] else 0
+
+        result.append(StrategyBreakdown(
+            strategy=strategy,
+            trades=trade_count,
+            wins=data['wins'],
+            losses=data['losses'],
+            win_rate=round(win_rate, 1),
+            total_pnl=round(data['total_pnl'], 2),
+            avg_pnl=round(avg_pnl, 2),
+            avg_mfe_pct=round(avg_mfe, 2),
+            avg_mae_pct=round(avg_mae, 2)
+        ))
+
+    # Sort by total_pnl descending (best first)
+    result.sort(key=lambda x: x.total_pnl, reverse=True)
+    return result
+
+
+def _compute_exit_reason_breakdown(trades: List[Dict]) -> List[ExitReasonBreakdown]:
+    """Compute performance breakdown by exit reason."""
+    if not trades:
+        return []
+
+    from collections import defaultdict
+
+    exit_data = defaultdict(lambda: {'count': 0, 'total_pnl': 0.0})
+    total_trades = len(trades)
+
+    for trade in trades:
+        reason = trade.get('exit_reason', 'unknown') or 'unknown'
+        pnl = trade.get('pnl', 0) or 0
+        exit_data[reason]['count'] += 1
+        exit_data[reason]['total_pnl'] += pnl
+
+    result = []
+    for reason, data in exit_data.items():
+        count = data['count']
+        avg_pnl = data['total_pnl'] / count if count > 0 else 0
+        pct_of_trades = (count / total_trades * 100) if total_trades > 0 else 0
+
+        result.append(ExitReasonBreakdown(
+            exit_reason=reason,
+            count=count,
+            total_pnl=round(data['total_pnl'], 2),
+            avg_pnl=round(avg_pnl, 2),
+            pct_of_trades=round(pct_of_trades, 1)
+        ))
+
+    # Sort by count descending (most common first)
+    result.sort(key=lambda x: x.count, reverse=True)
+    return result
+
+
+def _compute_symbol_breakdown(trades: List[Dict]) -> List[SymbolBreakdown]:
+    """Compute performance breakdown by symbol, sorted worst to best."""
+    if not trades:
+        return []
+
+    from collections import defaultdict
+
+    symbol_data = defaultdict(lambda: {'trades': 0, 'wins': 0, 'total_pnl': 0.0})
+
+    for trade in trades:
+        symbol = trade.get('symbol', 'Unknown') or 'Unknown'
+        pnl = trade.get('pnl', 0) or 0
+        symbol_data[symbol]['trades'] += 1
+        symbol_data[symbol]['total_pnl'] += pnl
+        if pnl > 0:
+            symbol_data[symbol]['wins'] += 1
+
+    result = []
+    for symbol, data in symbol_data.items():
+        trade_count = data['trades']
+        win_rate = (data['wins'] / trade_count * 100) if trade_count > 0 else 0
+        avg_pnl = data['total_pnl'] / trade_count if trade_count > 0 else 0
+
+        result.append(SymbolBreakdown(
+            symbol=symbol,
+            trades=trade_count,
+            total_pnl=round(data['total_pnl'], 2),
+            win_rate=round(win_rate, 1),
+            avg_pnl=round(avg_pnl, 2)
+        ))
+
+    # Sort by total_pnl ascending (worst first to highlight drags)
+    result.sort(key=lambda x: x.total_pnl)
+    return result
 
 
 def format_backtest_results(results: Dict, symbols_scanned: List[str]) -> BacktestResponse:
@@ -384,15 +596,25 @@ def format_backtest_results(results: Dict, symbols_scanned: List[str]) -> Backte
             pnl_pct=round(trade.get("pnl_pct", 0), 2),
             exit_reason=trade.get("exit_reason", ""),
             strategy=trade.get("strategy", ""),
-            bars_held=int(trade.get("bars_held", 0))
+            bars_held=int(trade.get("bars_held", 0)),
+            mfe_pct=round(trade.get("mfe_pct", 0), 2),
+            mae_pct=round(trade.get("mae_pct", 0), 2)
         ))
+
+    # Compute analytics breakdowns
+    by_strategy = _compute_strategy_breakdown(raw_trades)
+    by_exit_reason = _compute_exit_reason_breakdown(raw_trades)
+    by_symbol = _compute_symbol_breakdown(raw_trades)
 
     return BacktestResponse(
         success=True,
         metrics=metrics,
         equity_curve=equity_curve,
         trades=trades,
-        symbols_scanned=symbols_scanned
+        symbols_scanned=symbols_scanned,
+        by_strategy=by_strategy,
+        by_exit_reason=by_exit_reason,
+        by_symbol=by_symbol
     )
 
 
@@ -565,11 +787,11 @@ async def start_bot():
         historical_data = {}
         for symbol in scanner_symbols[:100]:  # Limit to avoid timeout
             try:
-                data = fetcher.fetch_historical_data(
+                data = fetcher.get_historical_data_range(
                     symbol,
-                    start=start_date.strftime('%Y-%m-%d'),
-                    end=end_date.strftime('%Y-%m-%d'),
-                    interval='1h'
+                    timeframe='1Hour',
+                    start_date=start_date.strftime('%Y-%m-%d'),
+                    end_date=end_date.strftime('%Y-%m-%d')
                 )
                 if data is not None and not data.empty:
                     historical_data[symbol] = data
@@ -787,6 +1009,267 @@ async def run_backtest(request: BacktestRequest):
             success=False,
             error=str(e)
         )
+
+
+def _format_hold_duration(entry_ts, exit_ts) -> str:
+    """Format hold duration as human-readable string."""
+    if not entry_ts or not exit_ts:
+        return "N/A"
+
+    try:
+        # Parse timestamps if they're strings
+        if isinstance(entry_ts, str):
+            entry_ts = datetime.fromisoformat(entry_ts.replace('Z', '+00:00'))
+        if isinstance(exit_ts, str):
+            exit_ts = datetime.fromisoformat(exit_ts.replace('Z', '+00:00'))
+
+        delta = exit_ts - entry_ts
+        total_hours = delta.total_seconds() / 3600
+
+        if total_hours < 1:
+            return f"{int(delta.total_seconds() / 60)}m"
+        elif total_hours < 24:
+            return f"{int(total_hours)}h"
+        else:
+            days = int(total_hours // 24)
+            hours = int(total_hours % 24)
+            if hours > 0:
+                return f"{days}d {hours}h"
+            return f"{days}d"
+    except Exception:
+        return "N/A"
+
+
+@app.get("/api/trades/history", response_model=TradeHistoryResponse)
+async def get_trade_history(days: int = 30):
+    """
+    Get trade history for the specified number of days.
+
+    Returns closed trades with P&L information.
+    """
+    try:
+        logger = TradeLogger()
+        df = logger.get_trade_history(days=days)
+
+        if df.empty:
+            return TradeHistoryResponse(trades=[], total_count=0)
+
+        # Filter to only closed trades (have exit_price)
+        closed_trades = df[df['status'] == 'closed'].copy()
+
+        if closed_trades.empty:
+            return TradeHistoryResponse(trades=[], total_count=0)
+
+        trades = []
+        for _, row in closed_trades.iterrows():
+            # Determine side from action
+            action = row.get('action', 'BUY')
+            side = 'SHORT' if action == 'SHORT' else 'LONG'
+
+            # Get prices
+            entry_price = float(row.get('price', 0) or 0)
+            exit_price = float(row.get('exit_price', 0) or 0)
+            pnl = float(row.get('pnl', 0) or 0)
+
+            # Calculate P&L percent
+            value = float(row.get('value', 0) or 0)
+            if value > 0:
+                pnl_percent = (pnl / value) * 100
+            elif entry_price > 0:
+                qty = float(row.get('quantity', 0) or 0)
+                if qty > 0:
+                    pnl_percent = (pnl / (entry_price * qty)) * 100
+                else:
+                    pnl_percent = 0
+            else:
+                pnl_percent = 0
+
+            # Format date
+            timestamp = row.get('exit_timestamp') or row.get('timestamp')
+            if hasattr(timestamp, 'strftime'):
+                date_str = timestamp.strftime('%Y-%m-%d %H:%M')
+            else:
+                date_str = str(timestamp)[:16] if timestamp else 'N/A'
+
+            # Calculate hold duration
+            hold_duration = _format_hold_duration(
+                row.get('timestamp'),
+                row.get('exit_timestamp')
+            )
+
+            trades.append(TradeHistoryItem(
+                id=int(row.get('id', 0)),
+                date=date_str,
+                symbol=str(row.get('symbol', '')),
+                side=side,
+                entryPrice=round(entry_price, 2),
+                exitPrice=round(exit_price, 2),
+                pnlDollar=round(pnl, 2),
+                pnlPercent=round(pnl_percent, 2),
+                holdDuration=hold_duration,
+                strategy=str(row.get('strategy', 'Unknown') or 'Unknown')
+            ))
+
+        return TradeHistoryResponse(
+            trades=trades,
+            total_count=len(trades)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/activity", response_model=ActivityResponse)
+async def get_activity(limit: int = 50):
+    """
+    Get recent activity feed combining trades and system events.
+    """
+    try:
+        logger = TradeLogger()
+        df = logger.get_trade_history(days=7)
+
+        activities = []
+        activity_id = 1
+
+        if not df.empty:
+            for _, row in df.iterrows():
+                action = row.get('action', '')
+                symbol = row.get('symbol', '')
+                status = row.get('status', '')
+
+                # Entry activity
+                if action in ('BUY', 'SHORT'):
+                    side = 'LONG' if action == 'BUY' else 'SHORT'
+                    qty = int(row.get('quantity', 0) or 0)
+                    price = float(row.get('price', 0) or 0)
+                    strategy = row.get('strategy', 'Unknown') or 'Unknown'
+                    confidence = row.get('confidence', 0) or 0
+
+                    timestamp = row.get('timestamp')
+                    if hasattr(timestamp, 'strftime'):
+                        ts_str = timestamp.strftime('%H:%M:%S')
+                    else:
+                        ts_str = str(timestamp)[11:19] if timestamp else 'N/A'
+
+                    activities.append(ActivityItem(
+                        id=activity_id,
+                        type='entry',
+                        message=f"Opened {side} position: {symbol}",
+                        details=f"{qty} shares @ ${price:.2f} | {strategy} strategy | {confidence}% confidence",
+                        timestamp=ts_str
+                    ))
+                    activity_id += 1
+
+                # Exit activity (for closed trades)
+                if status == 'closed' and row.get('exit_price'):
+                    pnl = float(row.get('pnl', 0) or 0)
+                    exit_reason = row.get('exit_reason', 'Unknown') or 'Unknown'
+                    pnl_sign = '+' if pnl >= 0 else ''
+
+                    # Calculate P&L percent
+                    value = float(row.get('value', 0) or 0)
+                    if value > 0:
+                        pnl_pct = (pnl / value) * 100
+                    else:
+                        pnl_pct = 0
+
+                    exit_ts = row.get('exit_timestamp')
+                    if hasattr(exit_ts, 'strftime'):
+                        ts_str = exit_ts.strftime('%H:%M:%S')
+                    else:
+                        ts_str = str(exit_ts)[11:19] if exit_ts else 'N/A'
+
+                    side = 'LONG' if action == 'BUY' else 'SHORT'
+                    activities.append(ActivityItem(
+                        id=activity_id,
+                        type='exit',
+                        message=f"Closed {side} position: {symbol}",
+                        details=f"{exit_reason} | {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.1f}%)",
+                        timestamp=ts_str
+                    ))
+                    activity_id += 1
+
+        # Sort by timestamp descending and limit
+        activities = activities[:limit]
+
+        return ActivityResponse(
+            activities=activities,
+            total_count=len(activities)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/risk", response_model=RiskMetrics)
+async def get_risk_metrics():
+    """
+    Get current risk monitoring metrics.
+    """
+    try:
+        broker = get_broker()
+        config = load_config()
+        logger = TradeLogger()
+
+        # Get account info
+        account = broker.get_account()
+        positions = broker.get_positions()
+
+        # Get today's trades
+        df = logger.get_trade_history(days=1)
+
+        # Calculate daily loss from today's closed trades
+        daily_loss = 0.0
+        losing_trades_today = 0
+        if not df.empty:
+            closed_today = df[df['status'] == 'closed']
+            if not closed_today.empty:
+                pnl_values = closed_today['pnl'].fillna(0)
+                daily_loss = abs(min(0, pnl_values.sum()))
+                losing_trades_today = len(closed_today[closed_today['pnl'] < 0])
+
+        # Risk config
+        risk_config = config.get('risk', {})
+        daily_loss_limit = risk_config.get('daily_loss_limit', 1000)
+        losing_trades_limit = risk_config.get('max_losing_trades', 5)
+
+        # Calculate position sizes
+        portfolio_value = account.portfolio_value
+        position_sizes = []
+        largest_symbol = "None"
+        largest_percent = 0.0
+
+        for pos in positions:
+            pct = (pos.market_value / portfolio_value * 100) if portfolio_value > 0 else 0
+            position_sizes.append({
+                "symbol": pos.symbol,
+                "size": round(pct, 1)
+            })
+            if pct > largest_percent:
+                largest_percent = pct
+                largest_symbol = pos.symbol
+
+        # Sort by size descending
+        position_sizes.sort(key=lambda x: x['size'], reverse=True)
+
+        # Calculate open risk (total unrealized loss exposure)
+        total_unrealized = sum(pos.unrealized_pl for pos in positions)
+        open_risk = abs(min(0, total_unrealized)) / portfolio_value * 100 if portfolio_value > 0 else 0
+
+        # Calculate drawdown from daily P&L
+        current_drawdown = abs(account.daily_pnl_percent * 100) if account.daily_pnl < 0 else 0
+
+        return RiskMetrics(
+            daily_loss=round(daily_loss, 2),
+            daily_loss_limit=daily_loss_limit,
+            open_risk=round(open_risk, 2),
+            losing_trades_today=losing_trades_today,
+            losing_trades_limit=losing_trades_limit,
+            largest_position_symbol=largest_symbol,
+            largest_position_percent=round(largest_percent, 1),
+            current_drawdown=round(current_drawdown, 2),
+            position_sizes=position_sizes[:10]  # Top 10
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

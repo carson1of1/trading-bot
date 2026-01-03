@@ -28,6 +28,8 @@ export interface TradeResult {
   exit_reason: string;
   strategy: string;
   bars_held: number;
+  mfe_pct: number;  // Maximum Favorable Excursion %
+  mae_pct: number;  // Maximum Adverse Excursion %
 }
 
 export interface BacktestMetrics {
@@ -55,12 +57,44 @@ export interface EquityPoint {
   portfolio_value: number;
 }
 
+// Analytics breakdown types
+export interface StrategyBreakdown {
+  strategy: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  total_pnl: number;
+  avg_pnl: number;
+  avg_mfe_pct: number;
+  avg_mae_pct: number;
+}
+
+export interface ExitReasonBreakdown {
+  exit_reason: string;
+  count: number;
+  total_pnl: number;
+  avg_pnl: number;
+  pct_of_trades: number;
+}
+
+export interface SymbolBreakdown {
+  symbol: string;
+  trades: number;
+  total_pnl: number;
+  win_rate: number;
+  avg_pnl: number;
+}
+
 export interface BacktestResponse {
   success: boolean;
   metrics: BacktestMetrics | null;
   equity_curve: EquityPoint[];
   trades: TradeResult[];
   symbols_scanned: string[];
+  by_strategy: StrategyBreakdown[];
+  by_exit_reason: ExitReasonBreakdown[];
+  by_symbol: SymbolBreakdown[];
   error?: string;
 }
 
@@ -261,6 +295,85 @@ export async function runScanner(topN: number = 10): Promise<ScannerData> {
   const response = await fetch(`${API_BASE_URL}/api/scanner/scan?top_n=${topN}`);
   if (!response.ok) {
     throw new Error(`Failed to run scanner: ${response.status}`);
+  }
+  return response.json();
+}
+
+// =============================================================================
+// Trade History Types and API
+// =============================================================================
+
+export interface TradeHistoryItem {
+  id: number;
+  date: string;
+  symbol: string;
+  side: "LONG" | "SHORT";
+  entryPrice: number;
+  exitPrice: number;
+  pnlDollar: number;
+  pnlPercent: number;
+  holdDuration: string;
+  strategy: string;
+}
+
+export interface TradeHistoryData {
+  trades: TradeHistoryItem[];
+  total_count: number;
+}
+
+export async function getTradeHistory(days: number = 30): Promise<TradeHistoryData> {
+  const response = await fetch(`${API_BASE_URL}/api/trades/history?days=${days}`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch trade history: ${response.status}`);
+  }
+  return response.json();
+}
+
+// =============================================================================
+// Activity Feed Types and API
+// =============================================================================
+
+export interface ActivityItem {
+  id: number;
+  type: "entry" | "exit" | "system" | "skipped" | "error";
+  message: string;
+  details?: string;
+  timestamp: string;
+}
+
+export interface ActivityData {
+  activities: ActivityItem[];
+  total_count: number;
+}
+
+export async function getActivity(limit: number = 50): Promise<ActivityData> {
+  const response = await fetch(`${API_BASE_URL}/api/activity?limit=${limit}`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch activity: ${response.status}`);
+  }
+  return response.json();
+}
+
+// =============================================================================
+// Risk Metrics Types and API
+// =============================================================================
+
+export interface RiskMetrics {
+  daily_loss: number;
+  daily_loss_limit: number;
+  open_risk: number;
+  losing_trades_today: number;
+  losing_trades_limit: number;
+  largest_position_symbol: string;
+  largest_position_percent: number;
+  current_drawdown: number;
+  position_sizes: { symbol: string; size: number }[];
+}
+
+export async function getRiskMetrics(): Promise<RiskMetrics> {
+  const response = await fetch(`${API_BASE_URL}/api/risk`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch risk metrics: ${response.status}`);
   }
   return response.json();
 }

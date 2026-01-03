@@ -1,0 +1,32 @@
+{
+  "config": {
+    "start_date": "2025-01-03",
+    "end_date": "2026-01-03",
+    "symbols_count": 400,
+    "scanner_top_n": 10,
+    "initial_capital": 100000,
+    "longs_only": false,
+    "shorts_only": false
+  },
+  "metrics": {
+    "initial_capital": 100000,
+    "final_value": 169984.45615868602,
+    "total_return_pct": 69.98445615868603,
+    "total_pnl": 69984.45615868598,
+    "total_trades": 1291,
+    "winning_trades": 979,
+    "losing_trades": 312,
+    "win_rate": 75.83268783888458,
+    "profit_factor": 1.3762423499730803,
+    "avg_pnl": 54.20949353887377,
+    "avg_win": 261.4846141383791,
+    "avg_loss": -596.1826316755996,
+    "max_drawdown": 19.396912970129026,
+    "sharpe_ratio": -1.9129282979649564,
+    "best_trade": 3607.214389060635,
+    "worst_trade": -9683.906077451466,
+    "avg_bars_held": 2.9690162664601085
+  },
+  "trade_count": 1291,
+  "generated_at": "2026-01-03T09:47:14.807603"
+}

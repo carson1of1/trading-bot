@@ -152,7 +152,7 @@ class TestBotStartWithScanner:
 
             # Mock fetcher
             mock_fetcher_instance = MagicMock()
-            mock_fetcher_instance.fetch_historical_data.return_value = MagicMock(empty=False)
+            mock_fetcher_instance.get_historical_data_range.return_value = MagicMock(empty=False)
             MockFetcher.return_value = mock_fetcher_instance
 
             response = client.post("/api/bot/start")
@@ -188,7 +188,7 @@ class TestBotStartWithScanner:
 
             # Mock fetcher
             mock_fetcher_instance = MagicMock()
-            mock_fetcher_instance.fetch_historical_data.return_value = MagicMock(empty=False)
+            mock_fetcher_instance.get_historical_data_range.return_value = MagicMock(empty=False)
             MockFetcher.return_value = mock_fetcher_instance
 
             response = client.post("/api/bot/start")
@@ -210,7 +210,7 @@ class TestBotStartWithScanner:
 
             # Mock fetcher
             mock_fetcher_instance = MagicMock()
-            mock_fetcher_instance.fetch_historical_data.return_value = MagicMock(empty=False)
+            mock_fetcher_instance.get_historical_data_range.return_value = MagicMock(empty=False)
             MockFetcher.return_value = mock_fetcher_instance
 
             response = client.post("/api/bot/start")
@@ -236,7 +236,7 @@ class TestBotStartWithScanner:
 
             # Mock fetcher
             mock_fetcher_instance = MagicMock()
-            mock_fetcher_instance.fetch_historical_data.return_value = MagicMock(empty=False)
+            mock_fetcher_instance.get_historical_data_range.return_value = MagicMock(empty=False)
             MockFetcher.return_value = mock_fetcher_instance
 
             response = client.post("/api/bot/start")
@@ -275,7 +275,7 @@ class TestFullScannerBotIntegration:
             MockScanner.return_value = mock_scanner_instance
 
             mock_fetcher_instance = MagicMock()
-            mock_fetcher_instance.fetch_historical_data.return_value = MagicMock(empty=False)
+            mock_fetcher_instance.get_historical_data_range.return_value = MagicMock(empty=False)
             MockFetcher.return_value = mock_fetcher_instance
 
             # Start bot
@@ -324,7 +324,7 @@ class TestFullScannerBotIntegration:
             MockScanner.return_value = mock_scanner
 
             mock_fetcher = MagicMock()
-            mock_fetcher.fetch_historical_data.return_value = MagicMock(empty=False)
+            mock_fetcher.get_historical_data_range.return_value = MagicMock(empty=False)
             MockFetcher.return_value = mock_fetcher
 
             response = client.post("/api/bot/start")
@@ -343,7 +343,7 @@ class TestFullScannerBotIntegration:
             MockScanner.return_value = mock_scanner
 
             mock_fetcher = MagicMock()
-            mock_fetcher.fetch_historical_data.return_value = MagicMock(empty=False)
+            mock_fetcher.get_historical_data_range.return_value = MagicMock(empty=False)
             MockFetcher.return_value = mock_fetcher
 
             response = client.post("/api/bot/start")
