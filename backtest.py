@@ -1014,6 +1014,11 @@ class Backtest1Hour:
                     day['low'] = min(day['low'], self.portfolio_value)
                     day['close'] = self.portfolio_value
 
+                # Log when transitioning to new day
+                if bar_date_str and hasattr(self, '_prev_bar_date') and self._prev_bar_date != bar_date_str:
+                    self._log_daily_summary(self._prev_bar_date)
+                self._prev_bar_date = bar_date_str
+
             # ============ PROCESS PENDING ENTRY ============
             # FIX (Jan 2026): Check kill switch BEFORE processing pending entry
             # Bug: Pending entries from previous bar would execute even after kill switch triggered
@@ -1598,10 +1603,37 @@ class Backtest1Hour:
 
             if self.portfolio_value > self.peak_value:
                 self.peak_value = self.portfolio_value
+                # New peak means new drawdown window starts
+                self.drawdown_peak_value = self.portfolio_value
+                self.drawdown_peak_date = timestamp
 
             drawdown = (self.peak_value - self.portfolio_value) / self.peak_value
             if drawdown > self.max_drawdown:
                 self.max_drawdown = drawdown
+                self.drawdown_trough_value = self.portfolio_value
+                self.drawdown_trough_date = timestamp
+
+            # Track daily equity high/low
+            bar_date_str = pd.to_datetime(timestamp).strftime('%Y-%m-%d') if timestamp else None
+            if bar_date_str:
+                if bar_date_str not in self.daily_equity_snapshots:
+                    # New day - save previous day if exists
+                    self.daily_equity_snapshots[bar_date_str] = {
+                        'open': self.portfolio_value,
+                        'high': self.portfolio_value,
+                        'low': self.portfolio_value,
+                        'close': self.portfolio_value
+                    }
+                else:
+                    day = self.daily_equity_snapshots[bar_date_str]
+                    day['high'] = max(day['high'], self.portfolio_value)
+                    day['low'] = min(day['low'], self.portfolio_value)
+                    day['close'] = self.portfolio_value
+
+                # Log when transitioning to new day
+                if bar_date_str and hasattr(self, '_prev_bar_date') and self._prev_bar_date != bar_date_str:
+                    self._log_daily_summary(self._prev_bar_date)
+                self._prev_bar_date = bar_date_str
 
             # ============ PROCESS PENDING ENTRY ============
             pending_entry = state['pending_entry']
@@ -1819,6 +1851,25 @@ class Backtest1Hour:
         daily_drops.sort(key=lambda x: x['change_pct'])
         return daily_drops[:top_n]
 
+    def _log_daily_summary(self, date_str: str):
+        """Log daily equity summary to console."""
+        if date_str not in self.daily_equity_snapshots:
+            return
+
+        day = self.daily_equity_snapshots[date_str]
+        change_pct = (day['close'] - day['open']) / day['open'] * 100 if day['open'] > 0 else 0
+        change_dollars = day['close'] - day['open']
+
+        # Calculate current drawdown from peak
+        current_dd = (self.peak_value - day['close']) / self.peak_value * 100 if self.peak_value > 0 else 0
+
+        logger.info(
+            f"[DAILY] {date_str} | "
+            f"Open: ${day['open']:,.2f} | Close: ${day['close']:,.2f} | "
+            f"Change: {change_pct:+.2f}% (${change_dollars:+,.2f}) | "
+            f"DD from peak: {current_dd:.1f}%"
+        )
+
     def calculate_metrics(self, trades: List[Dict]) -> Dict:
         """
         Calculate comprehensive performance metrics.
@@ -2004,6 +2055,31 @@ class Backtest1Hour:
         }
 
         logger.info(f"Backtest complete: {len(all_trades)} trades, Total P&L: ${self.total_pnl:,.2f}")
+
+        # Log final daily summary
+        if hasattr(self, '_prev_bar_date') and self._prev_bar_date:
+            self._log_daily_summary(self._prev_bar_date)
+
+        # Log drawdown analysis
+        logger.info("=" * 60)
+        logger.info("DRAWDOWN ANALYSIS")
+        logger.info("=" * 60)
+        if self.drawdown_peak_date:
+            logger.info(f"Peak: ${self.drawdown_peak_value:,.2f} on {self.drawdown_peak_date}")
+        if self.drawdown_trough_date:
+            logger.info(f"Trough: ${self.drawdown_trough_value:,.2f} on {self.drawdown_trough_date}")
+        logger.info(f"Max Drawdown: {self.max_drawdown * 100:.1f}%")
+
+        worst_days = self._get_worst_daily_drops(10)
+        if worst_days:
+            logger.info("\nTop 10 Worst Days:")
+            for i, day in enumerate(worst_days, 1):
+                logger.info(
+                    f"  {i}. {day['date']}: {day['change_pct']:+.2f}% "
+                    f"(${day['change_dollars']:+,.2f}) | "
+                    f"${day['open']:,.2f} -> ${day['close']:,.2f}"
+                )
+        logger.info("=" * 60)
 
         # Log scanner diagnostic summary
         if self.scanner_enabled:
