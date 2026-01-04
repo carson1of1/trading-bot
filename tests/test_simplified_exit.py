@@ -82,3 +82,81 @@ class TestPositionRegistration:
         mgr = SimplifiedExitManager()
         with pytest.raises(ValueError, match="ATR must be positive"):
             mgr.register_position('AAPL', 100.0, 10, atr=float('nan'))
+
+
+class TestATRStopEvaluation:
+    """Test ATR-based stop (Phase 1: Entry -> +2R)"""
+
+    def test_triggers_exit_when_price_hits_stop(self):
+        """Should trigger full exit when price <= stop"""
+        mgr = SimplifiedExitManager({'atr_multiplier': 2.0})
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+        # R = $5, stop at $95
+
+        # Price drops to stop level
+        result = mgr.evaluate_exit('AAPL', current_price=95.0)
+
+        assert result is not None
+        assert result['action'] == 'full_exit'
+        assert result['reason'] == 'atr_stop'
+        assert result['qty'] == 10
+
+    def test_triggers_exit_when_price_below_stop(self):
+        """Should trigger exit when price goes through stop (gap down)"""
+        mgr = SimplifiedExitManager({'atr_multiplier': 2.0})
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+        # Stop at $95
+
+        result = mgr.evaluate_exit('AAPL', current_price=93.0)  # Below stop
+
+        assert result is not None
+        assert result['action'] == 'full_exit'
+        assert result['reason'] == 'atr_stop'
+
+    def test_no_exit_when_price_above_stop(self):
+        """Should not exit when price is above stop"""
+        mgr = SimplifiedExitManager({'atr_multiplier': 2.0})
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+        # Stop at $95
+
+        result = mgr.evaluate_exit('AAPL', current_price=96.0)
+
+        assert result is None
+
+    def test_no_exit_when_price_at_entry(self):
+        """Should not exit at entry price"""
+        mgr = SimplifiedExitManager()
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.0)
+
+        result = mgr.evaluate_exit('AAPL', current_price=100.0)
+
+        assert result is None
+
+    def test_no_exit_when_in_profit(self):
+        """Should not exit when price is in profit (before +2R)"""
+        mgr = SimplifiedExitManager({'atr_multiplier': 2.0})
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+        # +2R = $110
+
+        result = mgr.evaluate_exit('AAPL', current_price=108.0)  # +1.6R
+
+        assert result is None
+
+    def test_returns_none_for_unknown_symbol(self):
+        """Should return None for unknown symbol"""
+        mgr = SimplifiedExitManager()
+
+        result = mgr.evaluate_exit('UNKNOWN', current_price=100.0)
+
+        assert result is None
+
+    def test_returns_r_multiple_in_result(self):
+        """Should include current R-multiple in exit result"""
+        mgr = SimplifiedExitManager({'atr_multiplier': 2.0})
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+        # R = $5, stop at $95 = -1R
+
+        result = mgr.evaluate_exit('AAPL', current_price=95.0)
+
+        assert 'r_multiple' in result
+        assert result['r_multiple'] == -1.0

@@ -154,3 +154,58 @@ class SimplifiedExitManager:
         )
 
         return pos
+
+    def evaluate_exit(
+        self,
+        symbol: str,
+        current_price: float
+    ) -> Optional[dict]:
+        """
+        Evaluate exit conditions for a position.
+
+        This is the CORE METHOD called on every price update.
+
+        Args:
+            symbol: Stock symbol
+            current_price: Current market price
+
+        Returns:
+            None if no action, or dict with:
+            - action: 'full_exit' or 'partial_exit'
+            - reason: Exit reason string
+            - qty: Shares to close
+            - r_multiple: Current R-multiple
+            - stop_price: Stop price that triggered exit
+        """
+        if symbol not in self.positions:
+            return None
+
+        pos = self.positions[symbol]
+
+        # Calculate current R-multiple
+        r_multiple = (current_price - pos.entry_price) / pos.r_value
+
+        # Update peak R-multiple
+        if r_multiple > pos.peak_r_multiple:
+            pos.peak_r_multiple = r_multiple
+
+        # ================================================================
+        # PHASE 1: ATR STOP (always active)
+        # Stop is at -1R from entry, or tightened if floor active
+        # ================================================================
+        if current_price <= pos.stop_price:
+            self.logger.info(
+                f"SIMPLIFIED_EXIT | {symbol} | ATR_STOP_TRIGGERED | "
+                f"Price: ${current_price:.2f}, Stop: ${pos.stop_price:.2f}, "
+                f"R: {r_multiple:+.2f}"
+            )
+            return {
+                'action': 'full_exit',
+                'reason': self.REASON_ATR_STOP,
+                'qty': pos.quantity,
+                'r_multiple': round(r_multiple, 2),
+                'stop_price': pos.stop_price
+            }
+
+        # No exit triggered
+        return None
