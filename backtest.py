@@ -156,6 +156,10 @@ class Backtest1Hour:
         # Max hold hours from config
         self.max_hold_hours = exit_config.get('max_hold_hours', self.DEFAULT_MAX_HOLD_BARS)
 
+        # BUG FIX (Jan 4, 2026): Enforce max concurrent positions
+        # Previously no limit was enforced, causing 62%+ daily losses from over-allocation
+        self.max_open_positions = risk_config.get('max_open_positions', 5)
+
         # Daily loss kill switch
         self.max_daily_loss_pct = risk_config.get('max_daily_loss_pct', 3.0) / 100
         self.daily_loss_kill_switch_enabled = True
@@ -717,6 +721,10 @@ class Backtest1Hour:
                     highest_price = bar_high
                 if not pd.isna(bar_low) and bar_low < lowest_price:
                     lowest_price = bar_low
+
+                # FIX (Jan 2026): Increment bars held for ExitManager time-based logic
+                if self.use_tiered_exits and self.exit_manager and symbol in self.exit_manager.positions:
+                    self.exit_manager.increment_bars_held(symbol)
 
                 # ============ EMERGENCY STOP (UNREALIZED LOSS) ============
                 # FIX (Jan 2026): Force close if unrealized daily loss exceeds threshold
@@ -1384,6 +1392,10 @@ class Backtest1Hour:
                     lowest_price = bar_low
                     state['lowest_price'] = lowest_price
 
+                # FIX (Jan 2026): Increment bars held for ExitManager time-based logic
+                if self.use_tiered_exits and self.exit_manager and symbol in self.exit_manager.positions:
+                    self.exit_manager.increment_bars_held(symbol)
+
                 # ============ EMERGENCY STOP (UNREALIZED LOSS) ============
                 # FIX (Jan 2026): Force close if unrealized daily loss exceeds threshold
                 if self.emergency_stop_enabled and not exit_triggered:
@@ -1470,6 +1482,13 @@ class Backtest1Hour:
                         exit_reason = exit_action['reason']
                         if exit_reason == 'hard_stop':
                             exit_reason = 'stop_loss'
+                        exit_qty = exit_action.get('qty', shares)
+
+                        # FIX (Jan 2026): Use stop_price from ExitManager for accurate exit pricing
+                        if exit_reason in ['stop_loss', 'profit_floor', 'atr_trailing']:
+                            exit_price = exit_action.get('stop_price', current_price) * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
+                        else:
+                            exit_price = current_price * (1 - self.EXIT_SLIPPAGE - self.BID_ASK_SPREAD)
 
                 # FIX (Jan 2026): Hard stop for SHORT when tiered exits enabled
                 # BUG: ExitManager only handles LONG, SHORT had NO stop loss protection!
@@ -1656,6 +1675,24 @@ class Backtest1Hour:
                         })
                     state['pending_entry'] = None
                 else:
+                    # BUG FIX (Jan 4, 2026): Check max concurrent positions for pending entries too
+                    open_position_count = sum(
+                        1 for s in symbol_state.values()
+                        if s['position_direction'] is not None
+                    )
+                    if open_position_count >= self.max_open_positions:
+                        if self.kill_switch_trace:
+                            self._kill_switch_trace_log.append({
+                                'event': 'ENTRY_BLOCKED',
+                                'timestamp': str(timestamp),
+                                'symbol': symbol,
+                                'entry_type': 'pending_fill',
+                                'kill_switch_triggered': False,
+                                'block_reason': f'max_positions ({open_position_count}/{self.max_open_positions})',
+                                'direction': pending_entry.get('direction', 'UNKNOWN')
+                            })
+                        state['pending_entry'] = None
+                        continue
                     # Process the pending entry
                     open_price = row.get('open', current_price)
                     direction = pending_entry.get('direction', 'LONG')
@@ -1740,6 +1777,25 @@ class Backtest1Hour:
                                     'entry_type': 'new_signal',
                                     'kill_switch_triggered': True,
                                     'block_reason': 'kill_switch',
+                                    'direction': 'LONG' if signal == 1 else 'SHORT'
+                                })
+                            continue
+
+                        # BUG FIX (Jan 4, 2026): Check max concurrent positions
+                        # Previously no limit was enforced, causing 62%+ daily losses
+                        open_position_count = sum(
+                            1 for s in symbol_state.values()
+                            if s['position_direction'] is not None
+                        )
+                        if open_position_count >= self.max_open_positions:
+                            if self.kill_switch_trace:
+                                self._kill_switch_trace_log.append({
+                                    'event': 'ENTRY_BLOCKED',
+                                    'timestamp': str(timestamp),
+                                    'symbol': symbol,
+                                    'entry_type': 'new_signal',
+                                    'kill_switch_triggered': False,
+                                    'block_reason': f'max_positions ({open_position_count}/{self.max_open_positions})',
                                     'direction': 'LONG' if signal == 1 else 'SHORT'
                                 })
                             continue
