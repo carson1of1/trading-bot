@@ -1887,11 +1887,13 @@ class Backtest1Hour:
         existing.append(log_entry)
         existing = existing[-50:]  # Keep last 50
 
-        with open(self._analytics_log_file, 'w') as f:
-            for entry in existing:
-                f.write(json.dumps(entry) + '\n')
-
-        logger.info(f"Analytics saved to {self._analytics_log_file}")
+        try:
+            with open(self._analytics_log_file, 'w') as f:
+                for entry in existing:
+                    f.write(json.dumps(entry) + '\n')
+            logger.info(f"Analytics saved to {self._analytics_log_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save analytics log: {e}")
 
     def _log_daily_summary(self, date_str: str):
         """Log daily equity summary to console."""
