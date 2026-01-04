@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, Optional
 
+import pandas as pd
 import pytz
 
 
@@ -103,3 +104,53 @@ class SimplifiedExitManager:
             f"Floor at +{self.profit_floor_r}R → stop at {self.floor_stop_r}R, "
             f"Partial at +{self.partial_exit_r}R ({self.partial_exit_pct*100:.0f}%)"
         )
+
+    def register_position(
+        self,
+        symbol: str,
+        entry_price: float,
+        quantity: int,
+        atr: float,
+        entry_time: datetime = None
+    ) -> RBasedPosition:
+        """
+        Register a new position for R-based exit management.
+
+        Args:
+            symbol: Stock symbol
+            entry_price: Entry price per share
+            quantity: Number of shares
+            atr: ATR(14) value at entry time
+            entry_time: Entry timestamp (defaults to now)
+
+        Returns:
+            RBasedPosition object
+
+        Raises:
+            ValueError: If ATR is zero, negative, or NaN
+        """
+        # Validate ATR
+        if atr is None or pd.isna(atr) or atr <= 0:
+            raise ValueError(f"ATR must be positive, got: {atr}")
+
+        if entry_time is None:
+            entry_time = datetime.now(pytz.UTC)
+
+        pos = RBasedPosition(
+            symbol=symbol,
+            entry_price=entry_price,
+            entry_time=entry_time,
+            quantity=quantity,
+            atr_at_entry=atr,
+            atr_multiplier=self.atr_multiplier
+        )
+
+        self.positions[symbol] = pos
+
+        self.logger.info(
+            f"SIMPLIFIED_EXIT | {symbol} | REGISTERED | "
+            f"Entry: ${entry_price:.2f}, ATR: ${atr:.2f}, "
+            f"R: ${pos.r_value:.2f}, Stop: ${pos.stop_price:.2f} (-1R)"
+        )
+
+        return pos
