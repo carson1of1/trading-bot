@@ -155,6 +155,10 @@ class SimplifiedExitManager:
 
         return pos
 
+    def get_position(self, symbol: str) -> Optional[RBasedPosition]:
+        """Get position state for a symbol."""
+        return self.positions.get(symbol)
+
     def evaluate_exit(
         self,
         symbol: str,
@@ -190,18 +194,35 @@ class SimplifiedExitManager:
             pos.peak_r_multiple = r_multiple
 
         # ================================================================
-        # PHASE 1: ATR STOP (always active)
-        # Stop is at -1R from entry, or tightened if floor active
+        # PHASE 2: PROFIT FLOOR (activates at +2R)
+        # Move stop to -0.25R from entry (NOT trailing)
+        # ================================================================
+        if not pos.profit_floor_active and r_multiple >= self.profit_floor_r:
+            pos.profit_floor_active = True
+            # Move stop to floor level (-0.25R from entry)
+            new_stop = pos.entry_price + (self.floor_stop_r * pos.r_value)
+            pos.stop_price = new_stop
+
+            self.logger.info(
+                f"SIMPLIFIED_EXIT | {symbol} | PROFIT_FLOOR_ACTIVATED | "
+                f"R: {r_multiple:+.2f}, Stop moved to ${new_stop:.2f} ({self.floor_stop_r}R)"
+            )
+
+        # ================================================================
+        # PHASE 1: STOP CHECK (always active)
+        # Stop is at -1R initially, or -0.25R if floor active
         # ================================================================
         if current_price <= pos.stop_price:
+            reason = self.REASON_PROFIT_FLOOR if pos.profit_floor_active else self.REASON_ATR_STOP
+
             self.logger.info(
-                f"SIMPLIFIED_EXIT | {symbol} | ATR_STOP_TRIGGERED | "
-                f"Price: ${current_price:.2f}, Stop: ${pos.stop_price:.2f}, "
-                f"R: {r_multiple:+.2f}"
+                f"SIMPLIFIED_EXIT | {symbol} | STOP_TRIGGERED | "
+                f"Reason: {reason}, Price: ${current_price:.2f}, "
+                f"Stop: ${pos.stop_price:.2f}, R: {r_multiple:+.2f}"
             )
             return {
                 'action': 'full_exit',
-                'reason': self.REASON_ATR_STOP,
+                'reason': reason,
                 'qty': pos.quantity,
                 'r_multiple': round(r_multiple, 2),
                 'stop_price': pos.stop_price

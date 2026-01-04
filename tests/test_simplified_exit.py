@@ -160,3 +160,88 @@ class TestATRStopEvaluation:
 
         assert 'r_multiple' in result
         assert result['r_multiple'] == -1.0
+
+
+class TestProfitFloorActivation:
+    """Test profit floor at +2R (Phase 2: +2R → +3R)"""
+
+    def test_activates_floor_at_2r(self):
+        """Should activate profit floor when price reaches +2R"""
+        mgr = SimplifiedExitManager({'atr_multiplier': 2.0, 'profit_floor_r': 2.0})
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+        # R = $5, +2R = $110
+
+        # Price reaches +2R
+        mgr.evaluate_exit('AAPL', current_price=110.0)
+
+        pos = mgr.get_position('AAPL')
+        assert pos.profit_floor_active is True
+
+    def test_moves_stop_to_floor_level_on_activation(self):
+        """Should move stop to -0.25R when floor activates"""
+        mgr = SimplifiedExitManager({
+            'atr_multiplier': 2.0,
+            'profit_floor_r': 2.0,
+            'floor_stop_r': -0.25
+        })
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+        # R = $5, initial stop at $95 (-1R)
+        # Floor stop = entry + (-0.25 × $5) = $98.75
+
+        # Price reaches +2R
+        mgr.evaluate_exit('AAPL', current_price=110.0)
+
+        pos = mgr.get_position('AAPL')
+        assert pos.stop_price == 98.75  # -0.25R from entry
+
+    def test_stop_does_not_trail_after_floor(self):
+        """Stop should NOT trail price after floor activation"""
+        mgr = SimplifiedExitManager({
+            'atr_multiplier': 2.0,
+            'profit_floor_r': 2.0,
+            'floor_stop_r': -0.25
+        })
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+        # R = $5, floor stop = $98.75
+
+        # Activate floor at +2R
+        mgr.evaluate_exit('AAPL', current_price=110.0)
+
+        # Price goes higher to +3R
+        mgr.evaluate_exit('AAPL', current_price=115.0)
+
+        # Stop should NOT have moved - it stays at -0.25R
+        pos = mgr.get_position('AAPL')
+        assert pos.stop_price == 98.75
+
+    def test_floor_triggers_exit_at_floor_stop(self):
+        """Should exit when price falls to floor stop"""
+        mgr = SimplifiedExitManager({
+            'atr_multiplier': 2.0,
+            'profit_floor_r': 2.0,
+            'floor_stop_r': -0.25
+        })
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+
+        # Activate floor at +2R
+        mgr.evaluate_exit('AAPL', current_price=110.0)
+
+        # Price falls to floor stop ($98.75)
+        result = mgr.evaluate_exit('AAPL', current_price=98.75)
+
+        assert result is not None
+        assert result['action'] == 'full_exit'
+        assert result['reason'] == 'profit_floor'
+
+    def test_floor_not_activated_before_2r(self):
+        """Should not activate floor before +2R"""
+        mgr = SimplifiedExitManager({'atr_multiplier': 2.0, 'profit_floor_r': 2.0})
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+        # +2R = $110
+
+        # Price at +1.5R = $107.50
+        mgr.evaluate_exit('AAPL', current_price=107.50)
+
+        pos = mgr.get_position('AAPL')
+        assert pos.profit_floor_active is False
+        assert pos.stop_price == 95.0  # Still at original -1R
