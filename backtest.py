@@ -183,6 +183,10 @@ class Backtest1Hour:
         # State tracking
         self._reset_state()
 
+        # Setup dedicated backtest analytics log file
+        self._analytics_log_file = Path('logs/backtest_analytics.log')
+        self._analytics_log_file.parent.mkdir(parents=True, exist_ok=True)
+
     def _load_config(self) -> Dict:
         """Load configuration from config.yaml."""
         config_path = Path(__file__).parent / 'config.yaml'
@@ -1851,6 +1855,44 @@ class Backtest1Hour:
         daily_drops.sort(key=lambda x: x['change_pct'])
         return daily_drops[:top_n]
 
+    def _write_analytics_log(self, results: Dict):
+        """Write backtest analytics to persistent log file."""
+        import json
+        from datetime import datetime as dt
+
+        log_entry = {
+            'timestamp': dt.now().isoformat(),
+            'initial_capital': self.initial_capital,
+            'final_value': self.cash,
+            'total_return_pct': (self.cash - self.initial_capital) / self.initial_capital * 100,
+            'max_drawdown_pct': self.max_drawdown * 100,
+            'drawdown_peak_date': str(self.drawdown_peak_date) if self.drawdown_peak_date else None,
+            'drawdown_peak_value': self.drawdown_peak_value,
+            'drawdown_trough_date': str(self.drawdown_trough_date) if self.drawdown_trough_date else None,
+            'drawdown_trough_value': self.drawdown_trough_value,
+            'worst_days': self._get_worst_daily_drops(10),
+            'total_trades': len(results.get('trades', [])),
+            'symbols': results.get('symbols', [])
+        }
+
+        # Append to log file (keep last 50 entries)
+        existing = []
+        if self._analytics_log_file.exists():
+            try:
+                with open(self._analytics_log_file, 'r') as f:
+                    existing = [json.loads(line) for line in f if line.strip()]
+            except Exception:
+                existing = []
+
+        existing.append(log_entry)
+        existing = existing[-50:]  # Keep last 50
+
+        with open(self._analytics_log_file, 'w') as f:
+            for entry in existing:
+                f.write(json.dumps(entry) + '\n')
+
+        logger.info(f"Analytics saved to {self._analytics_log_file}")
+
     def _log_daily_summary(self, date_str: str):
         """Log daily equity summary to console."""
         if date_str not in self.daily_equity_snapshots:
@@ -2122,6 +2164,8 @@ class Backtest1Hour:
             if non_scanned_trades:
                 logger.warning(f"BUG: Non-scanned symbols traded: {sorted(non_scanned_trades)}")
             logger.info("=" * 60)
+
+        self._write_analytics_log(results)
 
         return results
 
