@@ -338,3 +338,48 @@ class TestPartialExit:
         pos = mgr.get_position('AAPL')
         assert pos.profit_floor_active is True  # Floor activated
         assert result['action'] == 'partial_exit'  # Partial triggered
+
+
+class TestPositionManagement:
+    """Test position lifecycle management"""
+
+    def test_unregister_position(self):
+        """Should remove position from tracking"""
+        mgr = SimplifiedExitManager()
+        mgr.register_position('AAPL', 100.0, 10, atr=2.0)
+
+        result = mgr.unregister_position('AAPL')
+
+        assert result is True
+        assert 'AAPL' not in mgr.positions
+
+    def test_unregister_nonexistent_returns_false(self):
+        """Should return False for nonexistent symbol"""
+        mgr = SimplifiedExitManager()
+
+        result = mgr.unregister_position('UNKNOWN')
+
+        assert result is False
+
+    def test_get_all_positions(self):
+        """Should return copy of all positions"""
+        mgr = SimplifiedExitManager()
+        mgr.register_position('AAPL', 100.0, 10, atr=2.0)
+        mgr.register_position('NVDA', 200.0, 5, atr=4.0)
+
+        positions = mgr.get_all_positions()
+
+        assert len(positions) == 2
+        assert 'AAPL' in positions
+        assert 'NVDA' in positions
+
+
+class TestImportFromCore:
+    """Test that SimplifiedExitManager is exported from core"""
+
+    def test_import_from_core(self):
+        """Should be importable from core module"""
+        from core import SimplifiedExitManager
+
+        mgr = SimplifiedExitManager()
+        assert mgr is not None

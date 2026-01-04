@@ -262,3 +262,15 @@ class SimplifiedExitManager:
 
         # No exit triggered
         return None
+
+    def unregister_position(self, symbol: str) -> bool:
+        """Remove position from tracking."""
+        if symbol in self.positions:
+            del self.positions[symbol]
+            self.logger.info(f"SIMPLIFIED_EXIT | {symbol} | UNREGISTERED")
+            return True
+        return False
+
+    def get_all_positions(self) -> Dict[str, RBasedPosition]:
+        """Get copy of all tracked positions."""
+        return self.positions.copy()
