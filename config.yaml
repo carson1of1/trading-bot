@@ -24,7 +24,8 @@ risk_management:
   max_portfolio_risk_pct: 15.0     # Max 15% total risk
   stop_loss_pct: 5.0               # 5% stop loss (was 2% - too tight, 0% WR)
   take_profit_pct: 8.0             # 8% take profit (adjusted for wider stop)
-  max_daily_loss_pct: 3.0          # Wider tolerance for daily loss
+  max_daily_loss_pct: 2.0          # 2% daily loss limit - hard stop for the day
+  emergency_stop_pct: 5.0          # 5% UNREALIZED loss = force close ALL positions
   max_open_positions: 5            # More positions allowed
 
 # Proven thresholds - only take high-confidence trades

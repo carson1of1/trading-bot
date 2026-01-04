@@ -78,11 +78,12 @@ class Backtest1Hour:
 
     def __init__(
         self,
-        initial_capital: float = 100000.0,
+        initial_capital: float = 10000.0,
         config: Dict = None,
         longs_only: bool = False,
         shorts_only: bool = False,
-        scanner_enabled: bool = None
+        scanner_enabled: bool = None,
+        kill_switch_trace: bool = False
     ):
         """
         Initialize the backtester.
@@ -159,6 +160,11 @@ class Backtest1Hour:
         self.max_daily_loss_pct = risk_config.get('max_daily_loss_pct', 3.0) / 100
         self.daily_loss_kill_switch_enabled = True
 
+        # Emergency stop - force close ALL positions if unrealized loss exceeds threshold
+        # FIX (Jan 2026): Added after $4K loss on single SHORT with no stop
+        self.emergency_stop_pct = risk_config.get('emergency_stop_pct', 5.0) / 100
+        self.emergency_stop_enabled = True
+
         # EOD close simulation - Respects config setting to match live trading
         # When disabled (default), positions are NOT force-closed at EOD
         self.eod_close_bar_hour = 15  # Close on bars starting at 3 PM or later
@@ -170,6 +176,9 @@ class Backtest1Hour:
         self.trailing_activation_pct = trailing_config.get('activation_pct', 0.25) / 100  # 0.25%
         self.trailing_trail_pct = trailing_config.get('trail_pct', 0.25) / 100  # 0.25%
         self.trailing_move_to_breakeven = trailing_config.get('move_to_breakeven', True)
+
+        # Kill switch trace logging (for debugging)
+        self.kill_switch_trace = kill_switch_trace
 
         # State tracking
         self._reset_state()
@@ -204,6 +213,9 @@ class Backtest1Hour:
         self.daily_starting_capital = self.initial_capital
         self.current_trading_day = None
         self.kill_switch_triggered = False
+
+        # Kill switch trace logging (for debugging) - reset trace log
+        self._kill_switch_trace_log = []  # Stores trace events
 
         # Reset entry gate
         if self.entry_gate:
@@ -666,6 +678,17 @@ class Backtest1Hour:
                 self.daily_starting_capital = self.portfolio_value
                 self.kill_switch_triggered = False
 
+                # TRACE POINT A: Start of trading day
+                if self.kill_switch_trace:
+                    self._kill_switch_trace_log.append({
+                        'event': 'DAY_START',
+                        'timestamp': str(timestamp),
+                        'day': str(bar_date),
+                        'day_start_equity': self.daily_starting_capital,
+                        'daily_pnl': 0.0,
+                        'kill_switch_triggered': False
+                    })
+
             # ============ EXIT LOGIC (runs first, every bar) ============
             # FIX (Jan 2026): Exit precedence order: hard stop > trailing > time exit > EOD
             # This ensures catastrophic losses are prevented even if trailing stop is active
@@ -680,6 +703,27 @@ class Backtest1Hour:
                     highest_price = bar_high
                 if not pd.isna(bar_low) and bar_low < lowest_price:
                     lowest_price = bar_low
+
+                # ============ EMERGENCY STOP (UNREALIZED LOSS) ============
+                # FIX (Jan 2026): Force close if unrealized daily loss exceeds threshold
+                # This catches catastrophic losses before they wipe the account
+                if self.emergency_stop_enabled and not exit_triggered:
+                    if position_direction == 'LONG':
+                        unrealized_pnl = (current_price - entry_price) * shares
+                    else:  # SHORT
+                        unrealized_pnl = (entry_price - current_price) * shares
+
+                    total_daily_loss = self.daily_pnl + unrealized_pnl
+                    if self.daily_starting_capital > 0:
+                        total_daily_loss_pct = -total_daily_loss / self.daily_starting_capital
+                        if total_daily_loss_pct >= self.emergency_stop_pct:
+                            exit_triggered = True
+                            if position_direction == 'LONG':
+                                exit_price = current_price * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
+                            else:
+                                exit_price = current_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
+                            exit_reason = 'emergency_stop'
+                            logger.warning(f"EMERGENCY STOP: {symbol} - Daily loss {total_daily_loss_pct*100:.1f}% >= {self.emergency_stop_pct*100:.1f}%")
 
                 # ============ TRAILING STOP LOGIC ============
                 # Trailing stop runs FIRST (before hard stop) to match live/API behavior
@@ -753,6 +797,15 @@ class Backtest1Hour:
                             exit_price = exit_action.get('stop_price', current_price) * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
                         else:
                             exit_price = current_price * (1 - self.EXIT_SLIPPAGE - self.BID_ASK_SPREAD)
+
+                # FIX (Jan 2026): Hard stop for SHORT when tiered exits enabled
+                # BUG: ExitManager only handles LONG, SHORT had NO stop loss protection!
+                # This caused 41%+ losses on SHORT positions that ran for max_hold (1 week)
+                if not exit_triggered and position_direction == 'SHORT' and self.use_tiered_exits:
+                    if bar_high >= stop_loss_price:
+                        exit_triggered = True
+                        exit_price = stop_loss_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
+                        exit_reason = 'stop_loss'
 
                 # Legacy exit logic for LONG (take profit and signal exit only)
                 if not exit_triggered and position_direction == 'LONG' and not self.use_tiered_exits:
@@ -828,9 +881,11 @@ class Backtest1Hour:
                             self.entry_gate.record_loss(timestamp)
 
                     # Track daily P&L for kill switch
+                    kill_switch_before = self.kill_switch_triggered
                     self.daily_pnl += pnl
 
                     # Check kill switch after each trade
+                    daily_loss_pct = 0.0
                     if self.daily_loss_kill_switch_enabled and self.daily_starting_capital > 0:
                         daily_loss_pct = -self.daily_pnl / self.daily_starting_capital
                         if daily_loss_pct >= self.max_daily_loss_pct:
@@ -838,6 +893,21 @@ class Backtest1Hour:
                                 self.kill_switch_triggered = True
                                 logger.info(f"KILL SWITCH TRIGGERED: Daily loss {daily_loss_pct*100:.2f}% >= {self.max_daily_loss_pct*100:.1f}%")
                                 self._diag_entry_blocks[symbol]['kill_switch'] += 1
+
+                    # TRACE POINT B: Trade close
+                    if self.kill_switch_trace:
+                        self._kill_switch_trace_log.append({
+                            'event': 'TRADE_CLOSE',
+                            'timestamp': str(timestamp),
+                            'symbol': symbol,
+                            'realized_pnl': pnl,
+                            'daily_pnl_after': self.daily_pnl,
+                            'day_start_equity': self.daily_starting_capital,
+                            'daily_loss_pct': daily_loss_pct * 100,
+                            'kill_switch_before': kill_switch_before,
+                            'kill_switch_after': self.kill_switch_triggered,
+                            'kill_switch_threshold_pct': self.max_daily_loss_pct * 100
+                        })
 
                     # MFE/MAE calculation
                     if position_direction == 'LONG':
@@ -922,6 +992,19 @@ class Backtest1Hour:
                     self._diag_entry_blocks[symbol]['kill_switch'] += 1
                     if bar_date is not None:
                         self._diag_kill_switch_blocks_per_day[str(bar_date)] += 1
+
+                    # TRACE POINT C: Pending entry BLOCKED by kill switch
+                    if self.kill_switch_trace:
+                        self._kill_switch_trace_log.append({
+                            'event': 'ENTRY_BLOCKED',
+                            'timestamp': str(timestamp),
+                            'symbol': symbol,
+                            'entry_type': 'pending_fill',
+                            'kill_switch_triggered': True,
+                            'block_reason': 'kill_switch',
+                            'direction': pending_entry.get('direction', 'UNKNOWN')
+                        })
+
                     pending_entry = None  # Discard the pending entry
                 else:
                     # Process the pending entry
@@ -980,6 +1063,19 @@ class Backtest1Hour:
                         if self.entry_gate:
                             self.entry_gate.record_entry(symbol, timestamp)
 
+                        # TRACE POINT C: Entry EXECUTED (pending fill succeeded)
+                        if self.kill_switch_trace:
+                            self._kill_switch_trace_log.append({
+                                'event': 'ENTRY_EXECUTED',
+                                'timestamp': str(timestamp),
+                                'symbol': symbol,
+                                'entry_type': 'pending_fill',
+                                'kill_switch_triggered': self.kill_switch_triggered,
+                                'direction': direction,
+                                'entry_price': entry_price,
+                                'shares': shares
+                            })
+
                     pending_entry = None
 
             # ============ CHECK FOR NEW ENTRY ============
@@ -993,6 +1089,19 @@ class Backtest1Hour:
                             self._diag_entry_blocks[symbol]['kill_switch'] += 1
                             if bar_date is not None:
                                 self._diag_kill_switch_blocks_per_day[str(bar_date)] += 1
+
+                            # TRACE POINT C: New signal BLOCKED by kill switch
+                            if self.kill_switch_trace:
+                                self._kill_switch_trace_log.append({
+                                    'event': 'ENTRY_BLOCKED',
+                                    'timestamp': str(timestamp),
+                                    'symbol': symbol,
+                                    'entry_type': 'new_signal',
+                                    'kill_switch_triggered': True,
+                                    'block_reason': 'kill_switch',
+                                    'direction': 'LONG' if signal == 1 else 'SHORT'
+                                })
+
                             continue
 
                         # Check entry gate
@@ -1009,6 +1118,18 @@ class Backtest1Hour:
                                     self._diag_entry_blocks[symbol]['time_filter'] += 1
                                 else:
                                     self._diag_entry_blocks[symbol]['other'] += 1
+
+                                # TRACE POINT C: New signal BLOCKED by entry gate
+                                if self.kill_switch_trace:
+                                    self._kill_switch_trace_log.append({
+                                        'event': 'ENTRY_BLOCKED',
+                                        'timestamp': str(timestamp),
+                                        'symbol': symbol,
+                                        'entry_type': 'new_signal',
+                                        'kill_switch_triggered': self.kill_switch_triggered,
+                                        'block_reason': reason,
+                                        'direction': 'LONG' if signal == 1 else 'SHORT'
+                                    })
 
                         if entry_allowed:
                             if signal == 1:  # BUY -> LONG
@@ -1094,6 +1215,549 @@ class Backtest1Hour:
                 self.exit_manager.unregister_position(symbol)
 
         return trades
+
+    def simulate_trades_interleaved(self, signals_data: Dict[str, pd.DataFrame]) -> List[Dict]:
+        """
+        Simulate trading across ALL symbols interleaved by timestamp.
+
+        This ensures portfolio-wide daily P&L tracking and kill switch
+        works across all symbols, not per-symbol.
+
+        Args:
+            signals_data: Dict mapping symbol -> DataFrame with signals
+
+        Returns:
+            List of all trades across all symbols
+        """
+        all_trades = []
+
+        # Per-symbol state tracking
+        symbol_state = {}
+        for symbol in signals_data:
+            symbol_state[symbol] = {
+                'position_direction': None,
+                'entry_price': 0.0,
+                'entry_index': 0,
+                'entry_time': None,
+                'shares': 0,
+                'stop_loss_price': 0.0,
+                'take_profit_price': 0.0,
+                'highest_price': 0.0,
+                'lowest_price': float('inf'),
+                'last_trade_bar': -999,
+                'pending_entry': None,
+                'entry_strategy': '',
+                'entry_reasoning': '',
+                'trailing_activated': False,
+                'trailing_stop_price': 0.0,
+                'bar_count': 0,
+            }
+
+        # Build unified timeline: list of (timestamp, symbol, row_index, row)
+        timeline = []
+        for symbol, data in signals_data.items():
+            for i in range(len(data)):
+                row = data.iloc[i]
+                ts = row.get('timestamp', i)
+                # Normalize timestamp for sorting
+                if isinstance(ts, str):
+                    ts = pd.to_datetime(ts)
+                timeline.append((ts, symbol, i, row, data))
+
+        # Sort by timestamp
+        timeline.sort(key=lambda x: x[0])
+
+        # Process each bar in chronological order
+        for ts, symbol, i, row, data in timeline:
+            state = symbol_state[symbol]
+            state['bar_count'] += 1
+
+            current_price = row['close']
+            timestamp = row.get('timestamp', i)
+
+            # Skip NaN prices
+            if pd.isna(current_price) or pd.isna(row.get('open')) or pd.isna(row.get('high')) or pd.isna(row.get('low')):
+                continue
+
+            bar_high = row.get('high', current_price)
+            bar_low = row.get('low', current_price)
+
+            # ============ DAILY RESET (PORTFOLIO-WIDE) ============
+            bar_datetime = None
+            bar_hour = None
+            bar_date = None
+
+            if isinstance(timestamp, (datetime, pd.Timestamp)):
+                bar_datetime = timestamp
+                bar_hour = timestamp.hour
+                bar_date = timestamp.date() if hasattr(timestamp, 'date') else None
+            elif isinstance(timestamp, str):
+                try:
+                    bar_datetime = pd.to_datetime(timestamp)
+                    bar_hour = bar_datetime.hour
+                    bar_date = bar_datetime.date()
+                except:
+                    pass
+
+            # Reset daily P&L on new trading day (portfolio-wide)
+            if bar_date is not None and bar_date != self.current_trading_day:
+                if self.current_trading_day is not None:
+                    logger.debug(f"New trading day: {bar_date}, resetting daily P&L (was ${self.daily_pnl:.2f})")
+                self.current_trading_day = bar_date
+                self.daily_pnl = 0.0
+                self.daily_starting_capital = self.portfolio_value
+                self.kill_switch_triggered = False
+
+                # TRACE POINT A: Start of trading day
+                if self.kill_switch_trace:
+                    self._kill_switch_trace_log.append({
+                        'event': 'DAY_START',
+                        'timestamp': str(timestamp),
+                        'day': str(bar_date),
+                        'day_start_equity': self.daily_starting_capital,
+                        'daily_pnl': 0.0,
+                        'kill_switch_triggered': False
+                    })
+
+            position_direction = state['position_direction']
+            entry_price = state['entry_price']
+            shares = state['shares']
+            highest_price = state['highest_price']
+            lowest_price = state['lowest_price']
+            trailing_activated = state['trailing_activated']
+            trailing_stop_price = state['trailing_stop_price']
+            stop_loss_price = state['stop_loss_price']
+
+            # ============ EXIT LOGIC ============
+            if position_direction is not None:
+                exit_triggered = False
+                exit_reason = ''
+                exit_price = current_price
+                exit_qty = shares
+
+                # Update price tracking
+                if not pd.isna(bar_high) and bar_high > highest_price:
+                    highest_price = bar_high
+                    state['highest_price'] = highest_price
+                if not pd.isna(bar_low) and bar_low < lowest_price:
+                    lowest_price = bar_low
+                    state['lowest_price'] = lowest_price
+
+                # ============ EMERGENCY STOP (UNREALIZED LOSS) ============
+                # FIX (Jan 2026): Force close if unrealized daily loss exceeds threshold
+                if self.emergency_stop_enabled and not exit_triggered:
+                    if position_direction == 'LONG':
+                        unrealized_pnl = (current_price - entry_price) * shares
+                    else:  # SHORT
+                        unrealized_pnl = (entry_price - current_price) * shares
+
+                    total_daily_loss = self.daily_pnl + unrealized_pnl
+                    if self.daily_starting_capital > 0:
+                        total_daily_loss_pct = -total_daily_loss / self.daily_starting_capital
+                        if total_daily_loss_pct >= self.emergency_stop_pct:
+                            exit_triggered = True
+                            if position_direction == 'LONG':
+                                exit_price = current_price * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
+                            else:
+                                exit_price = current_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
+                            exit_reason = 'emergency_stop'
+                            logger.warning(f"EMERGENCY STOP: {symbol} - Daily loss {total_daily_loss_pct*100:.1f}% >= {self.emergency_stop_pct*100:.1f}%")
+
+                # Trailing stop logic
+                if self.trailing_stop_enabled and not exit_triggered:
+                    if position_direction == 'LONG':
+                        current_profit_pct = (highest_price - entry_price) / entry_price
+                        if not trailing_activated and current_profit_pct >= self.trailing_activation_pct:
+                            trailing_activated = True
+                            state['trailing_activated'] = True
+                            if self.trailing_move_to_breakeven:
+                                trailing_stop_price = entry_price
+                            else:
+                                trailing_stop_price = highest_price * (1 - self.trailing_trail_pct)
+                            state['trailing_stop_price'] = trailing_stop_price
+
+                        if trailing_activated:
+                            new_trail_price = highest_price * (1 - self.trailing_trail_pct)
+                            if new_trail_price > trailing_stop_price:
+                                trailing_stop_price = new_trail_price
+                                state['trailing_stop_price'] = trailing_stop_price
+
+                            if bar_low <= trailing_stop_price:
+                                exit_triggered = True
+                                exit_price = trailing_stop_price * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
+                                exit_reason = 'trailing_stop'
+
+                    elif position_direction == 'SHORT':
+                        current_profit_pct = (entry_price - lowest_price) / entry_price
+                        if not trailing_activated and current_profit_pct >= self.trailing_activation_pct:
+                            trailing_activated = True
+                            state['trailing_activated'] = True
+                            if self.trailing_move_to_breakeven:
+                                trailing_stop_price = entry_price
+                            else:
+                                trailing_stop_price = lowest_price * (1 + self.trailing_trail_pct)
+                            state['trailing_stop_price'] = trailing_stop_price
+
+                        if trailing_activated:
+                            new_trail_price = lowest_price * (1 + self.trailing_trail_pct)
+                            if new_trail_price < trailing_stop_price or trailing_stop_price == 0:
+                                trailing_stop_price = new_trail_price
+                                state['trailing_stop_price'] = trailing_stop_price
+
+                            if bar_high >= trailing_stop_price:
+                                exit_triggered = True
+                                exit_price = trailing_stop_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
+                                exit_reason = 'trailing_stop'
+
+                # Hard stop check
+                if not exit_triggered and not self.use_tiered_exits:
+                    if position_direction == 'LONG' and bar_low <= stop_loss_price:
+                        exit_triggered = True
+                        exit_price = stop_loss_price * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
+                        exit_reason = 'stop_loss'
+                    elif position_direction == 'SHORT' and bar_high >= stop_loss_price:
+                        exit_triggered = True
+                        exit_price = stop_loss_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
+                        exit_reason = 'stop_loss'
+
+                # Tiered exits via ExitManager
+                if not exit_triggered and position_direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
+                    current_atr = self._calculate_atr(data, i, period=14)
+                    exit_action = self.exit_manager.evaluate_exit(symbol, bar_low, current_atr)
+                    if exit_action:
+                        exit_triggered = True
+                        exit_reason = exit_action['reason']
+                        if exit_reason == 'hard_stop':
+                            exit_reason = 'stop_loss'
+
+                # FIX (Jan 2026): Hard stop for SHORT when tiered exits enabled
+                # BUG: ExitManager only handles LONG, SHORT had NO stop loss protection!
+                if not exit_triggered and position_direction == 'SHORT' and self.use_tiered_exits:
+                    if bar_high >= stop_loss_price:
+                        exit_triggered = True
+                        exit_price = stop_loss_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
+                        exit_reason = 'stop_loss'
+
+                # Max hold time
+                if not exit_triggered:
+                    entry_time_val = state['entry_time']
+                    if entry_time_val is not None and bar_datetime is not None:
+                        elapsed = bar_datetime - entry_time_val
+                        elapsed_hours = elapsed.total_seconds() / 3600
+                    else:
+                        elapsed_hours = state['bar_count'] - state['entry_index']
+
+                    if elapsed_hours >= self.max_hold_hours:
+                        exit_triggered = True
+                        if position_direction == 'LONG':
+                            exit_price = current_price * (1 - self.EXIT_SLIPPAGE - self.BID_ASK_SPREAD)
+                        else:
+                            exit_price = current_price * (1 + self.EXIT_SLIPPAGE + self.BID_ASK_SPREAD)
+                        exit_reason = 'max_hold'
+
+                bars_held = state['bar_count'] - state['entry_index']
+
+                # Execute exit
+                if exit_triggered:
+                    if position_direction == 'LONG':
+                        proceeds = shares * exit_price * (1 - self.COMMISSION)
+                        self.cash += proceeds
+                        entry_cost = shares * entry_price * (1 + self.COMMISSION)
+                        pnl = proceeds - entry_cost
+                    else:  # SHORT
+                        cover_cost = shares * exit_price * (1 + self.COMMISSION)
+                        self.cash -= cover_cost
+                        pnl = (entry_price - exit_price) * shares - (self.COMMISSION * shares * (entry_price + exit_price))
+                        entry_cost = shares * entry_price
+
+                    state['last_trade_bar'] = state['bar_count']
+                    pnl_pct = (pnl / entry_cost) * 100 if entry_cost > 0 else 0
+
+                    self.total_pnl += pnl
+                    self.total_trades += 1
+
+                    if pnl > 0:
+                        self.winning_trades += 1
+                    else:
+                        self.losing_trades += 1
+                        if self.entry_gate:
+                            self.entry_gate.record_loss(timestamp)
+
+                    # Track PORTFOLIO-WIDE daily P&L for kill switch
+                    kill_switch_before = self.kill_switch_triggered
+                    self.daily_pnl += pnl
+
+                    # Check kill switch after each trade
+                    daily_loss_pct = 0.0
+                    if self.daily_loss_kill_switch_enabled and self.daily_starting_capital > 0:
+                        daily_loss_pct = -self.daily_pnl / self.daily_starting_capital
+                        if daily_loss_pct >= self.max_daily_loss_pct:
+                            if not self.kill_switch_triggered:
+                                self.kill_switch_triggered = True
+                                logger.info(f"KILL SWITCH TRIGGERED: Portfolio daily loss {daily_loss_pct*100:.2f}% >= {self.max_daily_loss_pct*100:.1f}%")
+
+                    # TRACE POINT B: Trade close
+                    if self.kill_switch_trace:
+                        self._kill_switch_trace_log.append({
+                            'event': 'TRADE_CLOSE',
+                            'timestamp': str(timestamp),
+                            'symbol': symbol,
+                            'realized_pnl': pnl,
+                            'daily_pnl_after': self.daily_pnl,
+                            'day_start_equity': self.daily_starting_capital,
+                            'daily_loss_pct': daily_loss_pct * 100,
+                            'kill_switch_before': kill_switch_before,
+                            'kill_switch_after': self.kill_switch_triggered,
+                            'kill_switch_threshold_pct': self.max_daily_loss_pct * 100
+                        })
+
+                    # MFE/MAE calculation
+                    if position_direction == 'LONG':
+                        mfe = highest_price - entry_price
+                        mae = entry_price - lowest_price
+                    else:
+                        mfe = entry_price - lowest_price
+                        mae = highest_price - entry_price
+                    mfe_pct = (mfe / entry_price) * 100 if entry_price > 0 else 0
+                    mae_pct = (mae / entry_price) * 100 if entry_price > 0 else 0
+
+                    all_trades.append({
+                        'symbol': symbol,
+                        'direction': position_direction,
+                        'entry_date': state['entry_time'],
+                        'exit_date': timestamp,
+                        'entry_price': entry_price,
+                        'exit_price': exit_price,
+                        'shares': shares,
+                        'pnl': pnl,
+                        'pnl_pct': pnl_pct,
+                        'exit_reason': exit_reason,
+                        'strategy': state['entry_strategy'],
+                        'reasoning': state['entry_reasoning'],
+                        'bars_held': bars_held,
+                        'mfe': mfe,
+                        'mae': mae,
+                        'mfe_pct': mfe_pct,
+                        'mae_pct': mae_pct
+                    })
+
+                    if self.use_tiered_exits and self.exit_manager:
+                        self.exit_manager.unregister_position(symbol)
+
+                    # Reset state
+                    state['trailing_activated'] = False
+                    state['trailing_stop_price'] = 0.0
+                    state['position_direction'] = None
+                    state['highest_price'] = 0.0
+                    state['lowest_price'] = float('inf')
+                    position_direction = None
+
+            # ============ UPDATE PORTFOLIO VALUE ============
+            self.portfolio_value = self.cash
+            for sym, st in symbol_state.items():
+                if st['position_direction'] == 'LONG':
+                    # Get current price for this symbol
+                    sym_price = signals_data[sym].iloc[min(st['bar_count']-1, len(signals_data[sym])-1)]['close']
+                    self.portfolio_value += st['shares'] * sym_price
+                elif st['position_direction'] == 'SHORT':
+                    sym_price = signals_data[sym].iloc[min(st['bar_count']-1, len(signals_data[sym])-1)]['close']
+                    unrealized_pnl = (st['entry_price'] - sym_price) * st['shares']
+                    self.portfolio_value += unrealized_pnl
+
+            if self.portfolio_value > self.peak_value:
+                self.peak_value = self.portfolio_value
+
+            drawdown = (self.peak_value - self.portfolio_value) / self.peak_value
+            if drawdown > self.max_drawdown:
+                self.max_drawdown = drawdown
+
+            # ============ PROCESS PENDING ENTRY ============
+            pending_entry = state['pending_entry']
+            if pending_entry is not None and state['position_direction'] is None:
+                if self.kill_switch_triggered:
+                    # TRACE POINT C: Pending entry BLOCKED
+                    if self.kill_switch_trace:
+                        self._kill_switch_trace_log.append({
+                            'event': 'ENTRY_BLOCKED',
+                            'timestamp': str(timestamp),
+                            'symbol': symbol,
+                            'entry_type': 'pending_fill',
+                            'kill_switch_triggered': True,
+                            'block_reason': 'kill_switch',
+                            'direction': pending_entry.get('direction', 'UNKNOWN')
+                        })
+                    state['pending_entry'] = None
+                else:
+                    # Process the pending entry
+                    open_price = row.get('open', current_price)
+                    direction = pending_entry.get('direction', 'LONG')
+
+                    if direction == 'LONG':
+                        realistic_entry_price = open_price * (1 + self.ENTRY_SLIPPAGE + self.BID_ASK_SPREAD)
+                        new_stop_loss_price = realistic_entry_price * (1 - self.default_stop_loss_pct)
+                    else:
+                        realistic_entry_price = open_price * (1 - self.ENTRY_SLIPPAGE - self.BID_ASK_SPREAD)
+                        new_stop_loss_price = realistic_entry_price * (1 + self.default_stop_loss_pct)
+
+                    new_shares = self.risk_manager.calculate_position_size(
+                        self.portfolio_value, realistic_entry_price, new_stop_loss_price
+                    )
+
+                    can_enter = False
+                    if direction == 'LONG':
+                        cost = new_shares * realistic_entry_price * (1 + self.COMMISSION)
+                        if cost <= self.cash and new_shares > 0:
+                            self.cash -= cost
+                            can_enter = True
+                    else:
+                        margin_required = new_shares * realistic_entry_price * 0.5
+                        if margin_required <= self.cash and new_shares > 0:
+                            self.cash += new_shares * realistic_entry_price * (1 - self.COMMISSION)
+                            can_enter = True
+
+                    if can_enter:
+                        state['position_direction'] = direction
+                        state['entry_price'] = realistic_entry_price
+                        state['entry_index'] = state['bar_count']
+                        state['entry_time'] = timestamp
+                        state['shares'] = new_shares
+                        state['stop_loss_price'] = new_stop_loss_price
+                        state['highest_price'] = realistic_entry_price
+                        state['lowest_price'] = realistic_entry_price
+                        state['entry_strategy'] = pending_entry.get('strategy', 'Unknown')
+                        state['entry_reasoning'] = pending_entry.get('reasoning', '')
+                        state['trailing_activated'] = False
+                        state['trailing_stop_price'] = 0.0
+
+                        if direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
+                            self.exit_manager.register_position(
+                                symbol=symbol,
+                                entry_price=realistic_entry_price,
+                                quantity=new_shares,
+                                entry_time=timestamp if isinstance(timestamp, datetime) else None
+                            )
+
+                        if self.entry_gate:
+                            self.entry_gate.record_entry(symbol, timestamp)
+
+                        # TRACE POINT C: Entry EXECUTED
+                        if self.kill_switch_trace:
+                            self._kill_switch_trace_log.append({
+                                'event': 'ENTRY_EXECUTED',
+                                'timestamp': str(timestamp),
+                                'symbol': symbol,
+                                'entry_type': 'pending_fill',
+                                'kill_switch_triggered': self.kill_switch_triggered,
+                                'direction': direction,
+                                'entry_price': realistic_entry_price,
+                                'shares': new_shares
+                            })
+
+                    state['pending_entry'] = None
+
+            # ============ CHECK FOR NEW ENTRY ============
+            if state['position_direction'] is None and state['pending_entry'] is None:
+                signal = row['signal']
+                if signal in [1, -1]:
+                    bars_since_last = state['bar_count'] - state['last_trade_bar']
+                    if bars_since_last >= self.COOLDOWN_BARS:
+                        # Kill switch check (PORTFOLIO-WIDE)
+                        if self.kill_switch_triggered:
+                            # TRACE POINT C: New signal BLOCKED
+                            if self.kill_switch_trace:
+                                self._kill_switch_trace_log.append({
+                                    'event': 'ENTRY_BLOCKED',
+                                    'timestamp': str(timestamp),
+                                    'symbol': symbol,
+                                    'entry_type': 'new_signal',
+                                    'kill_switch_triggered': True,
+                                    'block_reason': 'kill_switch',
+                                    'direction': 'LONG' if signal == 1 else 'SHORT'
+                                })
+                            continue
+
+                        # Check entry gate
+                        entry_allowed = True
+                        if self.entry_gate:
+                            entry_allowed, reason = self.entry_gate.check_entry_allowed(symbol, timestamp)
+
+                            if not entry_allowed:
+                                if self.kill_switch_trace:
+                                    self._kill_switch_trace_log.append({
+                                        'event': 'ENTRY_BLOCKED',
+                                        'timestamp': str(timestamp),
+                                        'symbol': symbol,
+                                        'entry_type': 'new_signal',
+                                        'kill_switch_triggered': self.kill_switch_triggered,
+                                        'block_reason': reason,
+                                        'direction': 'LONG' if signal == 1 else 'SHORT'
+                                    })
+
+                        if entry_allowed:
+                            if signal == 1:  # BUY -> LONG
+                                if self.shorts_only:
+                                    continue
+                                state['pending_entry'] = {
+                                    'direction': 'LONG',
+                                    'signal_price': current_price,
+                                    'strategy': row.get('strategy', 'Unknown'),
+                                    'reasoning': row.get('reasoning', '')
+                                }
+                            elif signal == -1:  # SELL -> SHORT
+                                if self.longs_only:
+                                    continue
+                                state['pending_entry'] = {
+                                    'direction': 'SHORT',
+                                    'signal_price': current_price,
+                                    'strategy': row.get('strategy', 'Unknown') + '_SHORT',
+                                    'reasoning': row.get('reasoning', '')
+                                }
+
+        # Close any remaining positions at end of backtest
+        for symbol, state in symbol_state.items():
+            if state['position_direction'] is not None:
+                data = signals_data[symbol]
+                close_price = data.iloc[-1]['close']
+                if state['position_direction'] == 'LONG':
+                    exit_price = close_price * (1 - self.EXIT_SLIPPAGE - self.BID_ASK_SPREAD)
+                    proceeds = state['shares'] * exit_price * (1 - self.COMMISSION)
+                    self.cash += proceeds
+                    entry_cost = state['shares'] * state['entry_price'] * (1 + self.COMMISSION)
+                    pnl = proceeds - entry_cost
+                else:
+                    exit_price = close_price * (1 + self.EXIT_SLIPPAGE + self.BID_ASK_SPREAD)
+                    cover_cost = state['shares'] * exit_price * (1 + self.COMMISSION)
+                    self.cash -= cover_cost
+                    pnl = (state['entry_price'] - exit_price) * state['shares']
+                    entry_cost = state['shares'] * state['entry_price']
+
+                pnl_pct = (pnl / entry_cost) * 100 if entry_cost > 0 else 0
+                bars_held = state['bar_count'] - state['entry_index']
+
+                all_trades.append({
+                    'symbol': symbol,
+                    'direction': state['position_direction'],
+                    'entry_date': state['entry_time'],
+                    'exit_date': data.iloc[-1].get('timestamp', 'end'),
+                    'entry_price': state['entry_price'],
+                    'exit_price': exit_price,
+                    'shares': state['shares'],
+                    'pnl': pnl,
+                    'pnl_pct': pnl_pct,
+                    'exit_reason': 'end_of_backtest',
+                    'strategy': state['entry_strategy'],
+                    'reasoning': state['entry_reasoning'],
+                    'bars_held': bars_held,
+                    'mfe': 0,
+                    'mae': 0,
+                    'mfe_pct': 0,
+                    'mae_pct': 0
+                })
+
+                if self.use_tiered_exits and self.exit_manager:
+                    self.exit_manager.unregister_position(symbol)
+
+        return all_trades
 
     def calculate_metrics(self, trades: List[Dict]) -> Dict:
         """
@@ -1245,18 +1909,15 @@ class Backtest1Hour:
 
         logger.info(f"Generated signals for {len(signals_data)} symbols")
 
-        # Phase 2: Sequential trade simulation (must maintain portfolio state)
+        # Phase 2: Interleaved trade simulation (portfolio-wide daily P&L tracking)
+        # Process all symbols together, bar by bar, to ensure kill switch works across portfolio
+        all_trades = self.simulate_trades_interleaved(signals_data)
+
+        # Log per-symbol summary
         for symbol in symbols:
-            if symbol not in signals_data:
-                continue
-
-            data = signals_data[symbol]
-
-            # Simulate trades
-            trades = self.simulate_trades(symbol, data)
-            all_trades.extend(trades)
-
-            logger.info(f"{symbol}: {len(trades)} trades, P&L: ${sum(t['pnl'] for t in trades):,.2f}")
+            symbol_trades = [t for t in all_trades if t['symbol'] == symbol]
+            if symbol_trades:
+                logger.info(f"{symbol}: {len(symbol_trades)} trades, P&L: ${sum(t['pnl'] for t in symbol_trades):,.2f}")
 
         # Calculate metrics
         metrics = self.calculate_metrics(all_trades)
@@ -1273,6 +1934,7 @@ class Backtest1Hour:
             'metrics': metrics,
             'equity_curve': pd.DataFrame(self.equity_curve) if self.equity_curve else pd.DataFrame(),
             'max_drawdown': self.max_drawdown,
+            'kill_switch_trace': self._kill_switch_trace_log if self.kill_switch_trace else None,
         }
 
         logger.info(f"Backtest complete: {len(all_trades)} trades, Total P&L: ${self.total_pnl:,.2f}")
@@ -1326,7 +1988,7 @@ def run_backtest(
     symbols: list = None,
     start_date: str = None,
     end_date: str = None,
-    initial_capital: float = 100000.0,
+    initial_capital: float = 10000.0,
     longs_only: bool = False,
     shorts_only: bool = False,
 ) -> Dict:
@@ -1413,7 +2075,7 @@ def main():
     parser.add_argument('--symbols', nargs='+', help='Symbols to backtest')
     parser.add_argument('--start', help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end', help='End date (YYYY-MM-DD)')
-    parser.add_argument('--capital', type=float, default=100000, help='Initial capital')
+    parser.add_argument('--capital', type=float, default=10000, help='Initial capital')
     parser.add_argument('--longs-only', action='store_true', help='Only take LONG positions')
     parser.add_argument('--shorts-only', action='store_true', help='Only take SHORT positions')
 

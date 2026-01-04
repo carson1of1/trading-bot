@@ -168,6 +168,12 @@ class TradingBot:
         self.current_trading_day = None
         self.kill_switch_triggered = False
 
+        # Emergency stop - force close if unrealized loss exceeds threshold
+        # FIX (Jan 2026): Added after $4K loss on single SHORT with no stop
+        risk_config = self.config.get('risk_management', {})
+        self.emergency_stop_pct = risk_config.get('emergency_stop_pct', 5.0) / 100
+        self.emergency_stop_enabled = True
+
         # Position tracking
         self.open_positions = {}  # {symbol: position_dict}
         self.pending_entries = {}  # {symbol: entry_dict}
@@ -459,6 +465,25 @@ class TradingBot:
 
         # ============ EXIT CHECKS ============
 
+        # 0. Emergency stop - force close if unrealized daily loss exceeds threshold
+        # FIX (Jan 2026): Added after $4K loss on single SHORT with no stop
+        if self.emergency_stop_enabled and self.daily_starting_capital > 0:
+            if direction == 'LONG':
+                unrealized_pnl = (current_price - entry_price) * qty
+            else:  # SHORT
+                unrealized_pnl = (entry_price - current_price) * qty
+
+            total_daily_loss = self.daily_pnl + unrealized_pnl
+            total_daily_loss_pct = -total_daily_loss / self.daily_starting_capital
+            if total_daily_loss_pct >= self.emergency_stop_pct:
+                logger.warning(f"EMERGENCY STOP: {symbol} - Daily loss {total_daily_loss_pct*100:.1f}% >= {self.emergency_stop_pct*100:.1f}%")
+                return {
+                    'exit': True,
+                    'reason': 'emergency_stop',
+                    'price': current_price,
+                    'qty': qty
+                }
+
         if direction == 'LONG':
             # 1. Trailing stop check (matches backtest.py logic)
             if trailing_enabled:
@@ -555,29 +580,29 @@ class TradingBot:
                             'qty': qty
                         }
 
-            # 2. Hard stop for SHORT - only when tiered exits disabled (matches backtest.py)
-            # FIX (Jan 2026): Aligned with LONG logic above
-            if not self.use_tiered_exits:
-                stop_price = entry_price * (1 + hard_stop_pct)
-                if bar_high >= stop_price:
-                    return {
-                        'exit': True,
-                        'reason': 'stop_loss',  # FIX (Jan 2026): Match backtest.py naming
-                        'price': stop_price,
-                        'qty': qty
-                    }
+            # 2. Hard stop for SHORT
+            # FIX (Jan 2026): SHORT always needs hard stop - ExitManager only handles LONG!
+            # BUG: Previous code only ran when tiered exits disabled, leaving SHORT unprotected
+            stop_price = entry_price * (1 + hard_stop_pct)
+            if bar_high >= stop_price:
+                return {
+                    'exit': True,
+                    'reason': 'stop_loss',
+                    'price': stop_price,
+                    'qty': qty
+                }
 
             # 3. Take profit for SHORT (uses take_profit_pct from risk_management config)
-            # FIX (Jan 2026): Only check take profit when tiered exits disabled (matches backtest.py:722-726)
-            if not self.use_tiered_exits:
-                tp_price = entry_price * (1 - take_profit_pct)
-                if bar_low <= tp_price:
-                    return {
-                        'exit': True,
-                        'reason': 'take_profit',
-                        'price': tp_price,
-                        'qty': qty
-                    }
+            # FIX (Jan 2026): SHORT take profit runs unconditionally (matches backtest.py:796-801)
+            # LONG uses tiered exits (ExitManager) for profit taking, but SHORT doesn't have ExitManager
+            tp_price = entry_price * (1 - take_profit_pct)
+            if bar_low <= tp_price:
+                return {
+                    'exit': True,
+                    'reason': 'take_profit',
+                    'price': tp_price,
+                    'qty': qty
+                }
 
         # 5. EOD close check (matches backtest.py:729-736)
         # FIX (Jan 2026): Add EOD close logic to match backtest behavior
