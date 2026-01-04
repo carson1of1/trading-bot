@@ -50,6 +50,11 @@ export interface BacktestMetrics {
   best_trade: number;
   worst_trade: number;
   avg_bars_held: number;
+  days_traded: number;
+  drawdown_peak_date: string | null;
+  drawdown_peak_value: number;
+  drawdown_trough_date: string | null;
+  drawdown_trough_value: number;
 }
 
 export interface EquityPoint {
@@ -86,6 +91,26 @@ export interface SymbolBreakdown {
   avg_pnl: number;
 }
 
+export interface PeriodBreakdown {
+  date: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  total_pnl: number;
+  avg_pnl: number;
+}
+
+export interface DailyDrop {
+  date: string;
+  open: number;
+  close: number;
+  high: number;
+  low: number;
+  change_pct: number;
+  change_dollars: number;
+}
+
 export interface BacktestResponse {
   success: boolean;
   metrics: BacktestMetrics | null;
@@ -95,6 +120,8 @@ export interface BacktestResponse {
   by_strategy: StrategyBreakdown[];
   by_exit_reason: ExitReasonBreakdown[];
   by_symbol: SymbolBreakdown[];
+  by_period: PeriodBreakdown[];
+  worst_daily_drops: DailyDrop[];
   error?: string;
 }
 

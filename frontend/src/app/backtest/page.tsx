@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
-import { TestTube, Play, ScanSearch, Loader2, ChevronDown, ChevronRight, TrendingUp, LogOut, BarChart3 } from "lucide-react";
+import { TestTube, Play, ScanSearch, Loader2, ChevronDown, ChevronRight, TrendingUp, LogOut, BarChart3, Calendar } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -12,7 +12,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { useMounted } from "@/lib/utils";
-import { runBacktest, BacktestResponse, StrategyBreakdown, ExitReasonBreakdown, SymbolBreakdown } from "@/lib/api";
+import { runBacktest, BacktestResponse, PeriodBreakdown } from "@/lib/api";
 
 const TOP_N_OPTIONS = [5, 10, 15, 20, 25];
 const DAYS_OPTIONS = [7, 14, 30, 60, 90, 180, 365];
@@ -32,6 +32,8 @@ export default function BacktestPage() {
   const [strategyExpanded, setStrategyExpanded] = useState(false);
   const [exitReasonExpanded, setExitReasonExpanded] = useState(false);
   const [symbolExpanded, setSymbolExpanded] = useState(false);
+  const [periodExpanded, setPeriodExpanded] = useState(false);
+  const [periodView, setPeriodView] = useState<"daily" | "monthly">("daily");
 
   const handleRunBacktest = async () => {
     setIsLoading(true);
@@ -46,6 +48,8 @@ export default function BacktestPage() {
         initial_capital: initialCapital,
       });
       setResults(response);
+      // Default to monthly view for 90+ day backtests
+      setPeriodView(days >= 90 ? "monthly" : "daily");
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
@@ -67,6 +71,39 @@ export default function BacktestPage() {
       fullTimestamp: point.timestamp, // Keep for tooltip
     };
   }) || [];
+
+  // Group daily data into monthly for the period breakdown
+  const getMonthlyData = (dailyData: PeriodBreakdown[]): PeriodBreakdown[] => {
+    const monthlyMap = new Map<string, { trades: number; wins: number; losses: number; total_pnl: number }>();
+
+    for (const day of dailyData) {
+      // Extract YYYY-MM from date
+      const monthKey = day.date.substring(0, 7);
+      const existing = monthlyMap.get(monthKey) || { trades: 0, wins: 0, losses: 0, total_pnl: 0 };
+      existing.trades += day.trades;
+      existing.wins += day.wins;
+      existing.losses += day.losses;
+      existing.total_pnl += day.total_pnl;
+      monthlyMap.set(monthKey, existing);
+    }
+
+    return Array.from(monthlyMap.entries())
+      .map(([month, data]) => ({
+        date: month,
+        trades: data.trades,
+        wins: data.wins,
+        losses: data.losses,
+        win_rate: data.trades > 0 ? Math.round((data.wins / data.trades) * 1000) / 10 : 0,
+        total_pnl: Math.round(data.total_pnl * 100) / 100,
+        avg_pnl: data.trades > 0 ? Math.round((data.total_pnl / data.trades) * 100) / 100 : 0,
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+  };
+
+  // Get period data based on current view mode
+  const periodData = results?.by_period
+    ? (periodView === "monthly" ? getMonthlyData(results.by_period) : results.by_period)
+    : [];
 
   return (
     <PageWrapper title="Backtesting" subtitle="Test strategies on historical data">
@@ -218,7 +255,7 @@ export default function BacktestPage() {
           {results ? (
             <>
               {/* Summary Cards */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 opacity-0 animate-slide-up stagger-2">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-4 opacity-0 animate-slide-up stagger-2">
                 <div className="glass p-4">
                   <p className="text-xs text-text-muted uppercase mb-1">Total Return</p>
                   <p className={`text-xl font-bold mono ${(results.metrics?.total_return_pct ?? 0) >= 0 ? "text-emerald" : "text-red"}`}>
@@ -241,6 +278,12 @@ export default function BacktestPage() {
                   <p className="text-xs text-text-muted uppercase mb-1">Max Drawdown</p>
                   <p className="text-xl font-bold mono text-red">
                     {(results.metrics?.max_drawdown ?? 0).toFixed(1)}%
+                  </p>
+                </div>
+                <div className="glass p-4">
+                  <p className="text-xs text-text-muted uppercase mb-1">Days Traded</p>
+                  <p className="text-xl font-bold mono text-white">
+                    {results.metrics?.days_traded ?? 0}
                   </p>
                 </div>
               </div>
@@ -310,6 +353,52 @@ export default function BacktestPage() {
                   )}
                 </div>
               </div>
+
+              {/* Drawdown Analysis */}
+              {(results.metrics?.max_drawdown ?? 0) > 0 && (
+                <div className="glass p-5 opacity-0 animate-slide-up stagger-3">
+                  <h3 className="text-sm font-medium text-text-secondary mb-4">
+                    Drawdown Analysis
+                  </h3>
+                  <div className="grid grid-cols-2 gap-4 mb-4">
+                    <div>
+                      <p className="text-xs text-text-muted">Peak</p>
+                      <p className="text-lg font-bold text-emerald">
+                        ${results.metrics?.drawdown_peak_value?.toLocaleString()}
+                      </p>
+                      <p className="text-xs text-text-muted">
+                        {results.metrics?.drawdown_peak_date?.split('T')[0]}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-text-muted">Trough</p>
+                      <p className="text-lg font-bold text-red">
+                        ${results.metrics?.drawdown_trough_value?.toLocaleString()}
+                      </p>
+                      <p className="text-xs text-text-muted">
+                        {results.metrics?.drawdown_trough_date?.split('T')[0]}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Worst Days Table */}
+                  {results.worst_daily_drops?.length > 0 && (
+                    <>
+                      <h4 className="text-xs text-text-muted uppercase mt-4 mb-2">Worst Days</h4>
+                      <div className="space-y-1">
+                        {results.worst_daily_drops.slice(0, 5).map((day) => (
+                          <div key={day.date} className="flex justify-between text-sm">
+                            <span className="text-text-secondary">{day.date}</span>
+                            <span className="text-red mono">
+                              {day.change_pct.toFixed(2)}% (${day.change_dollars.toLocaleString()})
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
 
               {/* Trade List */}
               <div className="glass p-5 opacity-0 animate-slide-up stagger-4">
@@ -503,6 +592,94 @@ export default function BacktestPage() {
                               </td>
                               <td className={`mono ${s.avg_pnl >= 0 ? "text-emerald" : "text-red"}`}>
                                 {s.avg_pnl >= 0 ? "+" : ""}${s.avg_pnl.toFixed(2)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Performance by Period */}
+              {results.by_period && results.by_period.length > 0 && (
+                <div className="glass p-5 opacity-0 animate-slide-up stagger-5">
+                  <div className="flex items-center justify-between">
+                    <button
+                      onClick={() => setPeriodExpanded(!periodExpanded)}
+                      className="flex items-center gap-3 text-left"
+                    >
+                      {periodExpanded ? (
+                        <ChevronDown className="w-4 h-4 text-text-muted" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4 text-text-muted" />
+                      )}
+                      <div className="p-2 rounded-lg bg-purple-500/10">
+                        <Calendar className="w-4 h-4 text-purple-500" />
+                      </div>
+                      <h3 className="text-sm font-medium text-text-secondary">
+                        Performance by Period
+                      </h3>
+                    </button>
+                    {/* Toggle for Daily/Monthly */}
+                    <div className="flex gap-1 p-0.5 bg-surface-1 rounded-lg">
+                      <button
+                        onClick={() => setPeriodView("daily")}
+                        className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${
+                          periodView === "daily"
+                            ? "bg-purple-500 text-white"
+                            : "text-text-muted hover:text-white"
+                        }`}
+                      >
+                        Daily
+                      </button>
+                      <button
+                        onClick={() => setPeriodView("monthly")}
+                        className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${
+                          periodView === "monthly"
+                            ? "bg-purple-500 text-white"
+                            : "text-text-muted hover:text-white"
+                        }`}
+                      >
+                        Monthly
+                      </button>
+                    </div>
+                  </div>
+                  {periodExpanded && (
+                    <div className="mt-4 overflow-x-auto max-h-80 overflow-y-auto">
+                      <table className="data-table">
+                        <thead className="sticky top-0 bg-surface-1">
+                          <tr>
+                            <th>{periodView === "monthly" ? "Month" : "Date"}</th>
+                            <th>Trades</th>
+                            <th>Wins</th>
+                            <th>Losses</th>
+                            <th>Win Rate</th>
+                            <th>Total P&L</th>
+                            <th>Avg P&L</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {periodData.map((p, i) => (
+                            <tr key={i} className={p.total_pnl < 0 ? "bg-red/5" : p.total_pnl > 100 ? "bg-emerald/5" : ""}>
+                              <td className="font-semibold text-white mono">
+                                {periodView === "monthly"
+                                  ? new Date(p.date + "-01").toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+                                  : new Date(p.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                                }
+                              </td>
+                              <td className="text-text-secondary">{p.trades}</td>
+                              <td className="text-emerald">{p.wins}</td>
+                              <td className="text-red">{p.losses}</td>
+                              <td className={`mono ${p.win_rate >= 50 ? "text-emerald" : "text-red"}`}>
+                                {p.win_rate.toFixed(1)}%
+                              </td>
+                              <td className={`mono font-medium ${p.total_pnl >= 0 ? "pnl-positive" : "pnl-negative"}`}>
+                                {p.total_pnl >= 0 ? "+" : ""}${p.total_pnl.toLocaleString()}
+                              </td>
+                              <td className={`mono ${p.avg_pnl >= 0 ? "text-emerald" : "text-red"}`}>
+                                {p.avg_pnl >= 0 ? "+" : ""}${p.avg_pnl.toFixed(2)}
                               </td>
                             </tr>
                           ))}
