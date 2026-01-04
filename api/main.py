@@ -66,7 +66,7 @@ class BacktestRequest(BaseModel):
     days: int = Field(default=60, ge=7, le=365, description="Number of days to backtest")
     longs_only: bool = Field(default=False, description="Only take LONG positions")
     shorts_only: bool = Field(default=False, description="Only take SHORT positions")
-    initial_capital: float = Field(default=100000.0, ge=1000, le=10000000, description="Starting capital")
+    initial_capital: float = Field(default=10000.0, ge=1000, le=10000000, description="Starting capital")
 
 
 class TradeResult(BaseModel):
@@ -106,6 +106,22 @@ class BacktestMetrics(BaseModel):
     best_trade: float
     worst_trade: float
     avg_bars_held: float
+    days_traded: int = 0
+    drawdown_peak_date: Optional[str] = None
+    drawdown_peak_value: float = 0.0
+    drawdown_trough_date: Optional[str] = None
+    drawdown_trough_value: float = 0.0
+
+
+class DailyDrop(BaseModel):
+    """Single day equity change."""
+    date: str
+    open: float
+    close: float
+    high: float
+    low: float
+    change_pct: float
+    change_dollars: float
 
 
 class EquityCurvePoint(BaseModel):
@@ -145,6 +161,17 @@ class SymbolBreakdown(BaseModel):
     avg_pnl: float
 
 
+class PeriodBreakdown(BaseModel):
+    """Performance breakdown by date period (daily)."""
+    date: str
+    trades: int
+    wins: int
+    losses: int
+    win_rate: float
+    total_pnl: float
+    avg_pnl: float
+
+
 class BacktestResponse(BaseModel):
     """Response model for backtest endpoint."""
     success: bool
@@ -155,6 +182,8 @@ class BacktestResponse(BaseModel):
     by_strategy: List[StrategyBreakdown] = []
     by_exit_reason: List[ExitReasonBreakdown] = []
     by_symbol: List[SymbolBreakdown] = []  # Sorted worst to best
+    by_period: List[PeriodBreakdown] = []  # Daily breakdown, sorted by date
+    worst_daily_drops: List[DailyDrop] = []
     error: Optional[str] = None
 
 
@@ -480,6 +509,58 @@ def _compute_symbol_breakdown(trades: List[Dict]) -> List[SymbolBreakdown]:
     return result
 
 
+def _compute_period_breakdown(trades: List[Dict]) -> List[PeriodBreakdown]:
+    """Compute performance breakdown by date (daily)."""
+    if not trades:
+        return []
+
+    from collections import defaultdict
+
+    period_data = defaultdict(lambda: {'trades': 0, 'wins': 0, 'losses': 0, 'total_pnl': 0.0})
+
+    for trade in trades:
+        # Use exit_date for the period
+        exit_date = trade.get('exit_date', '')
+        if not exit_date:
+            continue
+
+        # Extract just the date portion (YYYY-MM-DD)
+        if hasattr(exit_date, 'strftime'):
+            date_str = exit_date.strftime('%Y-%m-%d')
+        elif hasattr(exit_date, 'isoformat'):
+            date_str = exit_date.isoformat()[:10]
+        else:
+            date_str = str(exit_date)[:10]
+
+        pnl = trade.get('pnl', 0) or 0
+        period_data[date_str]['trades'] += 1
+        period_data[date_str]['total_pnl'] += pnl
+        if pnl > 0:
+            period_data[date_str]['wins'] += 1
+        elif pnl < 0:
+            period_data[date_str]['losses'] += 1
+
+    result = []
+    for date_str, data in period_data.items():
+        trade_count = data['trades']
+        win_rate = (data['wins'] / trade_count * 100) if trade_count > 0 else 0
+        avg_pnl = data['total_pnl'] / trade_count if trade_count > 0 else 0
+
+        result.append(PeriodBreakdown(
+            date=date_str,
+            trades=trade_count,
+            wins=data['wins'],
+            losses=data['losses'],
+            win_rate=round(win_rate, 1),
+            total_pnl=round(data['total_pnl'], 2),
+            avg_pnl=round(avg_pnl, 2)
+        ))
+
+    # Sort by date ascending
+    result.sort(key=lambda x: x.date)
+    return result
+
+
 def format_backtest_results(results: Dict, symbols_scanned: List[str]) -> BacktestResponse:
     """
     Transform backtest output dict into API response format.
@@ -516,7 +597,11 @@ def format_backtest_results(results: Dict, symbols_scanned: List[str]) -> Backte
         sharpe_ratio=round(raw_metrics.get("sharpe_ratio", 0), 2),
         best_trade=round(raw_metrics.get("best_trade", 0), 2),
         worst_trade=round(raw_metrics.get("worst_trade", 0), 2),
-        avg_bars_held=round(raw_metrics.get("avg_bars_held", 0), 1)
+        avg_bars_held=round(raw_metrics.get("avg_bars_held", 0), 1),
+        drawdown_peak_date=raw_metrics.get("drawdown_peak_date"),
+        drawdown_peak_value=round(raw_metrics.get("drawdown_peak_value", 0), 2),
+        drawdown_trough_date=raw_metrics.get("drawdown_trough_date"),
+        drawdown_trough_value=round(raw_metrics.get("drawdown_trough_value", 0), 2)
     )
 
     # Format equity curve - sample to max 50 points
@@ -605,6 +690,23 @@ def format_backtest_results(results: Dict, symbols_scanned: List[str]) -> Backte
     by_strategy = _compute_strategy_breakdown(raw_trades)
     by_exit_reason = _compute_exit_reason_breakdown(raw_trades)
     by_symbol = _compute_symbol_breakdown(raw_trades)
+    by_period = _compute_period_breakdown(raw_trades)
+
+    # Update metrics with days_traded
+    metrics.days_traded = len(by_period)
+
+    # Format worst daily drops
+    worst_drops = []
+    for drop in raw_metrics.get("worst_daily_drops", []):
+        worst_drops.append(DailyDrop(
+            date=drop.get("date", ""),
+            open=round(drop.get("open", 0), 2),
+            close=round(drop.get("close", 0), 2),
+            high=round(drop.get("high", 0), 2),
+            low=round(drop.get("low", 0), 2),
+            change_pct=round(drop.get("change_pct", 0), 2),
+            change_dollars=round(drop.get("change_dollars", 0), 2)
+        ))
 
     return BacktestResponse(
         success=True,
@@ -614,7 +716,9 @@ def format_backtest_results(results: Dict, symbols_scanned: List[str]) -> Backte
         symbols_scanned=symbols_scanned,
         by_strategy=by_strategy,
         by_exit_reason=by_exit_reason,
-        by_symbol=by_symbol
+        by_symbol=by_symbol,
+        by_period=by_period,
+        worst_daily_drops=worst_drops
     )
 
 
