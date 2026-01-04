@@ -245,3 +245,96 @@ class TestProfitFloorActivation:
         pos = mgr.get_position('AAPL')
         assert pos.profit_floor_active is False
         assert pos.stop_price == 95.0  # Still at original -1R
+
+
+class TestPartialExit:
+    """Test partial exit at +3R (Phase 3: optional)"""
+
+    def test_triggers_partial_at_3r(self):
+        """Should trigger partial exit at +3R"""
+        mgr = SimplifiedExitManager({
+            'atr_multiplier': 2.0,
+            'partial_exit_r': 3.0,
+            'partial_exit_pct': 0.50
+        })
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+        # R = $5, +3R = $115
+
+        # Price reaches +3R
+        result = mgr.evaluate_exit('AAPL', current_price=115.0)
+
+        assert result is not None
+        assert result['action'] == 'partial_exit'
+        assert result['reason'] == 'partial_exit'
+        assert result['qty'] == 5  # 50% of 10
+
+    def test_partial_executes_only_once(self):
+        """Should only execute partial exit once"""
+        mgr = SimplifiedExitManager({
+            'atr_multiplier': 2.0,
+            'partial_exit_r': 3.0,
+            'partial_exit_pct': 0.50
+        })
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+
+        # First trigger at +3R
+        result1 = mgr.evaluate_exit('AAPL', current_price=115.0)
+        assert result1['action'] == 'partial_exit'
+
+        # Update quantity after partial
+        mgr.update_quantity('AAPL', 5)
+
+        # Second evaluation at +3.5R should not trigger another partial
+        result2 = mgr.evaluate_exit('AAPL', current_price=117.5)
+        assert result2 is None
+
+    def test_stop_stays_at_floor_after_partial(self):
+        """Stop should stay at -0.25R after partial exit"""
+        mgr = SimplifiedExitManager({
+            'atr_multiplier': 2.0,
+            'profit_floor_r': 2.0,
+            'floor_stop_r': -0.25,
+            'partial_exit_r': 3.0
+        })
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+        # Floor stop = $98.75
+
+        # Trigger floor first at +2R
+        mgr.evaluate_exit('AAPL', current_price=110.0)
+
+        # Trigger partial at +3R
+        mgr.evaluate_exit('AAPL', current_price=115.0)
+        mgr.update_quantity('AAPL', 5)
+
+        # Stop should still be at -0.25R
+        pos = mgr.get_position('AAPL')
+        assert pos.stop_price == 98.75
+
+    def test_partial_respects_custom_percentage(self):
+        """Should use custom partial exit percentage"""
+        mgr = SimplifiedExitManager({
+            'atr_multiplier': 2.0,
+            'partial_exit_r': 3.0,
+            'partial_exit_pct': 0.40  # 40%
+        })
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+
+        result = mgr.evaluate_exit('AAPL', current_price=115.0)
+
+        assert result['qty'] == 4  # 40% of 10
+
+    def test_floor_activates_before_partial_if_both_triggered(self):
+        """Floor should activate before partial if price jumps past both"""
+        mgr = SimplifiedExitManager({
+            'atr_multiplier': 2.0,
+            'profit_floor_r': 2.0,
+            'partial_exit_r': 3.0
+        })
+        mgr.register_position('AAPL', entry_price=100.0, quantity=10, atr=2.5)
+
+        # Price gaps up past both thresholds
+        result = mgr.evaluate_exit('AAPL', current_price=115.0)
+
+        pos = mgr.get_position('AAPL')
+        assert pos.profit_floor_active is True  # Floor activated
+        assert result['action'] == 'partial_exit'  # Partial triggered

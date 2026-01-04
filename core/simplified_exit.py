@@ -159,6 +159,15 @@ class SimplifiedExitManager:
         """Get position state for a symbol."""
         return self.positions.get(symbol)
 
+    def update_quantity(self, symbol: str, new_qty: int) -> bool:
+        """Update quantity after partial exit."""
+        if symbol in self.positions:
+            old_qty = self.positions[symbol].quantity
+            self.positions[symbol].quantity = new_qty
+            self.logger.info(f"SIMPLIFIED_EXIT | {symbol} | QTY_UPDATE | {old_qty} -> {new_qty}")
+            return True
+        return False
+
     def evaluate_exit(
         self,
         symbol: str,
@@ -227,6 +236,29 @@ class SimplifiedExitManager:
                 'r_multiple': round(r_multiple, 2),
                 'stop_price': pos.stop_price
             }
+
+        # ================================================================
+        # PHASE 3: PARTIAL EXIT (at +3R, one-time only)
+        # ================================================================
+        if not pos.partial_exit_executed and r_multiple >= self.partial_exit_r:
+            partial_qty = int(pos.quantity * self.partial_exit_pct)
+
+            if partial_qty > 0:
+                pos.partial_exit_executed = True
+                pos.partial_exit_qty = partial_qty
+
+                self.logger.info(
+                    f"SIMPLIFIED_EXIT | {symbol} | PARTIAL_EXIT_TRIGGERED | "
+                    f"R: {r_multiple:+.2f}, Qty: {partial_qty}/{pos.quantity}"
+                )
+
+                return {
+                    'action': 'partial_exit',
+                    'reason': self.REASON_PARTIAL_EXIT,
+                    'qty': partial_qty,
+                    'r_multiple': round(r_multiple, 2),
+                    'stop_price': pos.stop_price
+                }
 
         # No exit triggered
         return None
