@@ -208,6 +208,16 @@ class Backtest1Hour:
         self.total_pnl = 0.0
         self.max_drawdown = 0.0
 
+        # Drawdown window tracking
+        self.drawdown_peak_value = self.initial_capital
+        self.drawdown_peak_date = None
+        self.drawdown_trough_value = self.initial_capital
+        self.drawdown_trough_date = None
+
+        # Daily equity tracking for worst days analysis
+        self.daily_equity_snapshots = {}  # {date_str: {'open': val, 'close': val, 'high': val, 'low': val}}
+        self._current_day_equity = {'high': self.initial_capital, 'low': self.initial_capital}
+
         # Daily P&L tracking
         self.daily_pnl = 0.0
         self.daily_starting_capital = self.initial_capital
@@ -974,13 +984,35 @@ class Backtest1Hour:
                     'direction': position_direction
                 })
 
-            # Track drawdown
+            # Track drawdown with dates
             if self.portfolio_value > self.peak_value:
                 self.peak_value = self.portfolio_value
+                # New peak means new drawdown window starts
+                self.drawdown_peak_value = self.portfolio_value
+                self.drawdown_peak_date = timestamp
 
             drawdown = (self.peak_value - self.portfolio_value) / self.peak_value
             if drawdown > self.max_drawdown:
                 self.max_drawdown = drawdown
+                self.drawdown_trough_value = self.portfolio_value
+                self.drawdown_trough_date = timestamp
+
+            # Track daily equity high/low
+            bar_date_str = pd.to_datetime(timestamp).strftime('%Y-%m-%d') if timestamp else None
+            if bar_date_str:
+                if bar_date_str not in self.daily_equity_snapshots:
+                    # New day - save previous day if exists
+                    self.daily_equity_snapshots[bar_date_str] = {
+                        'open': self.portfolio_value,
+                        'high': self.portfolio_value,
+                        'low': self.portfolio_value,
+                        'close': self.portfolio_value
+                    }
+                else:
+                    day = self.daily_equity_snapshots[bar_date_str]
+                    day['high'] = max(day['high'], self.portfolio_value)
+                    day['low'] = min(day['low'], self.portfolio_value)
+                    day['close'] = self.portfolio_value
 
             # ============ PROCESS PENDING ENTRY ============
             # FIX (Jan 2026): Check kill switch BEFORE processing pending entry
@@ -1759,6 +1791,34 @@ class Backtest1Hour:
 
         return all_trades
 
+    def _get_worst_daily_drops(self, top_n: int = 5) -> List[Dict]:
+        """
+        Get the top N worst daily equity drops.
+
+        Returns list of dicts with date, open, close, drop_pct, drop_dollars.
+        """
+        if not self.daily_equity_snapshots:
+            return []
+
+        daily_drops = []
+        for date_str, day in self.daily_equity_snapshots.items():
+            if day['open'] > 0:
+                drop_pct = (day['close'] - day['open']) / day['open'] * 100
+                drop_dollars = day['close'] - day['open']
+                daily_drops.append({
+                    'date': date_str,
+                    'open': round(day['open'], 2),
+                    'close': round(day['close'], 2),
+                    'high': round(day['high'], 2),
+                    'low': round(day['low'], 2),
+                    'change_pct': round(drop_pct, 2),
+                    'change_dollars': round(drop_dollars, 2)
+                })
+
+        # Sort by change_pct ascending (most negative first)
+        daily_drops.sort(key=lambda x: x['change_pct'])
+        return daily_drops[:top_n]
+
     def calculate_metrics(self, trades: List[Dict]) -> Dict:
         """
         Calculate comprehensive performance metrics.
@@ -1823,7 +1883,13 @@ class Backtest1Hour:
             'sharpe_ratio': sharpe_ratio,
             'best_trade': max(t['pnl'] for t in trades) if trades else 0,
             'worst_trade': min(t['pnl'] for t in trades) if trades else 0,
-            'avg_bars_held': np.mean([t['bars_held'] for t in trades]) if trades else 0
+            'avg_bars_held': np.mean([t['bars_held'] for t in trades]) if trades else 0,
+            # Drawdown window analytics
+            'drawdown_peak_date': str(self.drawdown_peak_date) if self.drawdown_peak_date else None,
+            'drawdown_peak_value': self.drawdown_peak_value,
+            'drawdown_trough_date': str(self.drawdown_trough_date) if self.drawdown_trough_date else None,
+            'drawdown_trough_value': self.drawdown_trough_value,
+            'worst_daily_drops': self._get_worst_daily_drops(5),
         }
 
     def run(self, symbols: List[str], start_date: str, end_date: str) -> Dict:

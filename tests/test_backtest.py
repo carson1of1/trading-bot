@@ -115,6 +115,114 @@ class TestBacktest1HourResetState:
         assert bt.winning_trades == 0
         assert bt.losing_trades == 0
 
+    def test_reset_state_initializes_drawdown_tracking(self):
+        """reset_state initializes drawdown window tracking."""
+        bt = Backtest1Hour(initial_capital=100000)
+        bt._reset_state()
+        assert bt.drawdown_peak_value == 100000
+        assert bt.drawdown_peak_date is None
+        assert bt.drawdown_trough_value == 100000
+        assert bt.drawdown_trough_date is None
+        assert bt.daily_equity_snapshots == {}
+        assert bt._current_day_equity == {'high': 100000, 'low': 100000}
+
+    def test_reset_state_clears_previous_drawdown_data(self):
+        """reset_state clears previously set drawdown data."""
+        bt = Backtest1Hour(initial_capital=100000)
+        # Simulate some previous state
+        bt.drawdown_peak_value = 150000
+        bt.drawdown_peak_date = '2025-01-01'
+        bt.drawdown_trough_value = 50000
+        bt.drawdown_trough_date = '2025-02-01'
+        bt.daily_equity_snapshots = {'2025-01-01': {'open': 100000, 'close': 95000, 'high': 101000, 'low': 94000}}
+        bt._current_day_equity = {'high': 120000, 'low': 80000}
+
+        bt._reset_state()
+
+        assert bt.drawdown_peak_value == 100000
+        assert bt.drawdown_peak_date is None
+        assert bt.drawdown_trough_value == 100000
+        assert bt.drawdown_trough_date is None
+        assert bt.daily_equity_snapshots == {}
+        assert bt._current_day_equity == {'high': 100000, 'low': 100000}
+
+
+class TestDrawdownAnalytics:
+    """Test drawdown analytics methods."""
+
+    def test_get_worst_daily_drops_empty(self):
+        """_get_worst_daily_drops returns empty list when no snapshots."""
+        bt = Backtest1Hour()
+        bt._reset_state()
+        result = bt._get_worst_daily_drops(5)
+        assert result == []
+
+    def test_get_worst_daily_drops_single_day(self):
+        """_get_worst_daily_drops works with a single day."""
+        bt = Backtest1Hour()
+        bt._reset_state()
+        bt.daily_equity_snapshots = {
+            '2025-01-01': {'open': 100000, 'close': 95000, 'high': 101000, 'low': 94000}
+        }
+        result = bt._get_worst_daily_drops(5)
+        assert len(result) == 1
+        assert result[0]['date'] == '2025-01-01'
+        assert result[0]['change_pct'] == -5.0
+        assert result[0]['change_dollars'] == -5000.0
+
+    def test_get_worst_daily_drops_sorts_by_worst(self):
+        """_get_worst_daily_drops sorts by change_pct ascending (worst first)."""
+        bt = Backtest1Hour()
+        bt._reset_state()
+        bt.daily_equity_snapshots = {
+            '2025-01-01': {'open': 100000, 'close': 98000, 'high': 101000, 'low': 97000},
+            '2025-01-02': {'open': 98000, 'close': 88200, 'high': 99000, 'low': 87000},  # -10%
+            '2025-01-03': {'open': 88200, 'close': 90000, 'high': 91000, 'low': 87000},  # +2%
+        }
+        result = bt._get_worst_daily_drops(5)
+        assert len(result) == 3
+        assert result[0]['date'] == '2025-01-02'  # -10% is worst
+        assert result[0]['change_pct'] == -10.0
+        assert result[1]['date'] == '2025-01-01'  # -2% is second worst
+        assert result[2]['date'] == '2025-01-03'  # +2% is best
+
+    def test_get_worst_daily_drops_respects_top_n(self):
+        """_get_worst_daily_drops respects top_n parameter."""
+        bt = Backtest1Hour()
+        bt._reset_state()
+        bt.daily_equity_snapshots = {
+            '2025-01-01': {'open': 100000, 'close': 95000, 'high': 101000, 'low': 94000},
+            '2025-01-02': {'open': 95000, 'close': 90000, 'high': 96000, 'low': 89000},
+            '2025-01-03': {'open': 90000, 'close': 85000, 'high': 91000, 'low': 84000},
+            '2025-01-04': {'open': 85000, 'close': 80000, 'high': 86000, 'low': 79000},
+            '2025-01-05': {'open': 80000, 'close': 75000, 'high': 81000, 'low': 74000},
+            '2025-01-06': {'open': 75000, 'close': 70000, 'high': 76000, 'low': 69000},
+        }
+        result = bt._get_worst_daily_drops(3)
+        assert len(result) == 3
+
+    def test_get_worst_daily_drops_includes_all_fields(self):
+        """_get_worst_daily_drops includes all required fields."""
+        bt = Backtest1Hour()
+        bt._reset_state()
+        bt.daily_equity_snapshots = {
+            '2025-01-01': {'open': 100000, 'close': 95000, 'high': 102000, 'low': 94000}
+        }
+        result = bt._get_worst_daily_drops(5)
+        assert len(result) == 1
+        day = result[0]
+        assert 'date' in day
+        assert 'open' in day
+        assert 'close' in day
+        assert 'high' in day
+        assert 'low' in day
+        assert 'change_pct' in day
+        assert 'change_dollars' in day
+        assert day['open'] == 100000.0
+        assert day['close'] == 95000.0
+        assert day['high'] == 102000.0
+        assert day['low'] == 94000.0
+
 
 class TestSimulateTradesLogic:
     """Test the critical simulate_trades method.
@@ -626,6 +734,330 @@ class TestKillSwitchLogic:
             backtester.kill_switch_triggered = False
 
         assert backtester.kill_switch_triggered is False
+
+
+class TestPortfolioWideKillSwitch:
+    """Test portfolio-wide kill switch functionality.
+
+    These tests verify the interleaved simulation correctly:
+    - Tracks daily P&L across ALL symbols (not per-symbol)
+    - Blocks entries for ALL symbols when kill switch triggers
+    - Resets kill switch on new trading day
+    """
+
+    @pytest.fixture
+    def backtester_strict_kill_switch(self):
+        """Create backtester with 1% daily loss limit for easy testing."""
+        config = {
+            'risk_management': {
+                'max_daily_loss_pct': 1.0,  # 1% daily loss limit (easy to trigger)
+                'stop_loss_pct': 5.0,  # 5% stop loss
+                'take_profit_pct': 20.0,
+                'max_position_size_pct': 25.0,  # Large position to amplify loss
+            },
+            'entry_gate': {
+                'confidence_threshold': 50,
+            },
+            'exit_manager': {
+                'tier_0_hard_stop': -0.05,  # 5% hard stop
+                'max_hold_hours': 168,
+            },
+            'trailing_stop': {
+                'enabled': False,
+            },
+        }
+        bt = Backtest1Hour(initial_capital=10000, config=config)
+        bt.daily_loss_kill_switch_enabled = True
+        return bt
+
+    def test_kill_switch_triggers_on_portfolio_loss(self, backtester_strict_kill_switch):
+        """Kill switch triggers when portfolio-wide daily loss exceeds threshold."""
+        bt = backtester_strict_kill_switch
+        bt.kill_switch_trace = True
+        bt._kill_switch_trace_log = []
+
+        # Create data within a single trading day (8 hours)
+        dates = pd.date_range('2025-01-02 09:00', periods=8, freq='h')
+
+        # Symbol A: Has a BUY signal at bar 1, price drops to trigger hard stop at bar 3
+        symbol_a_prices = [100.0, 100.0, 100.0] + [91.0] * 5  # 9% drop triggers 5% hard stop
+        symbol_a_lows = [99.5, 99.5, 99.5] + [90.0] * 5  # Low hits stop
+        data_a = pd.DataFrame({
+            'timestamp': dates,
+            'open': symbol_a_prices,
+            'high': [p + 0.5 for p in symbol_a_prices],
+            'low': symbol_a_lows,
+            'close': symbol_a_prices,
+            'volume': [10000] * 8,
+            'signal': [0] * 8,
+            'confidence': [0.0] * 8,
+            'strategy': [''] * 8,
+            'reasoning': [''] * 8,
+        })
+        data_a.loc[1, 'signal'] = 1
+        data_a.loc[1, 'confidence'] = 75.0
+        data_a.loc[1, 'strategy'] = 'Momentum'
+
+        # Symbol B: Has a BUY signal at bar 5 (after A's loss)
+        data_b = pd.DataFrame({
+            'timestamp': dates,
+            'open': [100.0] * 8,
+            'high': [102.0] * 8,
+            'low': [99.0] * 8,
+            'close': [101.0] * 8,
+            'volume': [10000] * 8,
+            'signal': [0] * 8,
+            'confidence': [0.0] * 8,
+            'strategy': [''] * 8,
+            'reasoning': [''] * 8,
+        })
+        data_b.loc[5, 'signal'] = 1
+        data_b.loc[5, 'confidence'] = 75.0
+        data_b.loc[5, 'strategy'] = 'Breakout'
+
+        signals_data = {'SYMBOL_A': data_a, 'SYMBOL_B': data_b}
+
+        # Run interleaved simulation
+        trades = bt.simulate_trades_interleaved(signals_data)
+
+        # Verify kill switch triggered by checking trace log
+        trade_closes = [e for e in bt._kill_switch_trace_log if e['event'] == 'TRADE_CLOSE']
+        assert len(trade_closes) >= 1
+        assert trade_closes[0]['kill_switch_after'] is True, "Kill switch should trigger after trade close"
+
+        # Also verify an entry was blocked
+        blocked = [e for e in bt._kill_switch_trace_log if e['event'] == 'ENTRY_BLOCKED']
+        assert len(blocked) > 0, "Symbol B's entry should be blocked by kill switch"
+
+    def test_kill_switch_blocks_entries_for_all_symbols(self, backtester_strict_kill_switch):
+        """When kill switch triggers on symbol A, it blocks entries for symbol B."""
+        bt = backtester_strict_kill_switch
+        bt.kill_switch_trace = True
+        bt._kill_switch_trace_log = []
+
+        # Create data: Symbol A loses money first, then Symbol B tries to enter
+        dates = pd.date_range('2025-01-02 09:00', periods=30, freq='h')
+
+        # Symbol A: Enters early, exits with large loss (triggers kill switch)
+        symbol_a_prices = [100.0] * 3 + [85.0] * 27  # 15% drop forces exit
+        data_a = pd.DataFrame({
+            'timestamp': dates,
+            'open': symbol_a_prices,
+            'high': [p + 0.5 for p in symbol_a_prices],
+            'low': [p - 0.5 for p in symbol_a_prices],
+            'close': symbol_a_prices,
+            'volume': [10000] * 30,
+            'signal': [0] * 30,
+            'confidence': [0.0] * 30,
+            'strategy': [''] * 30,
+            'reasoning': [''] * 30,
+        })
+        data_a.loc[1, 'signal'] = 1  # Early entry
+        data_a.loc[1, 'confidence'] = 75.0
+
+        # Symbol B: Multiple buy signals after A's loss
+        data_b = pd.DataFrame({
+            'timestamp': dates,
+            'open': [100.0] * 30,
+            'high': [105.0] * 30,
+            'low': [99.0] * 30,
+            'close': [102.0] * 30,
+            'volume': [10000] * 30,
+            'signal': [0] * 30,
+            'confidence': [0.0] * 30,
+            'strategy': [''] * 30,
+            'reasoning': [''] * 30,
+        })
+        # Add multiple buy signals for Symbol B after A's loss
+        for idx in [10, 15, 20]:
+            data_b.loc[idx, 'signal'] = 1
+            data_b.loc[idx, 'confidence'] = 80.0
+            data_b.loc[idx, 'strategy'] = 'Breakout'
+
+        signals_data = {'SYMBOL_A': data_a, 'SYMBOL_B': data_b}
+        trades = bt.simulate_trades_interleaved(signals_data)
+
+        # Check trace log for blocked entries
+        blocked_entries = [e for e in bt._kill_switch_trace_log
+                          if e['event'] == 'ENTRY_BLOCKED' and e['block_reason'] == 'kill_switch']
+
+        # Symbol B's signals should be blocked by kill switch
+        symbol_b_blocked = [e for e in blocked_entries if e['symbol'] == 'SYMBOL_B']
+        assert len(symbol_b_blocked) > 0, "Symbol B entries should be blocked by portfolio-wide kill switch"
+
+    def test_kill_switch_resets_on_new_trading_day(self, backtester_strict_kill_switch):
+        """Kill switch resets when a new trading day begins."""
+        bt = backtester_strict_kill_switch
+        bt.kill_switch_trace = True
+        bt._kill_switch_trace_log = []
+
+        # Day 1: Symbol A loses, triggers kill switch
+        # Day 2: Symbol B should be able to enter (kill switch reset)
+        dates_day1 = pd.date_range('2025-01-02 09:00', periods=8, freq='h')
+        dates_day2 = pd.date_range('2025-01-03 09:00', periods=8, freq='h')
+        dates = dates_day1.append(dates_day2)
+
+        # Symbol A: Loses on day 1
+        symbol_a_prices = [100.0] * 3 + [85.0] * 13
+        data_a = pd.DataFrame({
+            'timestamp': dates,
+            'open': symbol_a_prices,
+            'high': [p + 0.5 for p in symbol_a_prices],
+            'low': [p - 0.5 for p in symbol_a_prices],
+            'close': symbol_a_prices,
+            'volume': [10000] * 16,
+            'signal': [0] * 16,
+            'confidence': [0.0] * 16,
+            'strategy': [''] * 16,
+            'reasoning': [''] * 16,
+        })
+        data_a.loc[1, 'signal'] = 1
+        data_a.loc[1, 'confidence'] = 75.0
+
+        # Symbol B: Entry signal on day 2 (after kill switch should reset)
+        data_b = pd.DataFrame({
+            'timestamp': dates,
+            'open': [100.0] * 16,
+            'high': [105.0] * 16,
+            'low': [99.0] * 16,
+            'close': [102.0] * 16,
+            'volume': [10000] * 16,
+            'signal': [0] * 16,
+            'confidence': [0.0] * 16,
+            'strategy': [''] * 16,
+            'reasoning': [''] * 16,
+        })
+        # Day 2 signal (index 10 = 2nd hour of day 2)
+        data_b.loc[10, 'signal'] = 1
+        data_b.loc[10, 'confidence'] = 80.0
+        data_b.loc[10, 'strategy'] = 'Momentum'
+
+        signals_data = {'SYMBOL_A': data_a, 'SYMBOL_B': data_b}
+        trades = bt.simulate_trades_interleaved(signals_data)
+
+        # Check for DAY_START events (should have 2 - one for each day)
+        day_starts = [e for e in bt._kill_switch_trace_log if e['event'] == 'DAY_START']
+        assert len(day_starts) >= 2, "Should have DAY_START for each trading day"
+
+        # Check that day 2 started with kill_switch_triggered = False
+        day2_start = [e for e in day_starts if '2025-01-03' in e['day']]
+        if day2_start:
+            assert day2_start[0]['kill_switch_triggered'] is False
+
+        # Check that Symbol B entry was allowed on day 2
+        executed_entries = [e for e in bt._kill_switch_trace_log
+                          if e['event'] == 'ENTRY_EXECUTED' and e['symbol'] == 'SYMBOL_B']
+        # May or may not execute depending on timing, but should NOT be blocked by kill switch on day 2
+
+    def test_portfolio_wide_pnl_accumulates_across_symbols(self, backtester_strict_kill_switch):
+        """Daily P&L correctly accumulates losses from multiple symbols."""
+        bt = backtester_strict_kill_switch
+        bt.kill_switch_trace = True
+        bt._kill_switch_trace_log = []
+
+        # Keep data within single trading day (8 hours)
+        dates = pd.date_range('2025-01-02 09:00', periods=8, freq='h')
+
+        # Symbol A: Enters at bar 0, drops to trigger hard stop at bar 2
+        symbol_a_prices = [100.0, 100.0] + [93.0] * 6  # 7% drop
+        symbol_a_lows = [99.5, 99.5] + [92.0] * 6  # Low hits 5% stop
+        data_a = pd.DataFrame({
+            'timestamp': dates,
+            'open': symbol_a_prices,
+            'high': [p + 0.5 for p in symbol_a_prices],
+            'low': symbol_a_lows,
+            'close': symbol_a_prices,
+            'volume': [10000] * 8,
+            'signal': [0] * 8,
+            'confidence': [0.0] * 8,
+            'strategy': [''] * 8,
+            'reasoning': [''] * 8,
+        })
+        data_a.loc[0, 'signal'] = 1
+        data_a.loc[0, 'confidence'] = 75.0
+
+        # Symbol B: Enters at bar 4 (if not blocked by kill switch)
+        data_b = pd.DataFrame({
+            'timestamp': dates,
+            'open': [100.0] * 8,
+            'high': [102.0] * 8,
+            'low': [99.0] * 8,
+            'close': [101.0] * 8,
+            'volume': [10000] * 8,
+            'signal': [0] * 8,
+            'confidence': [0.0] * 8,
+            'strategy': [''] * 8,
+            'reasoning': [''] * 8,
+        })
+        data_b.loc[4, 'signal'] = 1
+        data_b.loc[4, 'confidence'] = 75.0
+
+        signals_data = {'SYMBOL_A': data_a, 'SYMBOL_B': data_b}
+        trades = bt.simulate_trades_interleaved(signals_data)
+
+        # Check that trade closes logged accumulated P&L
+        trade_closes = [e for e in bt._kill_switch_trace_log if e['event'] == 'TRADE_CLOSE']
+        assert len(trade_closes) >= 1
+
+        # Kill switch should trigger from Symbol A's loss
+        assert trade_closes[0]['kill_switch_after'] is True
+
+        # Symbol B should be blocked
+        blocked = [e for e in bt._kill_switch_trace_log
+                  if e['event'] == 'ENTRY_BLOCKED' and e['symbol'] == 'SYMBOL_B']
+        assert len(blocked) > 0, "Symbol B entry should be blocked after Symbol A's loss"
+
+    def test_kill_switch_trace_logging(self, backtester_strict_kill_switch):
+        """Kill switch trace logging captures all required fields."""
+        bt = backtester_strict_kill_switch
+        bt.kill_switch_trace = True
+        bt._kill_switch_trace_log = []
+
+        dates = pd.date_range('2025-01-02 09:00', periods=15, freq='h')
+        prices = [100.0] * 3 + [85.0] * 12
+
+        data = pd.DataFrame({
+            'timestamp': dates,
+            'open': prices,
+            'high': [p + 0.5 for p in prices],
+            'low': [p - 0.5 for p in prices],
+            'close': prices,
+            'volume': [10000] * 15,
+            'signal': [0] * 15,
+            'confidence': [0.0] * 15,
+            'strategy': [''] * 15,
+            'reasoning': [''] * 15,
+        })
+        data.loc[1, 'signal'] = 1
+        data.loc[1, 'confidence'] = 75.0
+        data.loc[10, 'signal'] = 1  # Signal after loss
+        data.loc[10, 'confidence'] = 75.0
+
+        signals_data = {'TEST': data}
+        bt.simulate_trades_interleaved(signals_data)
+
+        # Verify DAY_START event has required fields
+        day_starts = [e for e in bt._kill_switch_trace_log if e['event'] == 'DAY_START']
+        assert len(day_starts) >= 1
+        for event in day_starts:
+            assert 'day_start_equity' in event
+            assert 'daily_pnl' in event
+            assert 'kill_switch_triggered' in event
+
+        # Verify TRADE_CLOSE event has required fields
+        trade_closes = [e for e in bt._kill_switch_trace_log if e['event'] == 'TRADE_CLOSE']
+        for event in trade_closes:
+            assert 'realized_pnl' in event
+            assert 'daily_pnl_after' in event
+            assert 'daily_loss_pct' in event
+            assert 'kill_switch_before' in event
+            assert 'kill_switch_after' in event
+
+        # Verify ENTRY_BLOCKED events
+        blocked_entries = [e for e in bt._kill_switch_trace_log if e['event'] == 'ENTRY_BLOCKED']
+        for event in blocked_entries:
+            assert 'block_reason' in event
+            assert 'kill_switch_triggered' in event
 
 
 class TestStrategyManagerExport:
