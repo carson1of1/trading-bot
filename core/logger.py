@@ -287,7 +287,7 @@ class TradeLogger:
                 self.trade_history.append(trade_data)
 
         except Exception as e:
-            self.logger.error(f"Error logging trade: {e}")
+            self.logger.error(f"Error logging trade: {e}", exc_info=True)
             # BUG FIX #5 (Dec 8, 2025): If database write failed, don't proceed with JSON
             # This is handled by the db_success flag above
 
@@ -382,7 +382,7 @@ class TradeLogger:
                 f.write(json.dumps(detailed_trade, default=str) + '\n')
 
         except Exception as e:
-            self.logger.error(f"Error saving detailed trade JSON: {e}")
+            self.logger.error(f"Error saving detailed trade JSON: {e}", exc_info=True)
 
     def _update_trade_exit(self, trade_data: Dict[str, Any]):
         """
@@ -476,7 +476,7 @@ class TradeLogger:
                     # Admin must manually investigate and fix the database
 
         except Exception as e:
-            self.logger.error(f"Error updating trade exit: {e}")
+            self.logger.error(f"Error updating trade exit: {e}", exc_info=True)
 
     def _save_trade_to_db(self, trade_data: Dict[str, Any]):
         """Save trade data to SQLite database
@@ -547,7 +547,7 @@ class TradeLogger:
                 conn.commit()
 
         except Exception as e:
-            self.logger.error(f"Error saving trade to database: {e}")
+            self.logger.error(f"Error saving trade to database: {e}", exc_info=True)
 
     def log_signal(self, signal_data: Dict[str, Any]):
         """Log a trading signal
@@ -580,7 +580,7 @@ class TradeLogger:
             self.logger.info(f"SIGNAL: {json.dumps(signal_data, default=str)}")
 
         except Exception as e:
-            self.logger.error(f"Error logging signal: {e}")
+            self.logger.error(f"Error logging signal: {e}", exc_info=True)
 
     def log_scan_result(self, scan_data: Dict[str, Any]):
         """
@@ -638,7 +638,7 @@ class TradeLogger:
             )
 
         except Exception as e:
-            self.logger.error(f"Error logging scan result: {e}")
+            self.logger.error(f"Error logging scan result: {e}", exc_info=True)
 
     def get_scan_history(self, days: int = 30, mode: str = None) -> pd.DataFrame:
         """
@@ -674,7 +674,7 @@ class TradeLogger:
             return df
 
         except Exception as e:
-            self.logger.error(f"Error fetching scan history: {e}")
+            self.logger.error(f"Error fetching scan history: {e}", exc_info=True)
             return pd.DataFrame()
 
     def _update_session_stats(self, trade_data: Dict[str, Any]):
@@ -702,7 +702,7 @@ class TradeLogger:
                 self.session_stats['max_drawdown'] = max(self.session_stats['max_drawdown'], current_drawdown)
 
         except Exception as e:
-            self.logger.error(f"Error updating session stats: {e}")
+            self.logger.error(f"Error updating session stats: {e}", exc_info=True)
 
     def get_trade_history(self, days: int = 30) -> pd.DataFrame:
         """Get trade history as DataFrame
@@ -735,7 +735,7 @@ class TradeLogger:
             return df
 
         except Exception as e:
-            self.logger.error(f"Error fetching trade history: {e}")
+            self.logger.error(f"Error fetching trade history: {e}", exc_info=True)
             return pd.DataFrame()
 
     def get_performance_summary(self) -> Dict[str, Any]:
@@ -811,7 +811,7 @@ class TradeLogger:
             return summary
 
         except Exception as e:
-            self.logger.error(f"Error calculating performance summary: {e}")
+            self.logger.error(f"Error calculating performance summary: {e}", exc_info=True)
             return self.session_stats
 
     def get_symbol_performance(self, symbol: str = None) -> Dict[str, Any]:
@@ -847,7 +847,7 @@ class TradeLogger:
             return symbol_stats
 
         except Exception as e:
-            self.logger.error(f"Error calculating symbol performance: {e}")
+            self.logger.error(f"Error calculating symbol performance: {e}", exc_info=True)
             return {}
 
     def get_strategy_performance(self, strategy: str = None) -> Dict[str, Any]:
@@ -886,7 +886,7 @@ class TradeLogger:
             return strategy_stats
 
         except Exception as e:
-            self.logger.error(f"Error calculating strategy performance: {e}")
+            self.logger.error(f"Error calculating strategy performance: {e}", exc_info=True)
             return {}
 
     def export_trades(self, filename: str = None, file_format: str = 'csv'):
@@ -917,7 +917,7 @@ class TradeLogger:
             self.logger.info(f"Trades exported to {filepath}")
 
         except Exception as e:
-            self.logger.error(f"Error exporting trades: {e}")
+            self.logger.error(f"Error exporting trades: {e}", exc_info=True)
 
     def log_system_event(self, event_type: str, message: str, data: Dict = None):
         """Log system events (startup, shutdown, errors, etc.)"""
@@ -932,7 +932,7 @@ class TradeLogger:
             self.logger.info(f"SYSTEM: {json.dumps(event_data, default=str)}")
 
         except Exception as e:
-            self.logger.error(f"Error logging system event: {e}")
+            self.logger.error(f"Error logging system event: {e}", exc_info=True)
 
     def get_daily_summary(self, date: str = None) -> Dict[str, Any]:
         """Get daily trading summary
@@ -969,7 +969,7 @@ class TradeLogger:
                 return {'date': date, 'trades': 0, 'total_pnl': 0}
 
         except Exception as e:
-            self.logger.error(f"Error getting daily summary: {e}")
+            self.logger.error(f"Error getting daily summary: {e}", exc_info=True)
             return {'date': date if date else datetime.now().strftime('%Y-%m-%d'), 'trades': 0, 'total_pnl': 0}
 
     def get_open_positions(self) -> List[Dict[str, Any]]:
@@ -1019,7 +1019,7 @@ class TradeLogger:
                 return open_positions
 
         except Exception as e:
-            self.logger.error(f"Error getting open positions: {e}")
+            self.logger.error(f"Error getting open positions: {e}", exc_info=True)
             return []
 
     def get_stale_positions(self, cutoff: datetime) -> List[Dict[str, Any]]:
@@ -1072,7 +1072,7 @@ class TradeLogger:
                 return stale_positions
 
         except Exception as e:
-            self.logger.error(f"Error getting stale positions: {e}")
+            self.logger.error(f"Error getting stale positions: {e}", exc_info=True)
             return []
 
     def close_trade(self, trade_id: int, exit_price: float, exit_reason: str, pnl: float = None):
@@ -1137,4 +1137,4 @@ class TradeLogger:
                 self.logger.info(f"Closed trade {trade_id}: {exit_reason}, P&L: ${pnl:.2f}")
 
         except Exception as e:
-            self.logger.error(f"Error closing trade {trade_id}: {e}")
+            self.logger.error(f"Error closing trade {trade_id}: {e}", exc_info=True)
