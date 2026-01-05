@@ -80,7 +80,8 @@ class Backtest1Hour:
         config: Dict = None,
         longs_only: bool = False,
         shorts_only: bool = False,
-        scanner_enabled: bool = None
+        scanner_enabled: bool = None,
+        kill_switch_trace: bool = False
     ):
         """
         Initialize the backtester.
@@ -96,6 +97,8 @@ class Backtest1Hour:
         self.config = config or self._load_config()
         self.longs_only = longs_only
         self.shorts_only = shorts_only
+        self.kill_switch_trace = kill_switch_trace
+        self._kill_switch_trace_log = []
 
         # Initialize volatility scanner if enabled
         scanner_config = self.config.get('volatility_scanner', {})
@@ -129,7 +132,19 @@ class Backtest1Hour:
         entry_config = self.config.get('entry_gate', {})
         exit_config = self.config.get('exit_manager', {})
 
-        self.risk_manager = RiskManager(risk_config)
+        # Position limits from config (defaults to 5)
+        self.max_open_positions = risk_config.get('max_open_positions', 5)
+
+        # Transform config keys for RiskManager compatibility
+        # RiskManager expects: max_position_size (decimal), max_positions
+        # Config may have: max_position_size_pct (percentage), max_open_positions
+        risk_manager_config = risk_config.copy()
+        if 'max_position_size_pct' in risk_manager_config:
+            risk_manager_config['max_position_size'] = risk_manager_config['max_position_size_pct'] / 100
+        if 'max_open_positions' in risk_manager_config:
+            risk_manager_config['max_positions'] = risk_manager_config['max_open_positions']
+
+        self.risk_manager = RiskManager(risk_manager_config)
         self.entry_gate = EntryGate(entry_config)
 
         # Build exit manager settings
@@ -213,6 +228,9 @@ class Backtest1Hour:
 
         # Scanner state
         self._daily_scanned_symbols = {}
+
+        # Kill switch trace log (for debugging position limit blocking)
+        self._kill_switch_trace_log = []
 
     def _build_daily_scan_results(
         self,
@@ -909,6 +927,264 @@ class Backtest1Hour:
                 self.exit_manager.unregister_position(symbol)
 
         return trades
+
+    def simulate_trades_interleaved(self, signals_data: Dict[str, pd.DataFrame]) -> List[Dict]:
+        """
+        Simulate trading across multiple symbols with position limit enforcement.
+
+        Unlike simulate_trades() which runs one symbol at a time, this method
+        processes all symbols bar-by-bar in time order, enforcing max_open_positions
+        across all symbols.
+
+        Args:
+            signals_data: Dict mapping symbol -> DataFrame with OHLCV, signals
+
+        Returns:
+            List of trade dicts from all symbols
+        """
+        self._reset_state()
+
+        all_trades = []
+        open_positions = {}  # symbol -> position dict
+
+        # Build unified timeline from all symbols
+        all_events = []
+        for symbol, df in signals_data.items():
+            for idx in range(len(df)):
+                row = df.iloc[idx]
+                ts = row.get('timestamp', idx)
+                all_events.append({
+                    'timestamp': ts,
+                    'symbol': symbol,
+                    'bar_index': idx,
+                    'row': row,
+                    'df': df
+                })
+
+        # Sort by timestamp
+        all_events.sort(key=lambda x: (x['timestamp'], x['symbol']))
+
+        # Track position state per symbol
+        position_state = {}  # symbol -> {'direction': 'LONG'/'SHORT', 'entry_price': float, ...}
+        last_trade_bar = {}  # symbol -> bar index of last trade
+
+        for event in all_events:
+            symbol = event['symbol']
+            row = event['row']
+            df = event['df']
+            bar_index = event['bar_index']
+            timestamp = event['timestamp']
+
+            current_price = row['close']
+            signal = row.get('signal', 0)
+
+            # Skip if price is NaN
+            if pd.isna(current_price):
+                continue
+
+            # Initialize state for this symbol if needed
+            if symbol not in position_state:
+                position_state[symbol] = None
+            if symbol not in last_trade_bar:
+                last_trade_bar[symbol] = -999
+
+            # ============ EXIT LOGIC ============
+            if position_state[symbol] is not None:
+                pos = position_state[symbol]
+                direction = pos['direction']
+                entry_price = pos['entry_price']
+                entry_bar = pos['entry_bar']
+                shares = pos['shares']
+
+                bar_high = row.get('high', current_price)
+                bar_low = row.get('low', current_price)
+
+                # Update price tracking
+                if bar_high > pos.get('highest_price', entry_price):
+                    pos['highest_price'] = bar_high
+                if bar_low < pos.get('lowest_price', entry_price):
+                    pos['lowest_price'] = bar_low
+
+                exit_triggered = False
+                exit_reason = ''
+                exit_price = current_price
+
+                # Check stop loss
+                stop_loss = pos.get('stop_loss', 0)
+                take_profit = pos.get('take_profit', 0)
+
+                if direction == 'LONG':
+                    if bar_low <= stop_loss:
+                        exit_triggered = True
+                        exit_price = stop_loss * (1 - self.STOP_SLIPPAGE)
+                        exit_reason = 'stop_loss'
+                    elif bar_high >= take_profit:
+                        exit_triggered = True
+                        exit_price = take_profit * (1 - self.EXIT_SLIPPAGE)
+                        exit_reason = 'take_profit'
+                else:  # SHORT
+                    if bar_high >= stop_loss:
+                        exit_triggered = True
+                        exit_price = stop_loss * (1 + self.STOP_SLIPPAGE)
+                        exit_reason = 'stop_loss'
+                    elif bar_low <= take_profit:
+                        exit_triggered = True
+                        exit_price = take_profit * (1 + self.EXIT_SLIPPAGE)
+                        exit_reason = 'take_profit'
+
+                # Check max hold
+                bars_held = bar_index - entry_bar
+                if not exit_triggered and bars_held >= self.max_hold_hours:
+                    exit_triggered = True
+                    exit_reason = 'max_hold'
+                    if direction == 'LONG':
+                        exit_price = current_price * (1 - self.EXIT_SLIPPAGE)
+                    else:
+                        exit_price = current_price * (1 + self.EXIT_SLIPPAGE)
+
+                if exit_triggered:
+                    # Calculate P&L
+                    if direction == 'LONG':
+                        pnl = (exit_price - entry_price) * shares
+                    else:
+                        pnl = (entry_price - exit_price) * shares
+
+                    pnl_pct = (pnl / (entry_price * shares)) * 100 if entry_price > 0 else 0
+
+                    all_trades.append({
+                        'symbol': symbol,
+                        'direction': direction,
+                        'entry_date': pos['entry_time'],
+                        'exit_date': timestamp,
+                        'entry_price': entry_price,
+                        'exit_price': exit_price,
+                        'shares': shares,
+                        'pnl': pnl,
+                        'pnl_pct': pnl_pct,
+                        'exit_reason': exit_reason,
+                        'strategy': pos.get('strategy', 'Unknown'),
+                        'reasoning': pos.get('reasoning', ''),
+                        'bars_held': bars_held,
+                        'mfe': pos.get('highest_price', entry_price) - entry_price if direction == 'LONG' else entry_price - pos.get('lowest_price', entry_price),
+                        'mae': entry_price - pos.get('lowest_price', entry_price) if direction == 'LONG' else pos.get('highest_price', entry_price) - entry_price,
+                        'mfe_pct': 0,
+                        'mae_pct': 0
+                    })
+
+                    # Remove from open positions
+                    del open_positions[symbol]
+                    position_state[symbol] = None
+                    last_trade_bar[symbol] = bar_index
+
+            # ============ ENTRY LOGIC ============
+            if position_state[symbol] is None and signal != 0:
+                # Check cooldown
+                bars_since_last = bar_index - last_trade_bar[symbol]
+                if bars_since_last < self.COOLDOWN_BARS:
+                    continue
+
+                # Check position limit
+                if len(open_positions) >= self.max_open_positions:
+                    # Log blocked entry
+                    if self.kill_switch_trace:
+                        self._kill_switch_trace_log.append({
+                            'event': 'ENTRY_BLOCKED',
+                            'symbol': symbol,
+                            'timestamp': timestamp,
+                            'signal': signal,
+                            'block_reason': f'max_positions reached ({len(open_positions)}/{self.max_open_positions})',
+                            'open_positions': list(open_positions.keys())
+                        })
+                    continue
+
+                # Determine direction
+                if signal == 1 and not self.shorts_only:
+                    direction = 'LONG'
+                elif signal == -1 and not self.longs_only:
+                    direction = 'SHORT'
+                else:
+                    continue
+
+                # Calculate entry price with slippage
+                open_price = row.get('open', current_price)
+                if direction == 'LONG':
+                    entry_price = open_price * (1 + self.ENTRY_SLIPPAGE)
+                    stop_loss = entry_price * (1 - self.default_stop_loss_pct)
+                    take_profit = entry_price * (1 + self.default_take_profit_pct)
+                else:
+                    entry_price = open_price * (1 - self.ENTRY_SLIPPAGE)
+                    stop_loss = entry_price * (1 + self.default_stop_loss_pct)
+                    take_profit = entry_price * (1 - self.default_take_profit_pct)
+
+                # Calculate position size
+                shares = self.risk_manager.calculate_position_size(
+                    self.portfolio_value, entry_price, stop_loss
+                )
+
+                if shares <= 0:
+                    continue
+
+                # Open position
+                position_state[symbol] = {
+                    'direction': direction,
+                    'entry_price': entry_price,
+                    'entry_bar': bar_index,
+                    'entry_time': timestamp,
+                    'shares': shares,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'highest_price': entry_price,
+                    'lowest_price': entry_price,
+                    'strategy': row.get('strategy', 'Unknown'),
+                    'reasoning': row.get('reasoning', '')
+                }
+                open_positions[symbol] = position_state[symbol]
+                last_trade_bar[symbol] = bar_index
+
+        # Close any remaining positions at end of backtest
+        for symbol, pos in list(open_positions.items()):
+            if pos is None:
+                continue
+
+            direction = pos['direction']
+            entry_price = pos['entry_price']
+            shares = pos['shares']
+
+            # Get last price for this symbol
+            df = signals_data[symbol]
+            last_row = df.iloc[-1]
+            close_price = last_row['close']
+
+            if direction == 'LONG':
+                exit_price = close_price * (1 - self.EXIT_SLIPPAGE)
+                pnl = (exit_price - entry_price) * shares
+            else:
+                exit_price = close_price * (1 + self.EXIT_SLIPPAGE)
+                pnl = (entry_price - exit_price) * shares
+
+            pnl_pct = (pnl / (entry_price * shares)) * 100 if entry_price > 0 else 0
+
+            all_trades.append({
+                'symbol': symbol,
+                'direction': direction,
+                'entry_date': pos['entry_time'],
+                'exit_date': last_row.get('timestamp', len(df) - 1),
+                'entry_price': entry_price,
+                'exit_price': exit_price,
+                'shares': shares,
+                'pnl': pnl,
+                'pnl_pct': pnl_pct,
+                'exit_reason': 'end_of_backtest',
+                'strategy': pos.get('strategy', 'Unknown'),
+                'reasoning': pos.get('reasoning', ''),
+                'bars_held': len(df) - 1 - pos['entry_bar'],
+                'mfe': 0,
+                'mae': 0,
+                'mfe_pct': 0,
+                'mae_pct': 0
+            })
+
+        return all_trades
 
     def calculate_metrics(self, trades: List[Dict]) -> Dict:
         """
