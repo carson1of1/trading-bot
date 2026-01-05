@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 import logging
 import pytz
+import json
+from pathlib import Path
 
 class RiskManager:
     """Manage trading risks and position sizing"""
@@ -978,6 +980,12 @@ class ExitManager:
         self.logger = logging.getLogger('trading_bot')
         self.positions: Dict[str, PositionExitState] = {}
 
+        # FIX (Jan 5, 2026): State persistence for trailing TP across restarts
+        # Without this, peak_price/bars_held are lost on restart, breaking trailing exits
+        self.state_file = Path(__file__).parent.parent / 'logs' / 'exit_manager_state.json'
+        self._persisted_state: Dict[str, dict] = {}
+        self._load_persisted_state()
+
         # Load settings from config
         risk_settings = (bot_settings or {}).get('risk', {})
 
@@ -1003,6 +1011,106 @@ class ExitManager:
             f"hard_stop=-{self.hard_stop_pct*100:.2f}%, "
             f"ATR_mult={self.atr_multiplier}"
         )
+
+    # ==================== STATE PERSISTENCE (Jan 5, 2026) ====================
+    # FIX: Persist ExitManager state across bot restarts
+    # Without this, peak_price/bars_held are lost, breaking trailing exits
+
+    def _load_persisted_state(self):
+        """Load persisted state from JSON file on startup."""
+        try:
+            if self.state_file.exists():
+                with open(self.state_file, 'r') as f:
+                    self._persisted_state = json.load(f)
+                self.logger.info(f"EXIT_MGR | Loaded persisted state for {len(self._persisted_state)} positions")
+        except Exception as e:
+            self.logger.warning(f"EXIT_MGR | Failed to load persisted state: {e}")
+            self._persisted_state = {}
+
+    def _save_persisted_state(self):
+        """Save current state to JSON file for persistence across restarts."""
+        try:
+            state_to_save = {}
+            for symbol, pos in self.positions.items():
+                state_to_save[symbol] = {
+                    'entry_price': pos.entry_price,
+                    'entry_time': pos.entry_time.isoformat() if pos.entry_time else None,
+                    'quantity': pos.quantity,
+                    'direction': pos.direction,
+                    'profit_floor_active': pos.profit_floor_active,
+                    'profit_floor_price': pos.profit_floor_price,
+                    'trailing_active': pos.trailing_active,
+                    'trailing_stop_price': pos.trailing_stop_price,
+                    'partial_tp_executed': pos.partial_tp_executed,
+                    'partial_tp_qty': pos.partial_tp_qty,
+                    'partial_tp2_executed': pos.partial_tp2_executed,
+                    'partial_tp2_qty': pos.partial_tp2_qty,
+                    'peak_price': pos.peak_price,
+                    'trough_price': pos.trough_price if pos.trough_price != float('inf') else None,
+                    'peak_unrealized_pnl_pct': pos.peak_unrealized_pnl_pct,
+                    'current_atr': pos.current_atr,
+                    'bars_held': pos.bars_held,
+                }
+
+            # Ensure logs directory exists
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+
+            with open(self.state_file, 'w') as f:
+                json.dump(state_to_save, f, indent=2)
+
+            self.logger.debug(f"EXIT_MGR | Saved state for {len(state_to_save)} positions")
+        except Exception as e:
+            self.logger.error(f"EXIT_MGR | Failed to save state: {e}")
+
+    def _restore_position_state(self, symbol: str, state: PositionExitState) -> PositionExitState:
+        """
+        Restore persisted state to a position if available.
+
+        This preserves peak_price, bars_held, trailing activation across restarts.
+        Only restores if entry_price matches (same position, not a new one).
+        """
+        if symbol not in self._persisted_state:
+            return state
+
+        saved = self._persisted_state[symbol]
+
+        # Only restore if entry price matches (same position)
+        if abs(saved.get('entry_price', 0) - state.entry_price) > 0.01:
+            self.logger.info(f"EXIT_MGR | {symbol} | Entry price changed, starting fresh state")
+            return state
+
+        # Restore state
+        state.profit_floor_active = saved.get('profit_floor_active', False)
+        state.profit_floor_price = saved.get('profit_floor_price', 0.0)
+        state.trailing_active = saved.get('trailing_active', False)
+        state.trailing_stop_price = saved.get('trailing_stop_price', 0.0)
+        state.partial_tp_executed = saved.get('partial_tp_executed', False)
+        state.partial_tp_qty = saved.get('partial_tp_qty', 0)
+        state.partial_tp2_executed = saved.get('partial_tp2_executed', False)
+        state.partial_tp2_qty = saved.get('partial_tp2_qty', 0)
+        state.peak_price = saved.get('peak_price', state.entry_price)
+        state.trough_price = saved.get('trough_price', state.entry_price) or state.entry_price
+        state.peak_unrealized_pnl_pct = saved.get('peak_unrealized_pnl_pct', 0.0)
+        state.current_atr = saved.get('current_atr', 0.0)
+        state.bars_held = saved.get('bars_held', 0)
+
+        self.logger.info(
+            f"EXIT_MGR | {symbol} | RESTORED | "
+            f"Peak: ${state.peak_price:.2f}, Bars: {state.bars_held}, "
+            f"Trailing: {'ACTIVE' if state.trailing_active else 'inactive'}, "
+            f"PartialTP: {'DONE' if state.partial_tp_executed else 'pending'}"
+        )
+
+        return state
+
+    def _cleanup_stale_state(self, active_symbols: set):
+        """Remove persisted state for positions that no longer exist."""
+        stale = [s for s in self._persisted_state if s not in active_symbols]
+        for symbol in stale:
+            del self._persisted_state[symbol]
+            self.logger.debug(f"EXIT_MGR | Cleaned up stale state for {symbol}")
+
+    # ==================== END STATE PERSISTENCE ====================
 
     def register_position(self, symbol: str, entry_price: float, quantity: int,
                          entry_time: datetime = None, direction: str = 'LONG') -> PositionExitState:
@@ -1048,6 +1156,10 @@ class ExitManager:
             bars_held=0
         )
 
+        # FIX (Jan 5, 2026): Restore persisted state if available (same position)
+        # This preserves peak_price, bars_held, trailing activation across restarts
+        state = self._restore_position_state(symbol, state)
+
         self.positions[symbol] = state
 
         # Calculate hard stop price based on direction
@@ -1079,6 +1191,8 @@ class ExitManager:
         if symbol in self.positions:
             del self.positions[symbol]
             self.logger.info(f"EXIT_MGR | {symbol} | UNREGISTERED")
+            # FIX (Jan 5, 2026): Save state after position removal
+            self._save_persisted_state()
             return True
         return False
 
@@ -1114,6 +1228,8 @@ class ExitManager:
         """
         if symbol in self.positions:
             self.positions[symbol].bars_held += 1
+            # FIX (Jan 5, 2026): Save state after each bar to preserve peak_price/bars_held
+            self._save_persisted_state()
             return self.positions[symbol].bars_held
         return -1
 
@@ -1437,6 +1553,9 @@ class ExitManager:
                     }
 
         # No exit triggered
+        # FIX (Jan 5, 2026): Save state after each evaluation to persist peak_price updates
+        # This ensures trailing stop progress survives bot restarts
+        self._save_persisted_state()
         return None
 
     def _log_exit_trigger(self, symbol: str, reason: str,

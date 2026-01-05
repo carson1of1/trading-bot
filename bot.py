@@ -1043,6 +1043,14 @@ class TradingBot:
                 current_price = data['close'].iloc[-1]
                 bar_high = data['high'].iloc[-1]
                 bar_low = data['low'].iloc[-1]
+
+                # FIX (Jan 5, 2026): Defensive check for missing entry_price
+                # This prevents KeyError crashes when position dict is malformed
+                # (can happen if sync_positions fails mid-way or data corruption)
+                if 'entry_price' not in position:
+                    logger.error(f"EXIT_CHECK | {symbol} | SKIPPED - missing entry_price in position dict: {position}")
+                    continue
+
                 entry_price = position['entry_price']
                 direction = position.get('direction', 'LONG')
 
