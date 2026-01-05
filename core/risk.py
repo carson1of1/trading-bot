@@ -18,9 +18,20 @@ class RiskManager:
         if bot_settings:
             self.max_risk_per_trade = bot_settings.get('max_risk_per_trade', 0.015)
             self.max_daily_loss = bot_settings.get('daily_loss_limit', 0.04)
-            # BUG FIX (Dec 4, 2025): Changed default from 0.15 to 0.25 to match config.yaml
-            self.max_position_size = bot_settings.get('max_position_size', 0.25)
-            self.max_positions = bot_settings.get('max_positions', 9999)  # DISABLED (Dec 8, 2025): No limit
+            # BUG FIX (Jan 4, 2026): Read BOTH key names for backwards compatibility
+            # Config uses 'max_position_size_pct' (percentage), code used 'max_position_size' (decimal)
+            # This mismatch caused 25% position sizing instead of configured 3%
+            if 'max_position_size_pct' in bot_settings:
+                self.max_position_size = bot_settings.get('max_position_size_pct') / 100
+            else:
+                self.max_position_size = bot_settings.get('max_position_size', 0.03)  # Default 3%
+            # BUG FIX (Jan 4, 2026): Read BOTH key names for backwards compatibility
+            # Config uses 'max_open_positions', code used 'max_positions'
+            # This mismatch caused unlimited positions (9999) instead of configured 5
+            if 'max_open_positions' in bot_settings:
+                self.max_positions = bot_settings.get('max_open_positions')
+            else:
+                self.max_positions = bot_settings.get('max_positions', 5)  # Default 5 positions
             self.enable_position_scaling = bot_settings.get('enable_position_scaling', False)
             self.scaling_profit_threshold = bot_settings.get('scaling_profit_threshold', 1.5)
 
@@ -38,9 +49,10 @@ class RiskManager:
             # Default values
             self.max_risk_per_trade = 0.015  # 1.5% of portfolio per trade
             self.max_daily_loss = 0.04      # 4% maximum daily loss
-            # BUG FIX (Dec 4, 2025): Changed default from 0.15 to 0.25 to match config.yaml
-            self.max_position_size = 0.25   # 25% maximum position size
-            self.max_positions = 9999  # DISABLED (Dec 8, 2025): No limit
+            # BUG FIX (Jan 4, 2026): Conservative defaults to prevent catastrophic losses
+            # Previous 25% position size + unlimited positions caused 62%+ daily losses
+            self.max_position_size = 0.03   # 3% maximum position size (was 25%!)
+            self.max_positions = 5          # 5 max positions (was 9999!)
             self.enable_position_scaling = False
             self.scaling_profit_threshold = 1.5
 
@@ -287,8 +299,15 @@ class RiskManager:
         if bot_settings:
             self.max_risk_per_trade = bot_settings.get('max_risk_per_trade', self.max_risk_per_trade)
             self.max_daily_loss = bot_settings.get('daily_loss_limit', self.max_daily_loss)
-            self.max_position_size = bot_settings.get('max_position_size', self.max_position_size)
-            self.max_positions = bot_settings.get('max_positions', self.max_positions)
+            # BUG FIX (Jan 4, 2026): Handle both config key names
+            if 'max_position_size_pct' in bot_settings:
+                self.max_position_size = bot_settings.get('max_position_size_pct') / 100
+            elif 'max_position_size' in bot_settings:
+                self.max_position_size = bot_settings.get('max_position_size')
+            if 'max_open_positions' in bot_settings:
+                self.max_positions = bot_settings.get('max_open_positions')
+            elif 'max_positions' in bot_settings:
+                self.max_positions = bot_settings.get('max_positions')
             self.enable_position_scaling = bot_settings.get('enable_position_scaling', self.enable_position_scaling)
             self.scaling_profit_threshold = bot_settings.get('scaling_profit_threshold', self.scaling_profit_threshold)
 
@@ -706,10 +725,10 @@ class RiskManager:
                 'warnings': []
             }
 
-            # BUG FIX (Dec 10, 2025): Re-enabled position limit check as SAFETY GUARD
-            # Even if user requested removal, we need a hard cap to prevent runaway position count
-            # The max_positions is set to 9999 by default (effectively unlimited) but can be overridden
-            if self.max_positions < 9999 and current_positions is not None:
+            # BUG FIX (Jan 4, 2026): ALWAYS enforce position limit
+            # Previously only checked if max_positions < 9999, but default is now 5
+            # This is critical to prevent catastrophic losses from over-allocation
+            if current_positions is not None:
                 if side.lower() == 'buy' and len(current_positions) >= self.max_positions:
                     validation_results['approved'] = False
                     validation_results['reasons'].append(
@@ -871,11 +890,16 @@ class PositionExitState:
     - Profit floor only tightens (never loosens)
     - Trailing stop only tightens (never loosens)
     - Partial take profit executes exactly once
+
+    Supports both LONG and SHORT positions (Jan 2026):
+    - LONG: Profit when price goes UP, stop when price goes DOWN
+    - SHORT: Profit when price goes DOWN, stop when price goes UP
     """
     symbol: str
     entry_price: float
     entry_time: datetime
     quantity: int
+    direction: str = 'LONG'  # 'LONG' or 'SHORT' (Jan 2026)
 
     # Exit thresholds (percentages as decimals, e.g., 0.0125 for 1.25%)
     profit_floor_activation_pct: float = 0.0125  # +1.25%
@@ -893,8 +917,9 @@ class PositionExitState:
     partial_tp_executed: bool = False
     partial_tp_qty: int = 0                      # Shares closed at partial TP
 
-    # Peak tracking for trailing
-    peak_price: float = 0.0
+    # Peak/trough tracking for trailing (peak for LONG, trough for SHORT)
+    peak_price: float = 0.0              # Highest price seen (for LONG trailing)
+    trough_price: float = float('inf')   # Lowest price seen (for SHORT trailing)
     peak_unrealized_pnl_pct: float = 0.0
 
     # ATR for volatility-aware trailing
@@ -910,9 +935,11 @@ class PositionExitState:
     last_update_time: datetime = field(default_factory=lambda: datetime.now(pytz.UTC))
 
     def __post_init__(self):
-        """Initialize peak price to entry price."""
+        """Initialize peak/trough price to entry price."""
         if self.peak_price == 0.0:
             self.peak_price = self.entry_price
+        if self.trough_price == float('inf'):
+            self.trough_price = self.entry_price
 
 
 class ExitManager:
@@ -977,7 +1004,7 @@ class ExitManager:
         )
 
     def register_position(self, symbol: str, entry_price: float, quantity: int,
-                         entry_time: datetime = None) -> PositionExitState:
+                         entry_time: datetime = None, direction: str = 'LONG') -> PositionExitState:
         """
         Register a new position for exit management.
 
@@ -986,6 +1013,7 @@ class ExitManager:
             entry_price: Entry price per share
             quantity: Number of shares
             entry_time: Entry timestamp (defaults to now)
+            direction: 'LONG' or 'SHORT' (Jan 2026 - added SHORT support)
 
         Returns:
             PositionExitState object for the position
@@ -993,11 +1021,18 @@ class ExitManager:
         if entry_time is None:
             entry_time = datetime.now(pytz.UTC)
 
+        # Normalize direction
+        direction = direction.upper()
+        if direction not in ('LONG', 'SHORT'):
+            self.logger.warning(f"Invalid direction '{direction}', defaulting to LONG")
+            direction = 'LONG'
+
         state = PositionExitState(
             symbol=symbol,
             entry_price=entry_price,
             entry_time=entry_time,
             quantity=quantity,
+            direction=direction,
             profit_floor_activation_pct=self.profit_floor_activation_pct,
             profit_floor_lock_pct=self.profit_floor_lock_pct,
             trailing_activation_pct=self.trailing_activation_pct,
@@ -1006,6 +1041,7 @@ class ExitManager:
             hard_stop_pct=self.hard_stop_pct,
             atr_multiplier=self.atr_multiplier,
             peak_price=entry_price,
+            trough_price=entry_price,
             min_hold_bars=self.min_hold_bars,
             min_hold_bypass_loss_pct=self.min_hold_bypass_loss_pct,
             bars_held=0
@@ -1013,10 +1049,18 @@ class ExitManager:
 
         self.positions[symbol] = state
 
+        # Calculate hard stop price based on direction
+        if direction == 'LONG':
+            hard_stop_price = entry_price * (1 - self.hard_stop_pct)
+            stop_desc = f"${hard_stop_price:.2f} (-{self.hard_stop_pct*100:.2f}%)"
+        else:  # SHORT
+            hard_stop_price = entry_price * (1 + self.hard_stop_pct)
+            stop_desc = f"${hard_stop_price:.2f} (+{self.hard_stop_pct*100:.2f}%)"
+
         self.logger.info(
             f"EXIT_MGR | {symbol} | REGISTERED | "
-            f"Entry: ${entry_price:.2f}, Qty: {quantity}, "
-            f"Hard Stop: ${entry_price * (1 - self.hard_stop_pct):.2f} (-{self.hard_stop_pct*100:.2f}%), "
+            f"Direction: {direction}, Entry: ${entry_price:.2f}, Qty: {quantity}, "
+            f"Hard Stop: {stop_desc}, "
             f"Min Hold: {self.min_hold_bars} bars"
         )
 
@@ -1074,16 +1118,20 @@ class ExitManager:
         return -1
 
     def evaluate_exit(self, symbol: str, current_price: float,
-                     current_atr: float = None) -> Optional[dict]:
+                     current_atr: float = None, bar_high: float = None,
+                     bar_low: float = None) -> Optional[dict]:
         """
         Evaluate exit conditions for a position.
 
         This is the CORE METHOD called on every price update.
+        Supports both LONG and SHORT positions (Jan 2026).
 
         Args:
             symbol: Stock symbol
-            current_price: Current market price
+            current_price: Current market price (close)
             current_atr: Current ATR(14) value (optional but recommended)
+            bar_high: High of current bar (for SHORT stop checks)
+            bar_low: Low of current bar (for LONG stop checks)
 
         Returns:
             None if no action needed, or dict with:
@@ -1098,26 +1146,55 @@ class ExitManager:
 
         state = self.positions[symbol]
         entry_price = state.entry_price
+        is_short = state.direction == 'SHORT'
 
-        # Calculate current unrealized P&L
-        unrealized_pnl_pct = (current_price - entry_price) / entry_price
+        # Use bar extremes if provided, otherwise use current_price
+        check_price_for_stop = bar_high if (is_short and bar_high) else (bar_low if bar_low else current_price)
+        check_price_for_tp = bar_low if (is_short and bar_low) else (bar_high if bar_high else current_price)
+
+        # Calculate current unrealized P&L (direction-aware)
+        if is_short:
+            # SHORT: profit when price goes DOWN
+            unrealized_pnl_pct = (entry_price - current_price) / entry_price
+        else:
+            # LONG: profit when price goes UP
+            unrealized_pnl_pct = (current_price - entry_price) / entry_price
 
         # Update ATR if provided
         if current_atr is not None and current_atr > 0:
             state.current_atr = current_atr
 
-        # Update peak tracking
-        if current_price > state.peak_price:
-            state.peak_price = current_price
-            state.peak_unrealized_pnl_pct = unrealized_pnl_pct
+        # Update peak/trough tracking (direction-aware)
+        if is_short:
+            # SHORT: track trough (lowest price = most profit)
+            if current_price < state.trough_price:
+                state.trough_price = current_price
+                state.peak_unrealized_pnl_pct = unrealized_pnl_pct
+        else:
+            # LONG: track peak (highest price = most profit)
+            if current_price > state.peak_price:
+                state.peak_price = current_price
+                state.peak_unrealized_pnl_pct = unrealized_pnl_pct
 
         state.last_update_time = datetime.now(pytz.UTC)
 
         # ================================================================
-        # TIER 0: HARD STOP (-0.50% from entry) - Always active
+        # TIER 0: HARD STOP - Always active
+        # LONG: -X% from entry (price drops)
+        # SHORT: +X% from entry (price rises)
         # ================================================================
-        hard_stop_price = entry_price * (1 - state.hard_stop_pct)
-        if current_price <= hard_stop_price:
+        if is_short:
+            hard_stop_price = entry_price * (1 + state.hard_stop_pct)
+            # For SHORT, check if bar_high >= stop (price went up too much)
+            stop_check_price = bar_high if bar_high else current_price
+            stop_triggered = stop_check_price >= hard_stop_price
+        else:
+            hard_stop_price = entry_price * (1 - state.hard_stop_pct)
+            # For LONG, check if bar_low <= stop (price went down too much)
+            stop_check_price = bar_low if bar_low else current_price
+            stop_triggered = stop_check_price <= hard_stop_price
+
+        if stop_triggered:
             self._log_exit_trigger(
                 symbol, self.REASON_HARD_STOP,
                 current_price, hard_stop_price, unrealized_pnl_pct
@@ -1132,7 +1209,6 @@ class ExitManager:
 
         # ================================================================
         # MINIMUM HOLD TIME CHECK (Dec 29, 2025)
-        # Analysis showed short trades (<=10 bars) lose money, long trades profit
         # Block non-stop exits until min_hold_bars is reached
         # Exception: allow early exit if loss exceeds bypass threshold
         # ================================================================
@@ -1153,31 +1229,40 @@ class ExitManager:
             )
 
         # ================================================================
-        # TIER 1: PROFIT FLOOR CHECK (activates at +0.40%)
-        # Once active, enforces minimum +0.15% profit (non-decreasing floor)
+        # TIER 1: PROFIT FLOOR CHECK
+        # LONG: floor is below current price, exit if price drops to floor
+        # SHORT: floor is above current price, exit if price rises to floor
         # ================================================================
         if not state.profit_floor_active:
             # Check if we should activate profit floor
             if unrealized_pnl_pct >= state.profit_floor_activation_pct:
                 state.profit_floor_active = True
                 # Set initial floor at locked profit level
-                state.profit_floor_price = entry_price * (1 + state.profit_floor_lock_pct)
+                if is_short:
+                    # SHORT: floor is ABOVE entry (lower price = profit locked)
+                    state.profit_floor_price = entry_price * (1 - state.profit_floor_lock_pct)
+                else:
+                    # LONG: floor is BELOW entry offset upward
+                    state.profit_floor_price = entry_price * (1 + state.profit_floor_lock_pct)
 
                 self.logger.info(
                     f"EXIT_MGR | {symbol} | PROFIT_FLOOR_ACTIVATED | "
-                    f"Current: +{unrealized_pnl_pct*100:.2f}%, "
-                    f"Floor locked at: ${state.profit_floor_price:.2f} (+{state.profit_floor_lock_pct*100:.2f}%)"
+                    f"Direction: {state.direction}, Current: +{unrealized_pnl_pct*100:.2f}%, "
+                    f"Floor locked at: ${state.profit_floor_price:.2f} ({'+' if not is_short else '-'}{state.profit_floor_lock_pct*100:.2f}%)"
                 )
 
         if state.profit_floor_active:
-            # Floor only moves UP (tightens), never loosens
-            # As price rises, we can raise the floor (but never lower it)
-            new_floor = entry_price * (1 + state.profit_floor_lock_pct)
-            if new_floor > state.profit_floor_price:
-                state.profit_floor_price = new_floor
-
             # Check if price hit the floor
-            if current_price <= state.profit_floor_price:
+            if is_short:
+                # SHORT: exit if price rises to floor (bar_high >= floor)
+                floor_check_price = bar_high if bar_high else current_price
+                floor_triggered = floor_check_price >= state.profit_floor_price
+            else:
+                # LONG: exit if price drops to floor (bar_low <= floor)
+                floor_check_price = bar_low if bar_low else current_price
+                floor_triggered = floor_check_price <= state.profit_floor_price
+
+            if floor_triggered:
                 self._log_exit_trigger(
                     symbol, self.REASON_PROFIT_FLOOR,
                     current_price, state.profit_floor_price, unrealized_pnl_pct
@@ -1191,8 +1276,9 @@ class ExitManager:
                 }
 
         # ================================================================
-        # TIER 2: ATR TRAILING STOP (activates at +1.75%)
-        # Uses ATR(14) x 2.0 for volatility-aware trailing
+        # TIER 2: ATR TRAILING STOP
+        # LONG: trail below peak, exit if price drops to trail
+        # SHORT: trail above trough, exit if price rises to trail
         # ================================================================
         if not state.trailing_active:
             # Check if we should activate trailing stop
@@ -1209,18 +1295,28 @@ class ExitManager:
                         f"EXIT_MGR | {symbol} | NO_ATR | Using 1% fallback for trailing"
                     )
 
-                state.trailing_stop_price = current_price - trail_distance
-
-                # Ensure trailing stop is at least at profit floor level
-                if state.profit_floor_active:
-                    state.trailing_stop_price = max(
-                        state.trailing_stop_price,
-                        state.profit_floor_price
-                    )
+                if is_short:
+                    # SHORT: trail ABOVE trough (lowest price seen)
+                    state.trailing_stop_price = state.trough_price + trail_distance
+                    # Ensure trailing stop is at most at profit floor level
+                    if state.profit_floor_active:
+                        state.trailing_stop_price = min(
+                            state.trailing_stop_price,
+                            state.profit_floor_price
+                        )
+                else:
+                    # LONG: trail BELOW peak (highest price seen)
+                    state.trailing_stop_price = state.peak_price - trail_distance
+                    # Ensure trailing stop is at least at profit floor level
+                    if state.profit_floor_active:
+                        state.trailing_stop_price = max(
+                            state.trailing_stop_price,
+                            state.profit_floor_price
+                        )
 
                 self.logger.info(
                     f"EXIT_MGR | {symbol} | TRAILING_ACTIVATED | "
-                    f"Current: ${current_price:.2f} (+{unrealized_pnl_pct*100:.2f}%), "
+                    f"Direction: {state.direction}, Current: ${current_price:.2f} (+{unrealized_pnl_pct*100:.2f}%), "
                     f"Trail: ${state.trailing_stop_price:.2f}, "
                     f"ATR: ${state.current_atr:.2f}, Distance: ${trail_distance:.2f}"
                 )
@@ -1232,26 +1328,46 @@ class ExitManager:
             else:
                 trail_distance = current_price * 0.01
 
-            new_trail = current_price - trail_distance
+            if is_short:
+                # SHORT: recalculate from trough, trail only moves DOWN (tighter)
+                new_trail = state.trough_price + trail_distance
+                if new_trail < state.trailing_stop_price:
+                    old_trail = state.trailing_stop_price
+                    state.trailing_stop_price = new_trail
+                    self.logger.debug(
+                        f"EXIT_MGR | {symbol} | TRAIL_TIGHTENED | "
+                        f"${old_trail:.2f} -> ${new_trail:.2f}"
+                    )
+                # Ensure trailing is never above profit floor for shorts
+                if state.profit_floor_active:
+                    state.trailing_stop_price = min(
+                        state.trailing_stop_price,
+                        state.profit_floor_price
+                    )
+                # Check if price hit trailing stop (bar_high >= trail)
+                trail_check_price = bar_high if bar_high else current_price
+                trail_triggered = trail_check_price >= state.trailing_stop_price
+            else:
+                # LONG: recalculate from peak, trail only moves UP (tighter)
+                new_trail = state.peak_price - trail_distance
+                if new_trail > state.trailing_stop_price:
+                    old_trail = state.trailing_stop_price
+                    state.trailing_stop_price = new_trail
+                    self.logger.debug(
+                        f"EXIT_MGR | {symbol} | TRAIL_TIGHTENED | "
+                        f"${old_trail:.2f} -> ${new_trail:.2f}"
+                    )
+                # Ensure trailing is never below profit floor for longs
+                if state.profit_floor_active:
+                    state.trailing_stop_price = max(
+                        state.trailing_stop_price,
+                        state.profit_floor_price
+                    )
+                # Check if price hit trailing stop (bar_low <= trail)
+                trail_check_price = bar_low if bar_low else current_price
+                trail_triggered = trail_check_price <= state.trailing_stop_price
 
-            # Trailing stop only moves UP
-            if new_trail > state.trailing_stop_price:
-                old_trail = state.trailing_stop_price
-                state.trailing_stop_price = new_trail
-                self.logger.debug(
-                    f"EXIT_MGR | {symbol} | TRAIL_TIGHTENED | "
-                    f"${old_trail:.2f} -> ${new_trail:.2f}"
-                )
-
-            # Ensure trailing is never below profit floor
-            if state.profit_floor_active:
-                state.trailing_stop_price = max(
-                    state.trailing_stop_price,
-                    state.profit_floor_price
-                )
-
-            # Check if price hit trailing stop
-            if current_price <= state.trailing_stop_price:
+            if trail_triggered:
                 self._log_exit_trigger(
                     symbol, self.REASON_ATR_TRAILING,
                     current_price, state.trailing_stop_price, unrealized_pnl_pct
@@ -1265,7 +1381,7 @@ class ExitManager:
                 }
 
         # ================================================================
-        # TIER 3: PARTIAL TAKE PROFIT (at +2.00%)
+        # TIER 3: PARTIAL TAKE PROFIT
         # Close 50% of position, move stop to breakeven on remainder
         # ================================================================
         if not state.partial_tp_executed:
@@ -1277,16 +1393,24 @@ class ExitManager:
                     state.partial_tp_executed = True
                     state.partial_tp_qty = partial_qty
 
-                    # After partial TP, raise profit floor to at least breakeven
+                    # After partial TP, set profit floor to at least breakeven
                     # This ensures the remaining position doesn't go negative
-                    state.profit_floor_price = max(
-                        state.profit_floor_price,
-                        entry_price  # Breakeven
-                    )
+                    if is_short:
+                        # SHORT: floor at entry means if price rises back to entry, we exit
+                        state.profit_floor_price = min(
+                            state.profit_floor_price if state.profit_floor_price > 0 else entry_price,
+                            entry_price  # Breakeven
+                        )
+                    else:
+                        # LONG: floor at entry means if price drops back to entry, we exit
+                        state.profit_floor_price = max(
+                            state.profit_floor_price,
+                            entry_price  # Breakeven
+                        )
 
                     self.logger.info(
                         f"EXIT_MGR | {symbol} | PARTIAL_TP_TRIGGERED | "
-                        f"Current: ${current_price:.2f} (+{unrealized_pnl_pct*100:.2f}%), "
+                        f"Direction: {state.direction}, Current: ${current_price:.2f} (+{unrealized_pnl_pct*100:.2f}%), "
                         f"Closing: {partial_qty} shares, "
                         f"Remaining: {state.quantity - partial_qty} shares, "
                         f"New floor: ${state.profit_floor_price:.2f}"
@@ -1349,11 +1473,21 @@ class ExitManager:
         if not state:
             return None
 
+        is_short = state.direction == 'SHORT'
+
+        # Calculate hard stop based on direction
+        if is_short:
+            hard_stop_price = state.entry_price * (1 + state.hard_stop_pct)
+        else:
+            hard_stop_price = state.entry_price * (1 - state.hard_stop_pct)
+
         return {
             'symbol': symbol,
+            'direction': state.direction,
             'entry_price': state.entry_price,
             'quantity': state.quantity,
             'peak_price': state.peak_price,
+            'trough_price': state.trough_price,
             'profit_floor_active': state.profit_floor_active,
             'profit_floor_price': state.profit_floor_price,
             'trailing_active': state.trailing_active,
@@ -1361,7 +1495,7 @@ class ExitManager:
             'partial_tp_executed': state.partial_tp_executed,
             'partial_tp_qty': state.partial_tp_qty,
             'current_atr': state.current_atr,
-            'hard_stop_price': state.entry_price * (1 - state.hard_stop_pct)
+            'hard_stop_price': hard_stop_price
         }
 
 

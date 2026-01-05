@@ -802,10 +802,14 @@ class Backtest1Hour:
                         exit_price = stop_loss_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
                         exit_reason = 'stop_loss'
 
-                # For tiered exits, ExitManager handles hard stop (after trailing)
-                if not exit_triggered and position_direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
+                # For tiered exits, ExitManager handles all exit logic (LONG and SHORT - Jan 2026)
+                if not exit_triggered and self.use_tiered_exits and self.exit_manager:
                     current_atr = self._calculate_atr(data, i, period=14)
-                    exit_action = self.exit_manager.evaluate_exit(symbol, bar_low, current_atr)
+                    # Pass bar_high and bar_low for proper stop checking
+                    exit_action = self.exit_manager.evaluate_exit(
+                        symbol, current_price, current_atr,
+                        bar_high=bar_high, bar_low=bar_low
+                    )
 
                     if exit_action:
                         exit_triggered = True
@@ -815,19 +819,17 @@ class Backtest1Hour:
                             exit_reason = 'stop_loss'
                         exit_qty = exit_action.get('qty', shares)
 
-                        if exit_reason in ['stop_loss', 'profit_floor', 'atr_trailing']:
-                            exit_price = exit_action.get('stop_price', current_price) * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
-                        else:
-                            exit_price = current_price * (1 - self.EXIT_SLIPPAGE - self.BID_ASK_SPREAD)
-
-                # FIX (Jan 2026): Hard stop for SHORT when tiered exits enabled
-                # BUG: ExitManager only handles LONG, SHORT had NO stop loss protection!
-                # This caused 41%+ losses on SHORT positions that ran for max_hold (1 week)
-                if not exit_triggered and position_direction == 'SHORT' and self.use_tiered_exits:
-                    if bar_high >= stop_loss_price:
-                        exit_triggered = True
-                        exit_price = stop_loss_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
-                        exit_reason = 'stop_loss'
+                        # Apply slippage based on direction
+                        if position_direction == 'LONG':
+                            if exit_reason in ['stop_loss', 'profit_floor', 'atr_trailing']:
+                                exit_price = exit_action.get('stop_price', current_price) * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
+                            else:
+                                exit_price = current_price * (1 - self.EXIT_SLIPPAGE - self.BID_ASK_SPREAD)
+                        else:  # SHORT
+                            if exit_reason in ['stop_loss', 'profit_floor', 'atr_trailing']:
+                                exit_price = exit_action.get('stop_price', current_price) * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
+                            else:
+                                exit_price = current_price * (1 + self.EXIT_SLIPPAGE + self.BID_ASK_SPREAD)
 
                 # Legacy exit logic for LONG (take profit and signal exit only)
                 if not exit_triggered and position_direction == 'LONG' and not self.use_tiered_exits:
@@ -841,8 +843,9 @@ class Backtest1Hour:
                         exit_price = current_price * (1 - self.EXIT_SLIPPAGE - self.BID_ASK_SPREAD)
                         exit_reason = 'sell_signal'
 
-                # Exit logic for SHORT positions (take profit only)
-                if not exit_triggered and position_direction == 'SHORT':
+                # Legacy exit logic for SHORT (take profit only - when NOT using tiered exits)
+                # When tiered exits enabled, ExitManager handles profit floor, ATR trailing, partial TP
+                if not exit_triggered and position_direction == 'SHORT' and not self.use_tiered_exits:
                     if bar_low <= take_profit_price:
                         exit_triggered = True
                         exit_price = take_profit_price * (1 + self.EXIT_SLIPPAGE + self.BID_ASK_SPREAD)
@@ -1099,13 +1102,14 @@ class Backtest1Hour:
                         trailing_activated = False
                         trailing_stop_price = 0.0
 
-                        # Register with exit manager (LONG only)
-                        if direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
+                        # Register with exit manager (LONG and SHORT - Jan 2026)
+                        if self.use_tiered_exits and self.exit_manager:
                             self.exit_manager.register_position(
                                 symbol=symbol,
                                 entry_price=entry_price,
                                 quantity=shares,
-                                entry_time=timestamp if isinstance(timestamp, datetime) else None
+                                entry_time=timestamp if isinstance(timestamp, datetime) else None,
+                                direction=direction
                             )
 
                         # Record entry for gate
@@ -1473,10 +1477,14 @@ class Backtest1Hour:
                         exit_price = stop_loss_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
                         exit_reason = 'stop_loss'
 
-                # Tiered exits via ExitManager
-                if not exit_triggered and position_direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
+                # Tiered exits via ExitManager (LONG and SHORT - Jan 2026)
+                if not exit_triggered and self.use_tiered_exits and self.exit_manager:
                     current_atr = self._calculate_atr(data, i, period=14)
-                    exit_action = self.exit_manager.evaluate_exit(symbol, bar_low, current_atr)
+                    # Pass bar_high and bar_low for proper stop checking
+                    exit_action = self.exit_manager.evaluate_exit(
+                        symbol, current_price, current_atr,
+                        bar_high=bar_high, bar_low=bar_low
+                    )
                     if exit_action:
                         exit_triggered = True
                         exit_reason = exit_action['reason']
@@ -1484,19 +1492,17 @@ class Backtest1Hour:
                             exit_reason = 'stop_loss'
                         exit_qty = exit_action.get('qty', shares)
 
-                        # FIX (Jan 2026): Use stop_price from ExitManager for accurate exit pricing
-                        if exit_reason in ['stop_loss', 'profit_floor', 'atr_trailing']:
-                            exit_price = exit_action.get('stop_price', current_price) * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
-                        else:
-                            exit_price = current_price * (1 - self.EXIT_SLIPPAGE - self.BID_ASK_SPREAD)
-
-                # FIX (Jan 2026): Hard stop for SHORT when tiered exits enabled
-                # BUG: ExitManager only handles LONG, SHORT had NO stop loss protection!
-                if not exit_triggered and position_direction == 'SHORT' and self.use_tiered_exits:
-                    if bar_high >= stop_loss_price:
-                        exit_triggered = True
-                        exit_price = stop_loss_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
-                        exit_reason = 'stop_loss'
+                        # Apply slippage based on direction
+                        if position_direction == 'LONG':
+                            if exit_reason in ['stop_loss', 'profit_floor', 'atr_trailing']:
+                                exit_price = exit_action.get('stop_price', current_price) * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
+                            else:
+                                exit_price = current_price * (1 - self.EXIT_SLIPPAGE - self.BID_ASK_SPREAD)
+                        else:  # SHORT
+                            if exit_reason in ['stop_loss', 'profit_floor', 'atr_trailing']:
+                                exit_price = exit_action.get('stop_price', current_price) * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
+                            else:
+                                exit_price = current_price * (1 + self.EXIT_SLIPPAGE + self.BID_ASK_SPREAD)
 
                 # Max hold time
                 if not exit_triggered:
@@ -1734,12 +1740,14 @@ class Backtest1Hour:
                         state['trailing_activated'] = False
                         state['trailing_stop_price'] = 0.0
 
-                        if direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
+                        # Register with exit manager (LONG and SHORT - Jan 2026)
+                        if self.use_tiered_exits and self.exit_manager:
                             self.exit_manager.register_position(
                                 symbol=symbol,
                                 entry_price=realistic_entry_price,
                                 quantity=new_shares,
-                                entry_time=timestamp if isinstance(timestamp, datetime) else None
+                                entry_time=timestamp if isinstance(timestamp, datetime) else None,
+                                direction=direction
                             )
 
                         if self.entry_gate:
