@@ -57,7 +57,8 @@ def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff: float = 
                         current_delay *= backoff
                     else:
                         self.logger.error(
-                            f"{func.__name__} failed after {max_retries + 1} attempts: {e}"
+                            f"{func.__name__} failed after {max_retries + 1} attempts: {e}",
+                            exc_info=True
                         )
 
             # Re-raise the last exception after all retries exhausted
@@ -277,7 +278,7 @@ class AlpacaBroker(BrokerInterface):
                 last_equity=float(alpaca_account.last_equity)
             )
         except Exception as e:
-            self.logger.error(f"Failed to get account: {e}")
+            self.logger.error(f"Failed to get account: {e}", exc_info=True)
             raise BrokerAPIError(f"Failed to get account: {e}", original_exception=e)
 
     @retry_on_failure(max_retries=3, delay=0.5, backoff=2.0)
@@ -305,7 +306,7 @@ class AlpacaBroker(BrokerInterface):
 
             return positions
         except Exception as e:
-            self.logger.error(f"Failed to get positions: {e}")
+            self.logger.error(f"Failed to get positions: {e}", exc_info=True)
             raise BrokerAPIError(f"Failed to get positions: {e}", original_exception=e)
 
     def list_positions(self) -> List[Position]:
@@ -351,7 +352,7 @@ class AlpacaBroker(BrokerInterface):
             alpaca_orders = self.api.list_orders(status='open')
             return self._convert_orders(alpaca_orders)
         except Exception as e:
-            self.logger.error(f"Failed to get open orders: {e}")
+            self.logger.error(f"Failed to get open orders: {e}", exc_info=True)
             raise BrokerAPIError(f"Failed to get open orders: {e}", original_exception=e)
 
     @retry_on_failure(max_retries=2, delay=0.5, backoff=2.0)
@@ -362,7 +363,7 @@ class AlpacaBroker(BrokerInterface):
             alpaca_orders = self.api.list_orders(status=status, **kwargs)
             return self._convert_orders(alpaca_orders)
         except Exception as e:
-            self.logger.error(f"Failed to list orders (status={status}): {e}")
+            self.logger.error(f"Failed to list orders (status={status}): {e}", exc_info=True)
             raise BrokerAPIError(f"Failed to list orders: {e}", original_exception=e)
 
     def _convert_orders(self, alpaca_orders) -> List[Order]:
@@ -463,7 +464,8 @@ class AlpacaBroker(BrokerInterface):
             )
         except Exception as e:
             self.logger.error(
-                f"Failed to submit order: {side.upper()} {qty} {symbol} @ {type} - {e}"
+                f"Failed to submit order: {side.upper()} {qty} {symbol} @ {type} - {e}",
+                exc_info=True
             )
             raise BrokerAPIError(
                 f"Order submission failed for {symbol}: {e}",
@@ -491,7 +493,7 @@ class AlpacaBroker(BrokerInterface):
             self.logger.info(f"Successfully cancelled order {order_id}")
             return True
         except Exception as e:
-            self.logger.error(f"Failed to cancel order {order_id}: {e}")
+            self.logger.error(f"Failed to cancel order {order_id}: {e}", exc_info=True)
             return False
 
     def cancel_all_orders(self) -> int:
@@ -503,7 +505,7 @@ class AlpacaBroker(BrokerInterface):
             self.logger.info(f"Cancelled {count} orders")
             return count
         except Exception as e:
-            self.logger.error(f"Failed to cancel all orders: {e}")
+            self.logger.error(f"Failed to cancel all orders: {e}", exc_info=True)
             return 0
 
     def close_position(self, symbol: str) -> bool:
@@ -514,7 +516,7 @@ class AlpacaBroker(BrokerInterface):
             self.logger.info(f"Closed position: {symbol}")
             return True
         except Exception as e:
-            self.logger.error(f"Failed to close position {symbol}: {e}")
+            self.logger.error(f"Failed to close position {symbol}: {e}", exc_info=True)
             return False
 
     def close_all_positions(self) -> int:
@@ -526,7 +528,7 @@ class AlpacaBroker(BrokerInterface):
             self.logger.info(f"Closed {count} positions")
             return count
         except Exception as e:
-            self.logger.error(f"Failed to close all positions: {e}")
+            self.logger.error(f"Failed to close all positions: {e}", exc_info=True)
             return 0
 
     def get_broker_name(self) -> str:
