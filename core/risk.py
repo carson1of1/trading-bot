@@ -1,8 +1,8 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import logging
 import pytz
 
@@ -1510,3 +1510,684 @@ def create_exit_manager(bot_settings: dict = None) -> ExitManager:
         Configured ExitManager instance
     """
     return ExitManager(bot_settings)
+
+
+# =============================================================================
+# LOSING STREAK GUARD (Jan 4, 2026)
+# =============================================================================
+#
+# Protects capital after consecutive losses by reducing position sizes.
+# Trigger: 2+ losing trades (≤-0.5R) within a rolling 3-day window
+# Reset: Green day (net positive realized P&L)
+# Effect: Position sizes multiplied by 0.5
+# =============================================================================
+
+
+@dataclass
+class TradeResult:
+    """
+    Record of a closed trade for streak tracking.
+
+    A trade is considered a "loser" if realized_pnl <= -0.5 * risk_amount.
+    This filters out scratches and noise, only counting meaningful losses.
+    """
+    symbol: str
+    close_time: datetime
+    realized_pnl: float      # Actual P&L in dollars
+    risk_amount: float       # The R value (what was risked)
+
+    @property
+    def is_losing_trade(self) -> bool:
+        """True if this trade lost 0.5R or more."""
+        threshold = -0.5 * self.risk_amount
+        return self.realized_pnl <= threshold
+
+
+class LosingStreakGuard:
+    """
+    Multi-day losing streak protection.
+
+    Reduces position sizes after consecutive losses to prevent
+    compounding drawdowns during strategy-market mismatch periods.
+
+    TRIGGER: 2+ trades with P&L ≤ -0.5R within 3 days
+    RESET: Green day (net positive realized P&L)
+    EFFECT: Position sizes multiplied by 0.5
+
+    USAGE:
+        guard = LosingStreakGuard(config)
+
+        # On trade close:
+        guard.record_trade(symbol, realized_pnl, risk_amount, close_time)
+
+        # Get position size multiplier:
+        size = base_size * guard.position_size_multiplier
+    """
+
+    def __init__(self, config: dict = None):
+        """
+        Initialize the losing streak guard.
+
+        Args:
+            config: Configuration dict with losing_streak_guard section.
+        """
+        self.logger = logging.getLogger(__name__)
+
+        # Load config
+        config = config or {}
+        guard_config = config.get('losing_streak_guard', {})
+
+        # Enable/disable
+        self.enabled = guard_config.get('enabled', True)
+
+        # Thresholds
+        self.losing_threshold_r = guard_config.get('losing_threshold_r', 0.5)
+        self.lookback_days = guard_config.get('lookback_days', 3)
+        self.min_losing_trades = guard_config.get('min_losing_trades', 2)
+        self.throttle_multiplier = guard_config.get('throttle_multiplier', 0.5)
+
+        # State
+        self._throttled = False
+        self._throttle_start_date: Optional[date] = None
+        self._trade_history: List[TradeResult] = []
+        self._daily_pnl: Dict[date, float] = {}
+
+        if self.enabled:
+            self.logger.info(
+                f"LosingStreakGuard initialized: "
+                f"threshold=-{self.losing_threshold_r}R, "
+                f"lookback={self.lookback_days} days, "
+                f"min_losers={self.min_losing_trades}, "
+                f"throttle={self.throttle_multiplier}"
+            )
+        else:
+            self.logger.info("LosingStreakGuard: DISABLED")
+
+    @property
+    def is_throttled(self) -> bool:
+        """Whether position sizes are currently reduced."""
+        return self._throttled and self.enabled
+
+    @property
+    def position_size_multiplier(self) -> float:
+        """Current position size multiplier (1.0 normal, 0.5 throttled)."""
+        if not self.enabled:
+            return 1.0
+        return self.throttle_multiplier if self._throttled else 1.0
+
+    def record_trade(self, symbol: str, realized_pnl: float,
+                     risk_amount: float, close_time: datetime = None):
+        """
+        Record a closed trade and check streak condition.
+
+        Args:
+            symbol: Stock symbol
+            realized_pnl: Realized P&L in dollars
+            risk_amount: The R value (risk amount for this trade)
+            close_time: Trade close time (defaults to now)
+        """
+        if not self.enabled:
+            return
+
+        if close_time is None:
+            close_time = datetime.now()
+
+        # Create trade result
+        trade = TradeResult(
+            symbol=symbol,
+            close_time=close_time,
+            realized_pnl=realized_pnl,
+            risk_amount=risk_amount
+        )
+
+        self._trade_history.append(trade)
+
+        # Update daily P&L
+        trade_date = close_time.date()
+        if trade_date not in self._daily_pnl:
+            self._daily_pnl[trade_date] = 0.0
+        self._daily_pnl[trade_date] += realized_pnl
+
+        # Log
+        self.logger.info(
+            f"STREAK_GUARD | TRADE_RECORDED | {symbol} | "
+            f"PnL: ${realized_pnl:+.2f}, Risk: ${risk_amount:.2f}, "
+            f"IsLoser: {trade.is_losing_trade}"
+        )
+
+        # Check streak condition
+        self._check_streak_condition()
+
+    def _count_recent_losers(self) -> int:
+        """Count losing trades within the lookback window."""
+        cutoff = datetime.now() - timedelta(days=self.lookback_days)
+
+        count = 0
+        for trade in self._trade_history:
+            if trade.close_time >= cutoff and trade.is_losing_trade:
+                count += 1
+
+        return count
+
+    def _check_streak_condition(self):
+        """Check if streak condition is met and update throttle state."""
+        if self._throttled:
+            # Already throttled, don't re-trigger
+            return
+
+        loser_count = self._count_recent_losers()
+
+        if loser_count >= self.min_losing_trades:
+            self._throttled = True
+            self._throttle_start_date = datetime.now().date()
+
+            self.logger.warning(
+                f"STREAK_GUARD | THROTTLED | "
+                f"{loser_count} losing trades in {self.lookback_days} days | "
+                f"Multiplier: {self.throttle_multiplier}"
+            )
+
+    def end_of_day(self, trading_date: date = None):
+        """
+        Evaluate end-of-day condition and potentially reset throttle.
+
+        Call this at market close (4 PM ET).
+
+        Args:
+            trading_date: The trading date to evaluate (defaults to today)
+        """
+        if not self.enabled:
+            return
+
+        if trading_date is None:
+            trading_date = datetime.now().date()
+
+        # Get daily P&L
+        daily_pnl = self._daily_pnl.get(trading_date, 0.0)
+
+        # Check for green day reset
+        if self._throttled and daily_pnl > 0:
+            # Only reset if green day is AFTER throttle started
+            if self._throttle_start_date and trading_date >= self._throttle_start_date:
+                self._throttled = False
+                self._throttle_start_date = None
+
+                self.logger.info(
+                    f"STREAK_GUARD | GREEN_DAY | "
+                    f"Net PnL: ${daily_pnl:+.2f} | Resuming normal risk"
+                )
+
+        # Prune old trade history (keep only lookback_days + buffer)
+        self._prune_old_trades()
+
+    def _prune_old_trades(self):
+        """Remove trades older than lookback window + 1 day buffer."""
+        cutoff = datetime.now() - timedelta(days=self.lookback_days + 1)
+
+        self._trade_history = [
+            t for t in self._trade_history
+            if t.close_time >= cutoff
+        ]
+
+        # Also prune daily P&L
+        cutoff_date = cutoff.date()
+        self._daily_pnl = {
+            d: pnl for d, pnl in self._daily_pnl.items()
+            if d >= cutoff_date
+        }
+
+    def get_status(self) -> dict:
+        """
+        Get current guard status.
+
+        Returns:
+            Dict with current state information
+        """
+        return {
+            'enabled': self.enabled,
+            'is_throttled': self.is_throttled,
+            'position_size_multiplier': self.position_size_multiplier,
+            'recent_losers': self._count_recent_losers(),
+            'lookback_days': self.lookback_days,
+            'min_losing_trades': self.min_losing_trades,
+            'throttle_multiplier': self.throttle_multiplier,
+            'throttle_start_date': str(self._throttle_start_date) if self._throttle_start_date else None,
+            'trade_count': len(self._trade_history)
+        }
+
+
+def create_losing_streak_guard(config: dict = None) -> LosingStreakGuard:
+    """
+    Factory function to create LosingStreakGuard with proper configuration.
+
+    Args:
+        config: Configuration dict with losing_streak_guard section
+
+    Returns:
+        Configured LosingStreakGuard instance
+    """
+    return LosingStreakGuard(config)
+
+
+# =============================================================================
+# DAILY DRAWDOWN GUARD (Jan 4, 2026)
+# =============================================================================
+#
+# Protects funded account capital by enforcing tiered daily drawdown limits.
+# Funded accounts have a 5% daily loss limit - we cap at 4% to provide buffer.
+#
+# TIERS:
+#   WARNING (-2.5%): Reduce position sizes to 50%
+#   SOFT_LIMIT (-3.5%): Block new entries, tighten stops to breakeven
+#   HARD_LIMIT (-4.0%): Full liquidation via market orders + day halt
+#
+# HYSTERESIS:
+#   Once a threshold is crossed, it stays active for the rest of the day.
+#   This prevents "bouncing" where recovery leads to new losses.
+# =============================================================================
+
+from enum import Enum
+
+
+class DrawdownTier(Enum):
+    """Drawdown protection tier levels."""
+    NORMAL = 0      # No drawdown concerns
+    WARNING = 1     # -2.5%: Reduce position sizes
+    SOFT_LIMIT = 2  # -3.5%: Block entries, tighten stops
+    HARD_LIMIT = 3  # -4.0%: Full liquidation
+
+
+class DailyDrawdownGuard:
+    """
+    Daily drawdown protection for funded account compliance.
+
+    Tracks real-time equity (unrealized + realized P&L) and enforces
+    tiered daily drawdown limits to protect capital.
+
+    USAGE:
+        guard = DailyDrawdownGuard(config)
+
+        # At start of each cycle:
+        guard.update_equity(account, positions)
+
+        # Check if entries allowed:
+        if guard.entries_allowed:
+            # ... check for entry signals
+
+        # Get position size multiplier:
+        size = base_size * guard.position_size_multiplier
+
+        # At hard limit:
+        if guard.tier == DrawdownTier.HARD_LIMIT:
+            guard.force_liquidate_all(broker, positions)
+    """
+
+    def __init__(self, config: dict = None):
+        """
+        Initialize the drawdown guard.
+
+        Args:
+            config: Configuration dict with daily_drawdown_guard settings.
+                   If None, uses defaults.
+        """
+        self.logger = logging.getLogger(__name__)
+
+        # Load config
+        config = config or {}
+        guard_config = config.get('daily_drawdown_guard', {})
+
+        # Enable/disable
+        self.enabled = guard_config.get('enabled', True)
+
+        # Thresholds (as percentages, stored as decimals)
+        self.warning_pct = guard_config.get('warning_pct', 2.5) / 100
+        self.soft_limit_pct = guard_config.get('soft_limit_pct', 3.5) / 100
+        self.hard_limit_pct = guard_config.get('hard_limit_pct', 4.0) / 100
+
+        # Behavior settings
+        self.warning_size_multiplier = guard_config.get('warning_size_multiplier', 0.5)
+        self.tighten_stops_at_soft = guard_config.get('tighten_stops_at_soft', True)
+
+        # Execution settings
+        self.liquidation_timeout_sec = guard_config.get('liquidation_timeout_sec', 30)
+        self.use_market_orders = guard_config.get('use_market_orders', True)
+
+        # State tracking
+        self.day_start_equity = 0.0
+        self.current_equity = 0.0
+        self.realized_pnl_today = 0.0
+        self.drawdown_pct = 0.0
+        self.current_date = None
+
+        # Tier state (with hysteresis - only escalates, never de-escalates)
+        self._highest_tier_reached = DrawdownTier.NORMAL
+
+        # Flags derived from tier
+        self.entries_allowed = True
+        self.position_size_multiplier = 1.0
+        self.day_halted = False
+
+        # Safety flags
+        self._liquidation_in_progress = False
+
+        if self.enabled:
+            self.logger.info(
+                f"DailyDrawdownGuard initialized: "
+                f"warning={self.warning_pct*100:.1f}%, "
+                f"soft_limit={self.soft_limit_pct*100:.1f}%, "
+                f"hard_limit={self.hard_limit_pct*100:.1f}%"
+            )
+        else:
+            self.logger.info("DailyDrawdownGuard: DISABLED")
+
+    @property
+    def tier(self) -> DrawdownTier:
+        """Current drawdown tier (with hysteresis)."""
+        return self._highest_tier_reached
+
+    def reset_day(self, day_start_equity: float, date=None):
+        """
+        Reset state for a new trading day.
+
+        Call this at market open (9:30 ET) or when detecting a new day.
+
+        Args:
+            day_start_equity: Account equity at start of day
+            date: Trading date (defaults to today)
+        """
+        if date is None:
+            date = datetime.now().date()
+
+        self.day_start_equity = day_start_equity
+        self.current_equity = day_start_equity
+        self.realized_pnl_today = 0.0
+        self.drawdown_pct = 0.0
+        self.current_date = date
+
+        # Reset tier (hysteresis resets at start of each day)
+        self._highest_tier_reached = DrawdownTier.NORMAL
+        self.entries_allowed = True
+        self.position_size_multiplier = 1.0
+        self.day_halted = False
+        self._liquidation_in_progress = False
+
+        self.logger.info(
+            f"DRAWDOWN_GUARD | DAY_RESET | "
+            f"Date: {date}, Starting Equity: ${day_start_equity:,.2f}"
+        )
+
+    def update_equity(self, account, positions: list = None, current_date=None) -> DrawdownTier:
+        """
+        Update current equity and check drawdown thresholds.
+
+        Call this at the start of each trading cycle.
+
+        Args:
+            account: Broker account object with .equity or .portfolio_value attribute
+            positions: List of position objects with .unrealized_pl attribute (optional)
+            current_date: Override date for backtesting (uses datetime.now() if None)
+
+        Returns:
+            Current DrawdownTier
+        """
+        if not self.enabled:
+            return DrawdownTier.NORMAL
+
+        # Get current equity from account
+        if hasattr(account, 'equity'):
+            self.current_equity = float(account.equity)
+        elif hasattr(account, 'portfolio_value'):
+            self.current_equity = float(account.portfolio_value)
+        else:
+            self.logger.error("Cannot determine equity from account object")
+            return self.tier
+
+        # Check for new day (use provided date for backtest, else real time)
+        today = current_date if current_date is not None else datetime.now().date()
+        if self.current_date is None:
+            # First call - initialize day
+            self.reset_day(self.current_equity, today)
+            return DrawdownTier.NORMAL
+        elif self.current_date != today:
+            # New day detected
+            self.reset_day(self.current_equity, today)
+            return DrawdownTier.NORMAL
+
+        # Calculate drawdown
+        if self.day_start_equity > 0:
+            self.drawdown_pct = (self.day_start_equity - self.current_equity) / self.day_start_equity
+        else:
+            self.drawdown_pct = 0.0
+
+        # Check and update tier (hysteresis: only escalate)
+        new_tier = self._calculate_tier()
+
+        if new_tier.value > self._highest_tier_reached.value:
+            old_tier = self._highest_tier_reached
+            self._highest_tier_reached = new_tier
+            self._on_tier_change(old_tier, new_tier)
+
+        # Update derived flags based on highest tier reached
+        self._update_flags()
+
+        return self.tier
+
+    def _calculate_tier(self) -> DrawdownTier:
+        """Calculate current tier based on drawdown percentage."""
+        if self.drawdown_pct >= self.hard_limit_pct:
+            return DrawdownTier.HARD_LIMIT
+        elif self.drawdown_pct >= self.soft_limit_pct:
+            return DrawdownTier.SOFT_LIMIT
+        elif self.drawdown_pct >= self.warning_pct:
+            return DrawdownTier.WARNING
+        else:
+            return DrawdownTier.NORMAL
+
+    def _update_flags(self):
+        """Update flags based on current tier."""
+        tier = self._highest_tier_reached
+
+        if tier == DrawdownTier.NORMAL:
+            self.entries_allowed = True
+            self.position_size_multiplier = 1.0
+            self.day_halted = False
+
+        elif tier == DrawdownTier.WARNING:
+            self.entries_allowed = True
+            self.position_size_multiplier = self.warning_size_multiplier
+            self.day_halted = False
+
+        elif tier == DrawdownTier.SOFT_LIMIT:
+            self.entries_allowed = False
+            self.position_size_multiplier = 0.0  # No new positions
+            self.day_halted = False
+
+        elif tier == DrawdownTier.HARD_LIMIT:
+            self.entries_allowed = False
+            self.position_size_multiplier = 0.0
+            self.day_halted = True
+
+    def _on_tier_change(self, old_tier: DrawdownTier, new_tier: DrawdownTier):
+        """Handle tier escalation."""
+        self.logger.warning(
+            f"DRAWDOWN_GUARD | TIER_ESCALATION | "
+            f"{old_tier.name} -> {new_tier.name} | "
+            f"Drawdown: {self.drawdown_pct*100:.2f}% | "
+            f"Equity: ${self.current_equity:,.2f} (started at ${self.day_start_equity:,.2f})"
+        )
+
+        if new_tier == DrawdownTier.WARNING:
+            self.logger.warning(
+                f"DRAWDOWN_GUARD | WARNING | "
+                f"Position sizes reduced to {self.warning_size_multiplier*100:.0f}%"
+            )
+
+        elif new_tier == DrawdownTier.SOFT_LIMIT:
+            self.logger.warning(
+                f"DRAWDOWN_GUARD | SOFT_LIMIT | "
+                f"New entries BLOCKED, stops should be moved to breakeven"
+            )
+
+        elif new_tier == DrawdownTier.HARD_LIMIT:
+            self.logger.error(
+                f"DRAWDOWN_GUARD | HARD_LIMIT | "
+                f"EMERGENCY: Daily drawdown limit hit (-{self.hard_limit_pct*100:.1f}%). "
+                f"Full liquidation required!"
+            )
+
+    def record_realized_pnl(self, pnl: float):
+        """
+        Record realized P&L from a closed trade.
+
+        Args:
+            pnl: Realized profit/loss in dollars
+        """
+        self.realized_pnl_today += pnl
+        self.logger.debug(
+            f"DRAWDOWN_GUARD | REALIZED_PNL | "
+            f"Trade PnL: ${pnl:+,.2f}, Daily Total: ${self.realized_pnl_today:+,.2f}"
+        )
+
+    def force_liquidate_all(self, broker, positions: list) -> dict:
+        """
+        Emergency liquidation of all positions.
+
+        Called when hard limit is reached. Closes all positions
+        via market orders.
+
+        Args:
+            broker: Broker interface with submit_order and cancel_all_orders methods
+            positions: List of position dicts with symbol, qty, direction
+
+        Returns:
+            Dict with liquidation results
+        """
+        if self._liquidation_in_progress:
+            self.logger.warning("DRAWDOWN_GUARD | LIQUIDATION_SKIPPED | Already in progress")
+            return {'success': False, 'reason': 'already_in_progress'}
+
+        self._liquidation_in_progress = True
+        results = {
+            'success': True,
+            'liquidated': [],
+            'failed': [],
+            'total_proceeds': 0.0
+        }
+
+        self.logger.error(
+            f"DRAWDOWN_GUARD | LIQUIDATION_START | "
+            f"Liquidating {len(positions)} positions"
+        )
+
+        try:
+            # Cancel all pending orders first
+            if hasattr(broker, 'cancel_all_orders'):
+                try:
+                    broker.cancel_all_orders()
+                    self.logger.info("DRAWDOWN_GUARD | Cancelled all pending orders")
+                except Exception as e:
+                    self.logger.error(f"DRAWDOWN_GUARD | Failed to cancel orders: {e}")
+
+            # Close each position
+            for pos in positions:
+                symbol = pos.get('symbol') or (pos.symbol if hasattr(pos, 'symbol') else None)
+                qty = pos.get('qty') or (int(pos.qty) if hasattr(pos, 'qty') else 0)
+                direction = pos.get('direction', 'LONG')
+
+                # Handle position object or dict
+                if hasattr(pos, 'side'):
+                    direction = 'LONG' if pos.side == 'long' else 'SHORT'
+
+                if not symbol or qty <= 0:
+                    continue
+
+                try:
+                    # Submit market order to close
+                    side = 'sell' if direction == 'LONG' else 'buy'
+                    order = broker.submit_order(
+                        symbol=symbol,
+                        qty=qty,
+                        side=side,
+                        type='market',
+                        time_in_force='day'
+                    )
+
+                    if order and order.status in ['filled', 'new', 'accepted']:
+                        fill_price = float(order.filled_avg_price) if hasattr(order, 'filled_avg_price') and order.filled_avg_price else 0
+                        results['liquidated'].append({
+                            'symbol': symbol,
+                            'qty': qty,
+                            'direction': direction,
+                            'fill_price': fill_price
+                        })
+                        results['total_proceeds'] += fill_price * qty if direction == 'LONG' else -fill_price * qty
+
+                        self.logger.info(
+                            f"DRAWDOWN_GUARD | LIQUIDATED | "
+                            f"{symbol} {qty} shares @ ${fill_price:.2f}"
+                        )
+                    else:
+                        results['failed'].append({'symbol': symbol, 'reason': 'order_failed'})
+
+                except Exception as e:
+                    self.logger.error(f"DRAWDOWN_GUARD | LIQUIDATION_ERROR | {symbol}: {e}")
+                    results['failed'].append({'symbol': symbol, 'reason': str(e)})
+
+            if results['failed']:
+                results['success'] = False
+
+        finally:
+            self._liquidation_in_progress = False
+
+        self.logger.info(
+            f"DRAWDOWN_GUARD | LIQUIDATION_COMPLETE | "
+            f"Liquidated: {len(results['liquidated'])}, Failed: {len(results['failed'])}"
+        )
+
+        return results
+
+    def check_tier(self) -> DrawdownTier:
+        """
+        Get current drawdown tier.
+
+        Returns:
+            Current DrawdownTier (with hysteresis applied)
+        """
+        return self._highest_tier_reached
+
+    def get_status(self) -> dict:
+        """
+        Get current guard status.
+
+        Returns:
+            Dict with current state information
+        """
+        return {
+            'enabled': self.enabled,
+            'tier': self.tier.name,
+            'day_start_equity': self.day_start_equity,
+            'current_equity': self.current_equity,
+            'drawdown_pct': self.drawdown_pct * 100,
+            'realized_pnl_today': self.realized_pnl_today,
+            'entries_allowed': self.entries_allowed,
+            'position_size_multiplier': self.position_size_multiplier,
+            'day_halted': self.day_halted,
+            'thresholds': {
+                'warning_pct': self.warning_pct * 100,
+                'soft_limit_pct': self.soft_limit_pct * 100,
+                'hard_limit_pct': self.hard_limit_pct * 100
+            }
+        }
+
+
+def create_drawdown_guard(config: dict = None) -> DailyDrawdownGuard:
+    """
+    Factory function to create DailyDrawdownGuard with proper configuration.
+
+    Args:
+        config: Configuration dict with daily_drawdown_guard section
+
+    Returns:
+        Configured DailyDrawdownGuard instance
+    """
+    return DailyDrawdownGuard(config)

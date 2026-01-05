@@ -1,75 +1,66 @@
-# 1-Hour Bot Configuration - Capital Engine
-# Purpose: Slow, boring, scalable returns
-# This bot is SEPARATE from bot_1min - they do not share models, strategies, or thresholds
-
-mode: PAPER  # BACKTEST, PAPER, DRY_RUN, LIVE
-timeframe: "1Hour"
-purpose: capital  # Marker for bot type
-shorts_only: false  # Set true for bear markets to only short
-longs_only: false   # DISABLED (Dec 31, 2025) - Shorts enabled for both directions
-
+mode: PAPER
+timeframe: 1Hour
+purpose: capital
+shorts_only: false
+longs_only: false
 broker:
-  paper_endpoint: "https://paper-api.alpaca.markets"
-  live_endpoint: "https://api.alpaca.markets"
-
+  paper_endpoint: https://paper-api.alpaca.markets
+  live_endpoint: https://api.alpaca.markets
 trading:
-  watchlist_file: "universe.yaml"
-  lookback_period: 200  # 200 bars = 200 hours
+  watchlist_file: universe.yaml
+  lookback_period: 200
   warmup_bars: 200
-
-# Capital Engine - Real position sizes, drawdown control
-# FIX (Jan 2, 2026): Wider stops - 2% stops had 0% win rate, killing returns
 risk_management:
-  max_position_size_pct: 3.0       # Max 3% per position
-  max_portfolio_risk_pct: 15.0     # Max 15% total risk
-  stop_loss_pct: 5.0               # 5% stop loss (was 2% - too tight, 0% WR)
-  take_profit_pct: 8.0             # 8% take profit (adjusted for wider stop)
-  max_daily_loss_pct: 2.0          # 2% daily loss limit - hard stop for the day
-  emergency_stop_pct: 5.0          # 5% UNREALIZED loss = force close ALL positions
-  max_open_positions: 5            # More positions allowed
-
-# Proven thresholds - only take high-confidence trades
+  max_position_size_pct: 10
+  max_portfolio_risk_pct: 50.0
+  stop_loss_pct: 5.0
+  take_profit_pct: 5.0
+  max_daily_loss_pct: 5.0
+  emergency_stop_pct: 8.0
+  max_open_positions: 1
+daily_drawdown_guard:
+  enabled: true
+  warning_pct: 2.5
+  soft_limit_pct: 3.5
+  hard_limit_pct: 4.0
+  warning_size_multiplier: 0.5
+  tighten_stops_at_soft: true
+  liquidation_timeout_sec: 30
+  use_market_orders: true
+losing_streak_guard:
+  enabled: true
+  losing_threshold_r: 0.5      # Trade counts as loss if pnl <= -0.5R
+  lookback_days: 3             # Rolling window
+  min_losing_trades: 2         # Trigger after this many losers
+  throttle_multiplier: 0.5     # Reduce size to 50%
 entry_gate:
-  confidence_threshold: 60         # Standard threshold for proven setups
-  max_trades_per_symbol_per_day: 3 # More trades allowed for proven symbols
-  min_time_between_trades_minutes: 60  # 1 hour minimum between trades
+  confidence_threshold: 80
+  max_trades_per_symbol_per_day: 2
+  min_time_between_trades_minutes: 120
   daily_loss_guard:
     enabled: true
-    max_losing_trades_per_day: 3   # More lenient
-
-# Promotion requirements - symbols must meet these to enter universe
+    max_losing_trades_per_day: 2
 promotion_requirements:
-  min_profit_factor: 1.2           # PF > 1.2
-  min_win_rate: 0.45               # Win rate > 45%
-  min_trade_count: 30              # At least 30 historical trades
-  min_weeks_observed: 2            # Seen across 2+ weeks
-
-# Exit tiers - FIX (Jan 2, 2026): Wider stops, longer hold, disable EOD close
-# ROOT CAUSE: EOD close killed 55% of trades, 2% stops had 0% win rate
+  min_profit_factor: 1.2
+  min_win_rate: 0.45
+  min_trade_count: 30
+  min_weeks_observed: 2
 exit_manager:
-  tier_0_hard_stop: -0.05          # -5% hard stop (was -2%, 0% WR)
-  tier_1_profit_floor: 0.02        # +2% profit floor
-  tier_2_atr_trailing: 0.03        # +3% ATR trailing
-  tier_3_partial_take: 0.04        # +4% partial take profit
-  max_hold_hours: 168              # 1 week (was 48h - too short)
-  eod_close: false                 # DISABLED - was killing profitable trades
-
-# Trailing stop configuration - FIX (Jan 2, 2026): Tighter trailing for faster profit lock
-# Trailing stop exits had 70% win rate - the only profitable exit mechanism
+  tier_0_hard_stop: -0.05
+  tier_1_profit_floor: 0.015
+  tier_2_atr_trailing: 0.02
+  tier_3_partial_take: 0.03
+  max_hold_hours: 48
+  eod_close: false
 trailing_stop:
   enabled: true
-  activation_pct: 0.25             # Activate after +0.25% profit (was 0.5%)
-  trail_pct: 0.25                  # Trail 0.25% behind peak (was 0.5%)
-  move_to_breakeven: true          # Move stop to breakeven on activation
-
-# Data quality thresholds for 1-hour
+  activation_pct: 0.15
+  trail_pct: 0.15
+  move_to_breakeven: true
 data_quality:
-  stale_threshold_minutes: 60      # Data stale after 60 minutes
-  min_bars_required: 200           # Need 200 bars minimum
-  volume_filter_enabled: true      # Filter low volume periods
-
-# Strategies enabled for 1-hour capital trading
-# Only proven strategies, no experimental
+  stale_threshold_minutes: 60
+  min_bars_required: 200
+  volume_filter_enabled: true
 strategies:
   momentum:
     enabled: true
@@ -79,44 +70,33 @@ strategies:
     weight: 0.25
   breakout:
     enabled: true
-    weight: 0.20
+    weight: 0.2
   ml_ensemble:
-    enabled: false  # DISABLED (Dec 25, 2025) - 56 trades, PF 0.78, -$965 loss. Retrain before enabling.
+    enabled: false
     weight: 0.0
-  # VWAP disabled for 1-hour (intraday indicator)
   vwap:
     enabled: false
     weight: 0.0
-
-# Logging - focused on P&L and drawdown
 logging:
-  database: "logs/trades_1hour.db"
-  detailed_signals: false          # Less verbose than 1-min
-  track_mfe_mae: true              # Still track excursions
-
-# Capital allocation (when running live)
+  database: logs/trades_1hour.db
+  detailed_signals: false
+  track_mfe_mae: true
 capital_allocation:
-  percentage_of_total: 80          # 80% of capital to 1-hour bot
-  reserve_cash_pct: 10             # Keep 10% in cash
-
-# Parity capture for backtest/live validation
-# When enabled, logs every decision point to JSONL for replay comparison
+  percentage_of_total: 80
+  reserve_cash_pct: 10
 parity_capture:
-  enabled: false                   # Set true to capture decisions
-  output_path: "logs/parity_capture_1hour.jsonl"
-  include_indicators: true         # Include RSI, SMA, etc.
-  include_bar_data: true           # Include OHLCV
-  flush_interval: 1                # Flush after every N records
-
-# Volatility scanner for dynamic stock selection
-# When enabled, scans for top volatile stocks instead of using static universe
+  enabled: false
+  output_path: logs/parity_capture_1hour.jsonl
+  include_indicators: true
+  include_bar_data: true
+  flush_interval: 1
 volatility_scanner:
   enabled: true
   top_n: 10
   min_price: 5
   min_volume: 500000
   min_market_cap: 300000000
-  refresh_time: "09:00"
+  refresh_time: 09:00
   weights:
     atr_pct: 0.5
     daily_range_pct: 0.3

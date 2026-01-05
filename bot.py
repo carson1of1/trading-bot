@@ -36,6 +36,9 @@ from core import (
     TradeLogger,
     MarketHours,
     VolatilityScanner,
+    DailyDrawdownGuard,
+    DrawdownTier,
+    LosingStreakGuard,
 )
 from strategies import StrategyManager
 
@@ -173,6 +176,18 @@ class TradingBot:
         risk_config = self.config.get('risk_management', {})
         self.emergency_stop_pct = risk_config.get('emergency_stop_pct', 5.0) / 100
         self.emergency_stop_enabled = True
+
+        # Daily Drawdown Guard (Jan 4, 2026)
+        # Protects funded account capital with tiered drawdown limits
+        self.drawdown_guard = DailyDrawdownGuard(self.config)
+        if self.drawdown_guard.enabled:
+            logger.info(f"DailyDrawdownGuard: enabled with {self.drawdown_guard.hard_limit_pct*100:.1f}% hard limit")
+
+        # Losing Streak Guard (Jan 4, 2026)
+        # Reduces position sizes after 2+ losing trades in 3 days
+        self.losing_streak_guard = LosingStreakGuard(self.config)
+        if self.losing_streak_guard.enabled:
+            logger.info(f"LosingStreakGuard: enabled, throttle after {self.losing_streak_guard.min_losing_trades} losers in {self.losing_streak_guard.lookback_days} days")
 
         # Position tracking
         self.open_positions = {}  # {symbol: position_dict}
@@ -681,6 +696,30 @@ class TradingBot:
                 self.portfolio_value, realistic_entry_price, stop_price
             )
 
+            # Apply drawdown guard position size multiplier
+            if self.drawdown_guard.enabled and self.drawdown_guard.position_size_multiplier < 1.0:
+                original_qty = qty
+                qty = int(qty * self.drawdown_guard.position_size_multiplier)
+                if qty != original_qty:
+                    logger.info(
+                        f"DRAWDOWN_GUARD | Position size reduced: {original_qty} -> {qty} shares "
+                        f"({self.drawdown_guard.position_size_multiplier*100:.0f}% multiplier)"
+                    )
+
+            # Apply losing streak guard position size multiplier (Jan 4, 2026)
+            if self.losing_streak_guard.enabled and self.losing_streak_guard.position_size_multiplier < 1.0:
+                original_qty = qty
+                qty = int(qty * self.losing_streak_guard.position_size_multiplier)
+                if qty != original_qty:
+                    logger.info(
+                        f"STREAK_GUARD | Position size reduced: {original_qty} -> {qty} shares "
+                        f"({self.losing_streak_guard.position_size_multiplier*100:.0f}% multiplier)"
+                    )
+
+            # Calculate risk amount for losing streak tracking (Jan 4, 2026)
+            # This is the R value - what we're risking on this trade
+            risk_amount = abs(realistic_entry_price - stop_price) * qty
+
             if qty <= 0:
                 return {'filled': False, 'reason': 'Position size too small'}
 
@@ -718,6 +757,7 @@ class TradingBot:
                     'entry_time': datetime.now(),
                     'strategy': strategy,
                     'reasoning': reasoning,
+                    'risk_amount': risk_amount,  # For losing streak guard (Jan 4, 2026)
                 }
                 self.highest_prices[symbol] = fill_price
                 self.lowest_prices[symbol] = fill_price
@@ -810,6 +850,20 @@ class TradingBot:
                 if pnl < 0 and self.entry_gate:
                     self.entry_gate.record_loss(datetime.now())
 
+                # Record realized P&L in drawdown guard
+                if self.drawdown_guard.enabled:
+                    self.drawdown_guard.record_realized_pnl(pnl)
+
+                # Record trade in losing streak guard (Jan 4, 2026)
+                if self.losing_streak_guard.enabled:
+                    risk_amount = position.get('risk_amount', abs(pnl))  # Fallback to pnl if not stored
+                    self.losing_streak_guard.record_trade(
+                        symbol=symbol,
+                        realized_pnl=pnl,
+                        risk_amount=risk_amount,
+                        close_time=datetime.now()
+                    )
+
                 # Unregister from exit manager (LONG and SHORT - Jan 2026)
                 if self.use_tiered_exits and self.exit_manager:
                     self.exit_manager.unregister_position(symbol)
@@ -878,9 +932,10 @@ class TradingBot:
         Run one trading cycle.
 
         Called every hour (or on demand):
-        1. Sync account and positions
-        2. Check exits for all positions
-        3. Check entries for watchlist symbols
+        1. Sync account and update drawdown guard
+        2. Handle hard limit liquidation if needed
+        3. Check exits for all positions
+        4. Check entries for watchlist symbols (if allowed)
         """
         try:
             logger.info("=== Trading Cycle Start ===")
@@ -888,6 +943,42 @@ class TradingBot:
             # 1. Sync state
             self.sync_account()
             self.sync_positions()
+
+            # 2. Update drawdown guard (must be done after sync)
+            if self.drawdown_guard.enabled:
+                account = self.broker.get_account()
+                tier = self.drawdown_guard.update_equity(account)
+
+                # Log current drawdown status
+                if tier != DrawdownTier.NORMAL:
+                    status = self.drawdown_guard.get_status()
+                    logger.warning(
+                        f"DRAWDOWN_GUARD | {tier.name} | "
+                        f"Drawdown: {status['drawdown_pct']:.2f}% | "
+                        f"Entries: {'ALLOWED' if status['entries_allowed'] else 'BLOCKED'}"
+                    )
+
+                # Handle hard limit - full liquidation
+                if tier == DrawdownTier.HARD_LIMIT:
+                    logger.error("DRAWDOWN_GUARD | HARD_LIMIT REACHED - LIQUIDATING ALL POSITIONS")
+                    positions_list = list(self.open_positions.values())
+                    if positions_list:
+                        result = self.drawdown_guard.force_liquidate_all(self.broker, positions_list)
+                        if result['success']:
+                            # Unregister from exit manager
+                            for pos in result['liquidated']:
+                                symbol = pos['symbol']
+                                if self.use_tiered_exits and self.exit_manager:
+                                    self.exit_manager.unregister_position(symbol)
+                                self._cleanup_position(symbol)
+                            self.open_positions.clear()
+                    logger.error("DRAWDOWN_GUARD | DAY HALTED - No further trading")
+                    return
+
+                # Handle day halted state
+                if self.drawdown_guard.day_halted:
+                    logger.warning("DRAWDOWN_GUARD | Day halted - skipping cycle")
+                    return
 
             # 2. Check exits for all positions
             for symbol, position in list(self.open_positions.items()):
@@ -911,10 +1002,15 @@ class TradingBot:
                 if exit_signal and exit_signal.get('exit'):
                     self.execute_exit(symbol, exit_signal)
 
-            # 3. Check entries for watchlist (only if not at position limit)
+            # 3. Check entries for watchlist (only if not at position limit and entries allowed)
             max_positions = self.config.get('risk_management', {}).get('max_open_positions', 5)
             if len(self.open_positions) >= max_positions:
                 logger.info(f"At max positions ({max_positions}), skipping entries")
+                return
+
+            # Check if drawdown guard blocks entries
+            if self.drawdown_guard.enabled and not self.drawdown_guard.entries_allowed:
+                logger.warning(f"DRAWDOWN_GUARD | Entries blocked at tier {self.drawdown_guard.tier.name}")
                 return
 
             for symbol in self.watchlist:
