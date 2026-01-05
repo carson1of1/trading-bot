@@ -5,6 +5,8 @@ Provides REST API endpoints for running backtests with scanner-selected symbols.
 """
 
 import sys
+import os
+import signal
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -27,6 +29,73 @@ from core.scanner import VolatilityScanner
 from core.data import YFinanceDataFetcher
 from core.logger import TradeLogger
 import subprocess
+
+# PID file for tracking bot process
+BOT_PID_FILE = Path(__file__).parent.parent / "logs" / "bot.pid"
+
+
+def _read_bot_pid() -> Optional[int]:
+    """Read bot PID from file."""
+    try:
+        if BOT_PID_FILE.exists():
+            pid = int(BOT_PID_FILE.read_text().strip())
+            return pid
+    except (ValueError, IOError):
+        pass
+    return None
+
+
+def _write_bot_pid(pid: int):
+    """Write bot PID to file."""
+    BOT_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BOT_PID_FILE.write_text(str(pid))
+
+
+def _clear_bot_pid():
+    """Clear bot PID file."""
+    try:
+        if BOT_PID_FILE.exists():
+            BOT_PID_FILE.unlink()
+    except IOError:
+        pass
+
+
+def _is_bot_running() -> bool:
+    """Check if bot process is actually running."""
+    pid = _read_bot_pid()
+    if pid is None:
+        return False
+    try:
+        # Check if process exists (signal 0 doesn't kill, just checks)
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        # Process doesn't exist, clean up stale PID file
+        _clear_bot_pid()
+        return False
+
+
+def _kill_bot_process() -> bool:
+    """Kill the bot process if running."""
+    pid = _read_bot_pid()
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+        # Give it a moment to terminate gracefully
+        import time
+        time.sleep(0.5)
+        # Check if still running, force kill if needed
+        try:
+            os.kill(pid, 0)
+            os.kill(pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+        _clear_bot_pid()
+        return True
+    except (OSError, ProcessLookupError):
+        _clear_bot_pid()
+        return False
 
 # Broker singleton for API
 _broker: Optional[BrokerInterface] = None
@@ -337,7 +406,7 @@ app = FastAPI(
 # Add CORS middleware for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "http://127.0.0.1:3001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -362,24 +431,54 @@ def load_universe() -> Dict:
     return {}
 
 
-def collect_scanner_symbols(universe: Dict) -> List[str]:
-    """Collect all symbols from scanner_universe in universe.yaml."""
+def collect_scanner_symbols(universe: Dict, prioritize_volatile: bool = True) -> List[str]:
+    """Collect all symbols from scanner_universe in universe.yaml.
+
+    Args:
+        universe: Loaded universe.yaml dict
+        prioritize_volatile: If True, put high_volatility symbols first
+    """
     scanner_universe = universe.get("scanner_universe", {})
+
+    # Priority order: volatile stocks first (these are our money makers)
+    priority_categories = [
+        'high_volatility',  # BTC miners, meme stocks, crypto
+        'clean_energy',     # EVs, solar, hydrogen
+        'spacs_ipos',       # Recent IPOs, space stocks
+        'cannabis',         # Volatile sector
+        'biotech',          # High volatility pharma
+    ]
+
     all_symbols = []
-
-    for category, symbols in scanner_universe.items():
-        if isinstance(symbols, list):
-            all_symbols.extend(symbols)
-
-    # Remove duplicates while preserving order
     seen = set()
-    unique_symbols = []
-    for symbol in all_symbols:
-        if symbol not in seen:
-            seen.add(symbol)
-            unique_symbols.append(symbol)
 
-    return unique_symbols
+    if prioritize_volatile:
+        # Add priority categories first
+        for category in priority_categories:
+            symbols = scanner_universe.get(category, [])
+            if isinstance(symbols, list):
+                for s in symbols:
+                    if s not in seen:
+                        seen.add(s)
+                        all_symbols.append(s)
+
+        # Then add remaining categories
+        for category, symbols in scanner_universe.items():
+            if category not in priority_categories and isinstance(symbols, list):
+                for s in symbols:
+                    if s not in seen:
+                        seen.add(s)
+                        all_symbols.append(s)
+    else:
+        # Original order
+        for category, symbols in scanner_universe.items():
+            if isinstance(symbols, list):
+                for s in symbols:
+                    if s not in seen:
+                        seen.add(s)
+                        all_symbols.append(s)
+
+    return all_symbols
 
 
 def _compute_strategy_breakdown(trades: List[Dict]) -> List[StrategyBreakdown]:
@@ -804,6 +903,18 @@ async def get_bot_status():
         config = get_global_config()
         mode = config.get_mode()
 
+        # FIX (Jan 2026): Detect actual process state instead of relying on in-memory state
+        # This prevents duplicate bots from being started when API restarts
+        actual_running = _is_bot_running()
+        if actual_running and _bot_state["status"] == "stopped":
+            # Process is running but state says stopped (API restarted)
+            _bot_state["status"] = "running"
+            _bot_state["last_action"] = "Bot detected running (recovered after API restart)"
+        elif not actual_running and _bot_state["status"] == "running":
+            # State says running but process died
+            _bot_state["status"] = "stopped"
+            _bot_state["last_action"] = "Bot stopped (process terminated)"
+
         return BotStatusResponse(
             status=_bot_state["status"],
             mode=mode,
@@ -854,13 +965,25 @@ async def start_bot():
     Start the trading bot with scanner-selected stocks.
 
     Flow:
-    1. Check if market is open
-    2. Run volatility scanner on available stocks
-    3. Start bot with scanned symbols
+    1. Check if bot is already running
+    2. Check if market is open
+    3. Run volatility scanner on available stocks
+    4. Start bot with scanned symbols
 
     Returns 400 if market closed, scanner fails, or no stocks found.
+    Returns 409 if bot is already running.
     """
     global _bot_state
+
+    # FIX (Jan 2026): Check if bot is already running to prevent duplicates
+    if _is_bot_running():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason": "already_running",
+                "message": "Bot is already running. Stop it first before starting a new instance."
+            }
+        )
 
     # Step 1: Check market hours
     if not is_market_open():
@@ -883,19 +1006,17 @@ async def start_bot():
 
         # Fetch data and scan
         fetcher = YFinanceDataFetcher()
-
-        # Get historical data for scanning (last 14 days of hourly data)
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=14)
 
+        # Use get_historical_data with limit=200 (same as scanner/scan endpoint)
+        # This ensures enough bars for ATR calculation (scanner needs ~98 bars minimum)
         historical_data = {}
         for symbol in scanner_symbols[:100]:  # Limit to avoid timeout
             try:
-                data = fetcher.get_historical_data_range(
+                data = fetcher.get_historical_data(
                     symbol,
                     timeframe='1Hour',
-                    start_date=start_date.strftime('%Y-%m-%d'),
-                    end_date=end_date.strftime('%Y-%m-%d')
+                    limit=200
                 )
                 if data is not None and not data.empty:
                     historical_data[symbol] = data
@@ -938,15 +1059,18 @@ async def start_bot():
     # Step 3: Start bot with scanned symbols
     try:
         symbols_arg = ",".join(watchlist)
-        subprocess.Popen(
+        process = subprocess.Popen(
             ["python3", "bot.py", "--symbols", symbols_arg],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
 
+        # FIX (Jan 2026): Save PID to prevent duplicate bots
+        _write_bot_pid(process.pid)
+
         _bot_state["status"] = "running"
         _bot_state["watchlist"] = watchlist
-        update_bot_state(status="running", last_action=f"Started with scanner: {', '.join(watchlist)}")
+        update_bot_state(status="running", last_action=f"Started with scanner: {', '.join(watchlist)} (PID: {process.pid})")
 
     except Exception as e:
         raise HTTPException(
@@ -969,10 +1093,29 @@ async def start_bot():
 async def stop_bot():
     """Stop the trading bot."""
     global _bot_state
-    _bot_state["status"] = "stopped"
-    _bot_state["last_action"] = "Bot stopped"
-    _bot_state["last_action_time"] = datetime.now().isoformat()
-    return {"success": True, "status": "stopped"}
+
+    # FIX (Jan 2026): Actually kill the bot process instead of just updating state
+    pid = _read_bot_pid()
+    was_running = _is_bot_running()
+
+    if was_running:
+        killed = _kill_bot_process()
+        if killed:
+            _bot_state["status"] = "stopped"
+            _bot_state["last_action"] = f"Bot stopped (killed PID {pid})"
+            _bot_state["last_action_time"] = datetime.now().isoformat()
+            return {"success": True, "status": "stopped", "killed_pid": pid}
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail={"reason": "kill_failed", "message": f"Failed to kill bot process (PID {pid})"}
+            )
+    else:
+        # No process running, just update state
+        _bot_state["status"] = "stopped"
+        _bot_state["last_action"] = "Bot stopped (was not running)"
+        _bot_state["last_action_time"] = datetime.now().isoformat()
+        return {"success": True, "status": "stopped", "message": "Bot was not running"}
 
 
 @app.get("/api/settings", response_model=SettingsResponse)
@@ -1008,7 +1151,7 @@ async def run_scanner(top_n: int = 10):
         fetcher = YFinanceDataFetcher()
         historical_data = {}
 
-        for symbol in symbols[:20]:  # Limit to first 20 to avoid timeout
+        for symbol in symbols[:100]:  # Scan top 100 volatile symbols
             try:
                 df = fetcher.get_historical_data(symbol, timeframe="1Hour", limit=200)
                 if df is not None and not df.empty:
