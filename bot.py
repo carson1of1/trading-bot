@@ -485,8 +485,9 @@ class TradingBot:
                 }
 
         if direction == 'LONG':
-            # 1. Trailing stop check (matches backtest.py logic)
-            if trailing_enabled:
+            # 1. Trailing stop check (legacy - only when tiered exits disabled)
+            # FIX (Jan 2026): Match backtest.py and SHORT logic - only run when tiered exits disabled
+            if trailing_enabled and not self.use_tiered_exits:
                 profit_pct = (highest - entry_price) / entry_price
                 if not self.trailing_stops[symbol]['activated'] and profit_pct >= trailing_activation:
                     self.trailing_stops[symbol]['activated'] = True
@@ -509,16 +510,16 @@ class TradingBot:
                             'qty': qty
                         }
 
-            # 2. Hard stop (tiered exit via exit manager)
-            # FIX (Jan 2026): Only call ExitManager when tiered exits enabled (matches backtest.py:692)
+            # 2. Tiered exit via ExitManager (LONG and SHORT - Jan 2026)
             if self.use_tiered_exits and self.exit_manager:
                 # Calculate ATR from historical data for proper trailing stops
                 atr = self._calculate_atr(data, period=14) if data is not None else 0.0
-                # FIX (Jan 2026): Use bar_low instead of current_price to match backtest behavior
-                # This ensures stops trigger on intra-bar lows, not just on close
-                exit_action = self.exit_manager.evaluate_exit(symbol, bar_low, atr)
+                # Pass bar_high and bar_low for proper stop checking
+                exit_action = self.exit_manager.evaluate_exit(
+                    symbol, current_price, atr,
+                    bar_high=bar_high, bar_low=bar_low
+                )
                 if exit_action:
-                    # FIX (Jan 2026): Normalize 'hard_stop' to 'stop_loss' to match backtest.py:699-701
                     reason = exit_action.get('reason', 'exit_manager')
                     if reason == 'hard_stop':
                         reason = 'stop_loss'
@@ -529,22 +530,18 @@ class TradingBot:
                         'qty': exit_action.get('qty', qty)
                     }
 
-            # 3. Simple stop loss fallback - only when tiered exits disabled (matches backtest.py)
-            # FIX (Jan 2026): This was running even with ExitManager active, causing double-check
-            # In backtest.py, this only runs when use_tiered_exits is False
+            # 3. Simple stop loss fallback - only when tiered exits disabled
             if not self.use_tiered_exits:
                 stop_price = entry_price * (1 - hard_stop_pct)
                 if bar_low <= stop_price:
                     return {
                         'exit': True,
-                        'reason': 'stop_loss',  # FIX (Jan 2026): Match backtest.py naming
+                        'reason': 'stop_loss',
                         'price': stop_price,
                         'qty': qty
                     }
 
-            # 4. Take profit (uses take_profit_pct from risk_management config)
-            # FIX (Jan 2026): Only check take profit when tiered exits disabled (matches backtest.py:710)
-            # With tiered exits enabled, ExitManager handles profit-taking via tiered system
+            # 4. Take profit - only when tiered exits disabled
             if not self.use_tiered_exits:
                 tp_price = entry_price * (1 + take_profit_pct)
                 if bar_high >= tp_price:
@@ -556,8 +553,8 @@ class TradingBot:
                     }
 
         else:  # SHORT
-            # 1. Trailing stop check for SHORT (matches backtest.py logic)
-            if trailing_enabled:
+            # 1. Trailing stop check for SHORT (legacy - only when tiered exits disabled)
+            if trailing_enabled and not self.use_tiered_exits:
                 profit_pct = (entry_price - lowest) / entry_price
                 if not self.trailing_stops[symbol]['activated'] and profit_pct >= trailing_activation:
                     self.trailing_stops[symbol]['activated'] = True
@@ -568,7 +565,6 @@ class TradingBot:
 
                 if self.trailing_stops[symbol]['activated']:
                     new_trail = lowest * (1 + trailing_trail)
-                    # For shorts, lower trail price is better
                     if new_trail < self.trailing_stops[symbol]['price'] or self.trailing_stops[symbol]['price'] == 0:
                         self.trailing_stops[symbol]['price'] = new_trail
 
@@ -580,29 +576,45 @@ class TradingBot:
                             'qty': qty
                         }
 
-            # 2. Hard stop for SHORT
-            # FIX (Jan 2026): SHORT always needs hard stop - ExitManager only handles LONG!
-            # BUG: Previous code only ran when tiered exits disabled, leaving SHORT unprotected
-            stop_price = entry_price * (1 + hard_stop_pct)
-            if bar_high >= stop_price:
-                return {
-                    'exit': True,
-                    'reason': 'stop_loss',
-                    'price': stop_price,
-                    'qty': qty
-                }
+            # 2. Tiered exit via ExitManager (SHORT - Jan 2026)
+            if self.use_tiered_exits and self.exit_manager:
+                atr = self._calculate_atr(data, period=14) if data is not None else 0.0
+                exit_action = self.exit_manager.evaluate_exit(
+                    symbol, current_price, atr,
+                    bar_high=bar_high, bar_low=bar_low
+                )
+                if exit_action:
+                    reason = exit_action.get('reason', 'exit_manager')
+                    if reason == 'hard_stop':
+                        reason = 'stop_loss'
+                    return {
+                        'exit': True,
+                        'reason': reason,
+                        'price': exit_action.get('stop_price', current_price),
+                        'qty': exit_action.get('qty', qty)
+                    }
 
-            # 3. Take profit for SHORT (uses take_profit_pct from risk_management config)
-            # FIX (Jan 2026): SHORT take profit runs unconditionally (matches backtest.py:796-801)
-            # LONG uses tiered exits (ExitManager) for profit taking, but SHORT doesn't have ExitManager
-            tp_price = entry_price * (1 - take_profit_pct)
-            if bar_low <= tp_price:
-                return {
-                    'exit': True,
-                    'reason': 'take_profit',
-                    'price': tp_price,
-                    'qty': qty
-                }
+            # 3. Hard stop for SHORT - only when tiered exits disabled
+            if not self.use_tiered_exits:
+                stop_price = entry_price * (1 + hard_stop_pct)
+                if bar_high >= stop_price:
+                    return {
+                        'exit': True,
+                        'reason': 'stop_loss',
+                        'price': stop_price,
+                        'qty': qty
+                    }
+
+            # 4. Take profit for SHORT - only when tiered exits disabled
+            if not self.use_tiered_exits:
+                tp_price = entry_price * (1 - take_profit_pct)
+                if bar_low <= tp_price:
+                    return {
+                        'exit': True,
+                        'reason': 'take_profit',
+                        'price': tp_price,
+                        'qty': qty
+                    }
 
         # 5. EOD close check (matches backtest.py:729-736)
         # FIX (Jan 2026): Add EOD close logic to match backtest behavior
@@ -687,14 +699,14 @@ class TradingBot:
                 fill_price = float(order.filled_avg_price) if hasattr(order, 'filled_avg_price') and order.filled_avg_price else price
                 fill_qty = int(order.filled_qty) if hasattr(order, 'filled_qty') and order.filled_qty else qty
 
-                # Register with exit manager (LONG only when tiered exits enabled)
-                # FIX (Jan 2026): Match backtest.py:922-923 - only register LONG with tiered exits
-                if direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
+                # Register with exit manager (LONG and SHORT - Jan 2026)
+                if self.use_tiered_exits and self.exit_manager:
                     self.exit_manager.register_position(
                         symbol=symbol,
                         entry_price=fill_price,
                         quantity=fill_qty,
-                        entry_time=datetime.now()
+                        entry_time=datetime.now(),
+                        direction=direction
                     )
 
                 # Update tracking
@@ -798,9 +810,8 @@ class TradingBot:
                 if pnl < 0 and self.entry_gate:
                     self.entry_gate.record_loss(datetime.now())
 
-                # Unregister from exit manager (LONG only when tiered exits enabled)
-                # FIX (Jan 2026): Match registration logic - only LONG with tiered exits
-                if direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
+                # Unregister from exit manager (LONG and SHORT - Jan 2026)
+                if self.use_tiered_exits and self.exit_manager:
                     self.exit_manager.unregister_position(symbol)
 
                 # Cleanup
@@ -889,6 +900,11 @@ class TradingBot:
                 current_price = data['close'].iloc[-1]
                 bar_high = data['high'].iloc[-1]
                 bar_low = data['low'].iloc[-1]
+
+                # FIX (Jan 2026): Increment bars_held for ExitManager minimum hold time
+                # Backtest.py:726-727 does this - without it, min_hold_bars never triggers
+                if self.use_tiered_exits and self.exit_manager and symbol in self.exit_manager.positions:
+                    self.exit_manager.increment_bars_held(symbol)
 
                 exit_signal = self.check_exit(symbol, position, current_price, bar_high, bar_low, data)
 
