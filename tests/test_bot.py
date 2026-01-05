@@ -995,3 +995,107 @@ class TestMain:
 
         # Stop should still be called in finally block
         mock_bot.stop.assert_called_once()
+
+
+class TestValidateCandleTimestamp:
+    """Test incomplete bar detection to ensure backtest/live alignment."""
+
+    def test_incomplete_bar_rejected(self):
+        """Bars still forming should be rejected."""
+        from bot import validate_candle_timestamp
+        import pytz
+
+        eastern = pytz.timezone('America/New_York')
+        # Simulate: it's 10:29 EST and we see a 9:30 bar (completes at 10:30)
+        now = datetime(2026, 1, 5, 10, 29, 0, tzinfo=eastern)
+
+        # Bar starts at 9:30, so it's incomplete until 10:30
+        bar_time = datetime(2026, 1, 5, 9, 30, 0, tzinfo=eastern)
+        data = pd.DataFrame({
+            'timestamp': [bar_time],
+            'close': [100.0]
+        })
+
+        with patch('bot.datetime') as mock_datetime:
+            mock_datetime.now.return_value = now
+            mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+            result = validate_candle_timestamp(data, expected_hour=9)
+
+        # Should be rejected - bar not complete yet
+        assert result is False
+
+    def test_complete_bar_accepted(self):
+        """Completed bars should be accepted."""
+        from bot import validate_candle_timestamp
+        import pytz
+
+        eastern = pytz.timezone('America/New_York')
+        # Simulate: it's 10:32 EST and we see a 9:30 bar (completed at 10:30)
+        now = datetime(2026, 1, 5, 10, 32, 0, tzinfo=eastern)
+
+        # Bar starts at 9:30, completed at 10:30 - we're at 10:32, so it's complete
+        bar_time = datetime(2026, 1, 5, 9, 30, 0, tzinfo=eastern)
+        data = pd.DataFrame({
+            'timestamp': [bar_time],
+            'close': [100.0]
+        })
+
+        with patch('bot.datetime') as mock_datetime:
+            mock_datetime.now.return_value = now
+            mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+            result = validate_candle_timestamp(data, expected_hour=9)
+
+        # Should be accepted - bar is complete
+        assert result is True
+
+    def test_market_open_930_bar_expected_hour_9(self):
+        """9:30 bar should be accepted when expecting hour 9 (market open case)."""
+        from bot import validate_candle_timestamp
+        import pytz
+
+        eastern = pytz.timezone('America/New_York')
+        # It's 10:32 EST (after 9:30 bar completes)
+        now = datetime(2026, 1, 5, 10, 32, 0, tzinfo=eastern)
+
+        # First bar of day is 9:30 (market opens at 9:30)
+        bar_time = datetime(2026, 1, 5, 9, 30, 0, tzinfo=eastern)
+        data = pd.DataFrame({
+            'timestamp': [bar_time],
+            'close': [100.0]
+        })
+
+        with patch('bot.datetime') as mock_datetime:
+            mock_datetime.now.return_value = now
+            mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+            # Expected hour 9 should match 9:30 bar (market open special case)
+            result = validate_candle_timestamp(data, expected_hour=9)
+
+        assert result is True
+
+    def test_normal_hourly_bar_accepted(self):
+        """Normal hourly bars (10:00, 11:00, etc.) should be accepted when complete."""
+        from bot import validate_candle_timestamp
+        import pytz
+
+        eastern = pytz.timezone('America/New_York')
+        # It's 11:02 EST (after 10:00 bar completes at 11:00)
+        now = eastern.localize(datetime(2026, 1, 5, 11, 2, 0))
+
+        # 10:00 bar completes at 11:00
+        bar_time = eastern.localize(datetime(2026, 1, 5, 10, 0, 0))
+        data = pd.DataFrame({
+            'timestamp': [bar_time],
+            'close': [100.0]
+        })
+
+        with patch('bot.datetime') as mock_datetime:
+            mock_datetime.now.return_value = now
+            # Allow timedelta to work normally
+            mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+            result = validate_candle_timestamp(data, expected_hour=10)
+
+        assert result is True
