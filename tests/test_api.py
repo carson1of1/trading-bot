@@ -86,10 +86,20 @@ def client(mock_config, fake_broker):
     import api.main as api_module
     api_module._broker = None
 
-    # Patch get_broker to return our fake broker
+    # Reset bot state to defaults for test isolation
+    api_module._bot_state = {
+        "status": "stopped",
+        "last_action": None,
+        "last_action_time": None,
+        "kill_switch_triggered": False,
+        "watchlist": None
+    }
+
+    # Patch get_broker, get_global_config, and _is_bot_running for test isolation
     with patch.object(api_module, 'get_broker', return_value=fake_broker):
         with patch.object(api_module, 'get_global_config', return_value=test_config):
-            yield TestClient(api_module.app)
+            with patch.object(api_module, '_is_bot_running', return_value=False):
+                yield TestClient(api_module.app)
 
 
 # =============================================================================
@@ -210,14 +220,30 @@ class TestBotStatusEndpoint:
         assert data["mode"] == "DRY_RUN"
         assert data["kill_switch_triggered"] is False
 
-    def test_get_bot_status_updated(self, client):
+    def test_get_bot_status_updated(self, mock_config, fake_broker):
         """Should return updated bot status."""
+        from core.config import GlobalConfig
         import api.main as api_module
+        from fastapi.testclient import TestClient
 
-        # Update bot state
-        api_module.update_bot_state(status="running", last_action="Checked positions")
+        test_config = GlobalConfig(mock_config)
+        api_module._broker = None
 
-        response = client.get("/api/bot/status")
+        # Set bot state to running
+        api_module._bot_state = {
+            "status": "running",
+            "last_action": "Checked positions",
+            "last_action_time": "2026-01-05T12:00:00",
+            "kill_switch_triggered": False,
+            "watchlist": None
+        }
+
+        # Mock _is_bot_running to return True so the running state is preserved
+        with patch.object(api_module, 'get_broker', return_value=fake_broker):
+            with patch.object(api_module, 'get_global_config', return_value=test_config):
+                with patch.object(api_module, '_is_bot_running', return_value=True):
+                    client = TestClient(api_module.app)
+                    response = client.get("/api/bot/status")
 
         assert response.status_code == 200
         data = response.json()
@@ -225,11 +251,6 @@ class TestBotStatusEndpoint:
         assert data["status"] == "running"
         assert data["last_action"] == "Checked positions"
         assert data["last_action_time"] is not None
-
-        # Reset state for other tests
-        api_module._bot_state["status"] = "stopped"
-        api_module._bot_state["last_action"] = None
-        api_module._bot_state["last_action_time"] = None
 
 
 # =============================================================================
