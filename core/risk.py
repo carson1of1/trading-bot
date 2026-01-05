@@ -926,10 +926,8 @@ class PositionExitState:
     current_atr: float = 0.0
     atr_multiplier: float = 2.0
 
-    # Minimum hold time (Dec 29, 2025)
-    min_hold_bars: int = 12                    # Minimum bars before non-stop exits
-    min_hold_bypass_loss_pct: float = 0.003    # Allow early exit if loss > 0.30%
-    bars_held: int = 0                         # Current bars held
+    # Bars held tracking (for analytics/logging only)
+    bars_held: int = 0
 
     # Logging
     last_update_time: datetime = field(default_factory=lambda: datetime.now(pytz.UTC))
@@ -971,7 +969,8 @@ class ExitManager:
         Args:
             bot_settings: Bot configuration dict with 'risk' section
         """
-        self.logger = logging.getLogger(__name__)
+        # Use 'trading_bot' logger to ensure logs go to the same file as bot.py
+        self.logger = logging.getLogger('trading_bot')
         self.positions: Dict[str, PositionExitState] = {}
 
         # Load settings from config
@@ -988,19 +987,13 @@ class ExitManager:
         # ATR settings
         self.atr_multiplier = risk_settings.get('atr_trailing_multiplier', 2.0)
 
-        # Minimum hold time settings (Dec 29, 2025)
-        # Analysis showed short trades (<=10 bars) lose money, long trades (>30 bars) profit
-        self.min_hold_bars = risk_settings.get('min_hold_bars', 12)
-        self.min_hold_bypass_loss_pct = risk_settings.get('min_hold_bypass_loss_pct', 0.30) / 100  # 0.30%
-
         self.logger.info(
             f"ExitManager initialized: "
             f"profit_floor={self.profit_floor_activation_pct*100:.2f}%->{self.profit_floor_lock_pct*100:.2f}%, "
             f"trailing_activation={self.trailing_activation_pct*100:.2f}%, "
             f"partial_tp={self.partial_tp_pct*100:.2f}%@{self.partial_tp_size*100:.0f}%, "
             f"hard_stop=-{self.hard_stop_pct*100:.2f}%, "
-            f"ATR_mult={self.atr_multiplier}, "
-            f"min_hold={self.min_hold_bars} bars"
+            f"ATR_mult={self.atr_multiplier}"
         )
 
     def register_position(self, symbol: str, entry_price: float, quantity: int,
@@ -1042,8 +1035,6 @@ class ExitManager:
             atr_multiplier=self.atr_multiplier,
             peak_price=entry_price,
             trough_price=entry_price,
-            min_hold_bars=self.min_hold_bars,
-            min_hold_bypass_loss_pct=self.min_hold_bypass_loss_pct,
             bars_held=0
         )
 
@@ -1060,8 +1051,7 @@ class ExitManager:
         self.logger.info(
             f"EXIT_MGR | {symbol} | REGISTERED | "
             f"Direction: {direction}, Entry: ${entry_price:.2f}, Qty: {quantity}, "
-            f"Hard Stop: {stop_desc}, "
-            f"Min Hold: {self.min_hold_bars} bars"
+            f"Hard Stop: {stop_desc}"
         )
 
         return state
@@ -1206,27 +1196,6 @@ class ExitManager:
                 'unrealized_pnl_pct': unrealized_pnl_pct,
                 'qty': state.quantity
             }
-
-        # ================================================================
-        # MINIMUM HOLD TIME CHECK (Dec 29, 2025)
-        # Block non-stop exits until min_hold_bars is reached
-        # Exception: allow early exit if loss exceeds bypass threshold
-        # ================================================================
-        if state.bars_held < state.min_hold_bars:
-            # Check if we should bypass minimum hold due to significant loss
-            bypass_for_loss = unrealized_pnl_pct < -state.min_hold_bypass_loss_pct
-
-            if not bypass_for_loss:
-                # Not enough bars held and no bypass condition - skip all exits
-                # (Hard stop already checked above, so we're safe from catastrophic loss)
-                return None
-
-            # Log bypass
-            self.logger.debug(
-                f"EXIT_MGR | {symbol} | MIN_HOLD_BYPASS | "
-                f"Bars: {state.bars_held}/{state.min_hold_bars}, "
-                f"Loss: {unrealized_pnl_pct*100:.2f}% < -{state.min_hold_bypass_loss_pct*100:.2f}%"
-            )
 
         # ================================================================
         # TIER 1: PROFIT FLOOR CHECK
