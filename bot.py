@@ -156,6 +156,8 @@ class TradingBot:
             'profit_floor_pct': exit_config.get('tier_1_profit_floor', 0.02) * 100,
             'trailing_activation_pct': exit_config.get('tier_2_atr_trailing', 0.03) * 100,
             'partial_tp_pct': exit_config.get('tier_3_partial_take', 0.04) * 100,
+            'partial_tp2_pct': exit_config.get('tier_4_partial_take2', 0.05) * 100,
+            'partial_tp2_size': exit_config.get('tier_4_partial_take2_size', 1.0),
         }
         self.exit_manager = ExitManager({'risk': exit_settings})
         # FIX (Jan 2026): Track tiered exits enabled state to match backtest.py behavior
@@ -224,24 +226,28 @@ class TradingBot:
             if self.portfolio_value > self.peak_value:
                 self.peak_value = self.portfolio_value
 
-            # Daily P&L tracking
+            # FIX (Jan 2026): Use Alpaca's last_equity for daily P&L calculation
+            # Previously used self-tracked daily_starting_capital which reset on every bot restart,
+            # causing false kill switch triggers (e.g., showing 4% loss when account was actually up).
+            # Alpaca's last_equity is the official previous-day close, immune to bot restarts.
+            self.daily_starting_capital = float(account.last_equity)
+            self.daily_pnl = self.portfolio_value - self.daily_starting_capital
+
+            # Reset kill switch on new trading day
             now = datetime.now()
             if self.current_trading_day != now.date():
                 self.current_trading_day = now.date()
-                self.daily_starting_capital = self.portfolio_value
-                self.daily_pnl = 0.0
                 self.kill_switch_triggered = False
-            else:
-                self.daily_pnl = self.portfolio_value - self.daily_starting_capital
+                logger.info(f"New trading day: start equity=${self.daily_starting_capital:.2f}")
 
             # Kill switch check
             if self.daily_starting_capital > 0:
                 daily_loss_pct = -self.daily_pnl / self.daily_starting_capital
-                max_daily_loss = self.config.get('risk_management', {}).get('max_daily_loss_pct', 3.0) / 100
+                max_daily_loss = self.config.get('risk_management', {}).get('max_daily_loss_pct', 5.0) / 100
                 if daily_loss_pct >= max_daily_loss:
                     if not self.kill_switch_triggered:
                         self.kill_switch_triggered = True
-                        logger.warning(f"KILL SWITCH: Daily loss {daily_loss_pct*100:.2f}% >= {max_daily_loss*100}%")
+                        logger.warning(f"KILL SWITCH: Daily loss {daily_loss_pct*100:.2f}% >= {max_daily_loss*100}% (equity=${self.portfolio_value:.2f}, start=${self.daily_starting_capital:.2f})")
 
             logger.debug(f"Account synced: cash=${self.cash:.2f}, portfolio=${self.portfolio_value:.2f}")
 
@@ -257,9 +263,10 @@ class TradingBot:
             for pos in broker_positions:
                 symbol = pos.symbol
 
-                # Only track symbols in our universe
-                if symbol not in self.watchlist:
-                    continue
+                # FIX (Jan 2026): Sync ALL positions, not just watchlist symbols
+                # We must manage exits for existing positions even if they're no longer
+                # in today's scanner watchlist. Watchlist only limits NEW entries.
+                # Previously this caused positions to be ignored and stops to not trigger!
 
                 synced[symbol] = {
                     'symbol': symbol,
@@ -1024,25 +1031,40 @@ class TradingBot:
                     return
 
             # 2. Check exits for all positions
+            logger.info(f"Checking exits for {len(self.open_positions)} positions")
             for symbol, position in list(self.open_positions.items()):
                 # FIX (Jan 2026): Use 100 bars to ensure sufficient data for ATR and indicators
                 # Previously 50 bars could cause insufficient warmup for some calculations
                 data = self.fetch_data(symbol, bars=100)
                 if data is None:
+                    logger.warning(f"EXIT_CHECK | {symbol} | No data available")
                     continue
 
                 current_price = data['close'].iloc[-1]
                 bar_high = data['high'].iloc[-1]
                 bar_low = data['low'].iloc[-1]
+                entry_price = position['entry_price']
+                direction = position.get('direction', 'LONG')
+
+                # Calculate P&L for logging
+                if direction == 'LONG':
+                    pnl_pct = (current_price - entry_price) / entry_price * 100
+                else:
+                    pnl_pct = (entry_price - current_price) / entry_price * 100
 
                 # FIX (Jan 2026): Increment bars_held for ExitManager minimum hold time
                 # Backtest.py:726-727 does this - without it, min_hold_bars never triggers
                 if self.use_tiered_exits and self.exit_manager and symbol in self.exit_manager.positions:
                     self.exit_manager.increment_bars_held(symbol)
+                    bars_held = self.exit_manager.positions[symbol].bars_held
+                    state = self.exit_manager.positions[symbol]
+                    hard_stop = entry_price * (1 - state.hard_stop_pct) if direction == 'LONG' else entry_price * (1 + state.hard_stop_pct)
+                    logger.info(f"EXIT_CHECK | {symbol} | ${current_price:.2f} ({pnl_pct:+.2f}%) | Stop: ${hard_stop:.2f} | Bars: {bars_held}")
 
                 exit_signal = self.check_exit(symbol, position, current_price, bar_high, bar_low, data)
 
                 if exit_signal and exit_signal.get('exit'):
+                    logger.info(f"EXIT_TRIGGER | {symbol} | {exit_signal.get('reason', 'unknown')} @ ${exit_signal.get('price', current_price):.2f}")
                     self.execute_exit(symbol, exit_signal)
 
             # 3. Check entries for watchlist (only if not at position limit and entries allowed)

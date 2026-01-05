@@ -43,6 +43,8 @@ from core import (
     TradeLogger,
     VolatilityScanner,
     YFinanceDataFetcher,
+    DailyDrawdownGuard,
+    DrawdownTier,
 )
 from strategies import StrategyManager
 
@@ -141,6 +143,8 @@ class Backtest1Hour:
             'profit_floor_pct': exit_config.get('tier_1_profit_floor', 0.02) * 100,
             'trailing_activation_pct': exit_config.get('tier_2_atr_trailing', 0.03) * 100,
             'partial_tp_pct': exit_config.get('tier_3_partial_take', 0.04) * 100,
+            'partial_tp2_pct': exit_config.get('tier_4_partial_take2', 0.05) * 100,
+            'partial_tp2_size': exit_config.get('tier_4_partial_take2_size', 1.0),
         }
         bot_settings = {'risk': exit_settings}
         self.exit_manager = ExitManager(bot_settings)
@@ -180,6 +184,10 @@ class Backtest1Hour:
         self.trailing_activation_pct = trailing_config.get('activation_pct', 0.25) / 100  # 0.25%
         self.trailing_trail_pct = trailing_config.get('trail_pct', 0.25) / 100  # 0.25%
         self.trailing_move_to_breakeven = trailing_config.get('move_to_breakeven', True)
+
+        # Daily Drawdown Guard (Jan 4, 2026)
+        # Protects funded account capital with tiered drawdown limits
+        self.drawdown_guard = DailyDrawdownGuard(self.config)
 
         # Kill switch trace logging (for debugging)
         self.kill_switch_trace = kill_switch_trace
@@ -238,6 +246,19 @@ class Backtest1Hour:
         # Reset entry gate
         if self.entry_gate:
             self.entry_gate.reset()
+
+        # Reset drawdown guard for new backtest
+        if hasattr(self, 'drawdown_guard') and self.drawdown_guard.enabled:
+            # Reset to NORMAL tier with no day set (will be set on first bar)
+            self.drawdown_guard._highest_tier_reached = DrawdownTier.NORMAL
+            self.drawdown_guard.current_date = None
+            self.drawdown_guard.day_start_equity = 0.0
+            self.drawdown_guard.current_equity = 0.0
+            self.drawdown_guard.drawdown_pct = 0.0
+            self.drawdown_guard.entries_allowed = True
+            self.drawdown_guard.position_size_multiplier = 1.0
+            self.drawdown_guard.day_halted = False
+            self.drawdown_guard.realized_pnl_today = 0.0
 
         # Diagnostics
         self._diag_exit_reasons = defaultdict(lambda: defaultdict(int))
@@ -696,6 +717,10 @@ class Backtest1Hour:
                 self.daily_starting_capital = self.portfolio_value
                 self.kill_switch_triggered = False
 
+                # Reset drawdown guard for new day
+                if self.drawdown_guard.enabled:
+                    self.drawdown_guard.reset_day(self.portfolio_value, bar_date)
+
                 # TRACE POINT A: Start of trading day
                 if self.kill_switch_trace:
                     self._kill_switch_trace_log.append({
@@ -706,6 +731,60 @@ class Backtest1Hour:
                         'daily_pnl': 0.0,
                         'kill_switch_triggered': False
                     })
+
+            # Update drawdown guard with current equity
+            if self.drawdown_guard.enabled:
+                # Create a mock account object for the guard
+                class MockAccount:
+                    def __init__(self, equity):
+                        self.equity = equity
+                        self.portfolio_value = equity
+                mock_account = MockAccount(self.portfolio_value)
+                # Pass bar_date to avoid datetime.now() issues in backtest
+                drawdown_tier = self.drawdown_guard.update_equity(mock_account, current_date=bar_date)
+
+                # Handle hard limit - force liquidation
+                if drawdown_tier == DrawdownTier.HARD_LIMIT and position_direction is not None:
+                    # Force exit the position at current price
+                    if position_direction == 'LONG':
+                        exit_price = current_price * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
+                        proceeds = shares * exit_price * (1 - self.COMMISSION)
+                        self.cash += proceeds
+                        entry_cost = shares * entry_price * (1 + self.COMMISSION)
+                        pnl = proceeds - entry_cost
+                    else:  # SHORT
+                        exit_price = current_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
+                        entry_proceeds = shares * entry_price * (1 - self.COMMISSION)
+                        exit_cost = shares * exit_price * (1 + self.COMMISSION)
+                        pnl = entry_proceeds - exit_cost
+                        self.cash += (self.cash - exit_cost + entry_proceeds) - self.cash + exit_cost
+                        # For shorts: original cash is restored minus loss
+                        self.cash = self.cash + pnl
+
+                    self.total_pnl += pnl
+                    self.daily_pnl += pnl
+                    if pnl >= 0:
+                        self.winning_trades += 1
+                    else:
+                        self.losing_trades += 1
+                    self.total_trades += 1
+
+                    self._diag_exit_reasons[symbol]['drawdown_guard_liquidation'] += 1
+
+                    if self.use_tiered_exits and self.exit_manager:
+                        self.exit_manager.unregister_position(symbol)
+
+                    logger.warning(
+                        f"DRAWDOWN_GUARD | LIQUIDATION | {symbol} @ ${exit_price:.2f} | "
+                        f"P&L: ${pnl:+.2f}"
+                    )
+
+                    # Reset position state
+                    position_direction = None
+                    shares = 0
+                    entry_price = 0.0
+                    entry_time = None
+                    continue  # Skip to next bar
 
             # ============ EXIT LOGIC (runs first, every bar) ============
             # FIX (Jan 2026): Exit precedence order: hard stop > trailing > time exit > EOD
@@ -1058,6 +1137,19 @@ class Backtest1Hour:
                         })
 
                     pending_entry = None  # Discard the pending entry
+                # Drawdown guard check - block pending entry at soft limit or higher
+                elif self.drawdown_guard.enabled and not self.drawdown_guard.entries_allowed:
+                    self._diag_entry_blocks[symbol]['drawdown_guard'] += 1
+                    logger.debug(
+                        f"DRAWDOWN_GUARD | Entry blocked at {self.drawdown_guard.tier.name} | {symbol}"
+                    )
+                    pending_entry = None  # Discard the pending entry
+                # EOD entry cutoff - prevent entries at/after EOD close hour to avoid overnight positions
+                # FIX (Jan 2026): Entries at 3 PM+ would be held overnight since EOD close runs on same bar
+                elif self.eod_close_enabled and bar_hour is not None and bar_hour >= self.eod_close_bar_hour:
+                    self._diag_entry_blocks[symbol]['eod_cutoff'] = self._diag_entry_blocks[symbol].get('eod_cutoff', 0) + 1
+                    logger.debug(f"EOD_CUTOFF | Entry blocked at {bar_hour}:00 (cutoff: {self.eod_close_bar_hour}:00) | {symbol}")
+                    pending_entry = None  # Discard - too late in day
                 else:
                     # Process the pending entry
                     open_price = row.get('open', current_price)
@@ -1076,6 +1168,16 @@ class Backtest1Hour:
                     shares = self.risk_manager.calculate_position_size(
                         self.portfolio_value, realistic_entry_price, stop_loss_price
                     )
+
+                    # Apply drawdown guard position size multiplier
+                    if self.drawdown_guard.enabled and self.drawdown_guard.position_size_multiplier < 1.0:
+                        original_shares = shares
+                        shares = int(shares * self.drawdown_guard.position_size_multiplier)
+                        if shares != original_shares:
+                            logger.debug(
+                                f"DRAWDOWN_GUARD | Position size reduced: {original_shares} -> {shares} shares "
+                                f"({self.drawdown_guard.position_size_multiplier*100:.0f}%)"
+                            )
 
                     if direction == 'LONG':
                         cost = shares * realistic_entry_price * (1 + self.COMMISSION)
@@ -1155,6 +1257,14 @@ class Backtest1Hour:
                                     'direction': 'LONG' if signal == 1 else 'SHORT'
                                 })
 
+                            continue
+
+                        # Drawdown guard check - block entries at soft limit or higher
+                        if self.drawdown_guard.enabled and not self.drawdown_guard.entries_allowed:
+                            self._diag_entry_blocks[symbol]['drawdown_guard'] += 1
+                            logger.debug(
+                                f"DRAWDOWN_GUARD | Entry blocked at {self.drawdown_guard.tier.name} | {symbol}"
+                            )
                             continue
 
                         # Check entry gate
@@ -1361,6 +1471,10 @@ class Backtest1Hour:
                 self.daily_starting_capital = self.portfolio_value
                 self.kill_switch_triggered = False
 
+                # Reset drawdown guard for new day
+                if self.drawdown_guard.enabled:
+                    self.drawdown_guard.reset_day(self.portfolio_value, bar_date)
+
                 # TRACE POINT A: Start of trading day
                 if self.kill_switch_trace:
                     self._kill_switch_trace_log.append({
@@ -1521,6 +1635,16 @@ class Backtest1Hour:
                             exit_price = current_price * (1 + self.EXIT_SLIPPAGE + self.BID_ASK_SPREAD)
                         exit_reason = 'max_hold'
 
+                # EOD close - prevents overnight gap risk (critical for funded accounts)
+                if not exit_triggered and self.eod_close_enabled:
+                    if bar_hour is not None and bar_hour >= self.eod_close_bar_hour:
+                        exit_triggered = True
+                        if position_direction == 'LONG':
+                            exit_price = current_price * (1 - self.EXIT_SLIPPAGE - self.BID_ASK_SPREAD)
+                        else:
+                            exit_price = current_price * (1 + self.EXIT_SLIPPAGE + self.BID_ASK_SPREAD)
+                        exit_reason = 'eod_close'
+
                 bars_held = state['bar_count'] - state['entry_index']
 
                 # Execute exit
@@ -1630,6 +1754,72 @@ class Backtest1Hour:
                     unrealized_pnl = (st['entry_price'] - sym_price) * st['shares']
                     self.portfolio_value += unrealized_pnl
 
+            # ============ UPDATE DRAWDOWN GUARD ============
+            if self.drawdown_guard.enabled and bar_date is not None:
+                # Create mock account for guard
+                class MockAccount:
+                    def __init__(self, equity):
+                        self.equity = equity
+                        self.portfolio_value = equity
+                mock_account = MockAccount(self.portfolio_value)
+                drawdown_tier = self.drawdown_guard.update_equity(mock_account, current_date=bar_date)
+
+                # Handle hard limit - liquidate ALL positions
+                if drawdown_tier == DrawdownTier.HARD_LIMIT:
+                    for sym, st in symbol_state.items():
+                        if st['position_direction'] is not None:
+                            sym_price = signals_data[sym].iloc[min(st['bar_count']-1, len(signals_data[sym])-1)]['close']
+                            if st['position_direction'] == 'LONG':
+                                exit_price = sym_price * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
+                                proceeds = st['shares'] * exit_price * (1 - self.COMMISSION)
+                                self.cash += proceeds
+                                entry_cost = st['shares'] * st['entry_price'] * (1 + self.COMMISSION)
+                                pnl = proceeds - entry_cost
+                            else:  # SHORT
+                                exit_price = sym_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
+                                entry_proceeds = st['shares'] * st['entry_price'] * (1 - self.COMMISSION)
+                                exit_cost = st['shares'] * exit_price * (1 + self.COMMISSION)
+                                pnl = entry_proceeds - exit_cost
+                                self.cash += pnl
+
+                            self.total_pnl += pnl
+                            self.daily_pnl += pnl
+                            if pnl >= 0:
+                                self.winning_trades += 1
+                            else:
+                                self.losing_trades += 1
+                            self.total_trades += 1
+
+                            all_trades.append({
+                                'symbol': sym,
+                                'direction': st['position_direction'],
+                                'entry_date': st['entry_time'],
+                                'exit_date': timestamp,
+                                'entry_price': st['entry_price'],
+                                'exit_price': exit_price,
+                                'shares': st['shares'],
+                                'pnl': pnl,
+                                'pnl_pct': (pnl / (st['shares'] * st['entry_price'])) * 100,
+                                'exit_reason': 'drawdown_guard_liquidation',
+                                'strategy': st['entry_strategy'],
+                                'reasoning': st['entry_reasoning'],
+                                'bars_held': st['bar_count'] - st['entry_index'],
+                            })
+
+                            logger.warning(
+                                f"DRAWDOWN_GUARD | LIQUIDATION | {sym} @ ${exit_price:.2f} | "
+                                f"P&L: ${pnl:+.2f}"
+                            )
+
+                            # Reset position state
+                            st['position_direction'] = None
+                            st['shares'] = 0
+                            st['entry_price'] = 0.0
+                            st['entry_time'] = None
+
+                    # Skip rest of bar processing for this bar
+                    continue
+
             if self.portfolio_value > self.peak_value:
                 self.peak_value = self.portfolio_value
                 # New peak means new drawdown window starts
@@ -1699,6 +1889,12 @@ class Backtest1Hour:
                             })
                         state['pending_entry'] = None
                         continue
+                    # EOD entry cutoff - prevent entries at/after EOD close hour
+                    # FIX (Jan 2026): Entries at 3 PM+ would be held overnight
+                    if self.eod_close_enabled and bar_hour is not None and bar_hour >= self.eod_close_bar_hour:
+                        logger.debug(f"EOD_CUTOFF | Entry blocked at {bar_hour}:00 | {symbol}")
+                        state['pending_entry'] = None
+                        continue
                     # Process the pending entry
                     open_price = row.get('open', current_price)
                     direction = pending_entry.get('direction', 'LONG')
@@ -1713,6 +1909,11 @@ class Backtest1Hour:
                     new_shares = self.risk_manager.calculate_position_size(
                         self.portfolio_value, realistic_entry_price, new_stop_loss_price
                     )
+
+                    # Apply drawdown guard position size reduction at WARNING tier
+                    if self.drawdown_guard and self.drawdown_guard.enabled:
+                        if self.drawdown_guard.position_size_multiplier < 1.0:
+                            new_shares = int(new_shares * self.drawdown_guard.position_size_multiplier)
 
                     can_enter = False
                     if direction == 'LONG':
@@ -1822,6 +2023,21 @@ class Backtest1Hour:
                                         'entry_type': 'new_signal',
                                         'kill_switch_triggered': self.kill_switch_triggered,
                                         'block_reason': reason,
+                                        'direction': 'LONG' if signal == 1 else 'SHORT'
+                                    })
+
+                        # Drawdown guard - block entries at soft limit or higher
+                        if entry_allowed and self.drawdown_guard and self.drawdown_guard.enabled:
+                            if not self.drawdown_guard.entries_allowed:
+                                entry_allowed = False
+                                if self.kill_switch_trace:
+                                    self._kill_switch_trace_log.append({
+                                        'event': 'ENTRY_BLOCKED',
+                                        'timestamp': str(timestamp),
+                                        'symbol': symbol,
+                                        'entry_type': 'new_signal',
+                                        'kill_switch_triggered': False,
+                                        'block_reason': f'drawdown_guard ({self.drawdown_guard._highest_tier_reached.name})',
                                         'direction': 'LONG' if signal == 1 else 'SHORT'
                                     })
 
