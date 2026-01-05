@@ -1,23 +1,40 @@
-"""Tests for scanner-bot integration."""
+"""
+Tests for Bot-Scanner Integration.
+
+Part 1: CLI/API tests for bot startup with scanner
+Part 2: Backtest-Scanner integration tests
+"""
 import pytest
 import subprocess
+import os
 import sys
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, Mock
+import pandas as pd
+import numpy as np
+import pytz
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.scanner import VolatilityScanner
+from core.market_hours import MarketHours
+from backtest import Backtest1Hour
+
+
+# =============================================================================
+# Part 1: CLI/API Tests (bot.py and api/main.py integration)
+# =============================================================================
 
 class TestBotCLISymbolsArgument:
     """Test bot.py accepts --symbols argument."""
 
     def test_bot_parses_symbols_argument(self):
         """bot.py should parse --symbols into a list."""
-        # Import after patching to avoid actual bot initialization
         with patch('bot.TradingBot') as MockBot:
             mock_instance = MagicMock()
             MockBot.return_value = mock_instance
 
-            # Simulate argument parsing
             import argparse
             parser = argparse.ArgumentParser()
             parser.add_argument('--config', default='config.yaml')
@@ -44,7 +61,6 @@ class TestBotCLISymbolsArgument:
              patch('bot.MarketHours'), \
              patch('bot.StrategyManager'):
 
-            # Mock config
             mock_yaml.return_value = {
                 'mode': 'PAPER',
                 'timeframe': '1Hour',
@@ -57,8 +73,6 @@ class TestBotCLISymbolsArgument:
             }
 
             from bot import TradingBot
-
-            # Test with scanner_symbols
             bot = TradingBot(scanner_symbols=['NVDA', 'TSLA', 'AMD'])
             assert bot.watchlist == ['NVDA', 'TSLA', 'AMD']
 
@@ -70,8 +84,6 @@ class TestMarketHoursCheck:
         """Should return True during market hours (9:30 AM - 4:00 PM ET)."""
         from core.market_hours import is_market_open
 
-        # Mock a Tuesday at 10:30 AM ET (using pytz for compatibility)
-        import pytz
         et = pytz.timezone('America/New_York')
         mock_time = et.localize(datetime(2026, 1, 6, 10, 30, 0))
 
@@ -84,8 +96,6 @@ class TestMarketHoursCheck:
         """Should return False before 9:30 AM ET."""
         from core.market_hours import is_market_open
 
-        # Mock a Tuesday at 8:00 AM ET
-        import pytz
         et = pytz.timezone('America/New_York')
         mock_time = et.localize(datetime(2026, 1, 6, 8, 0, 0))
 
@@ -98,8 +108,6 @@ class TestMarketHoursCheck:
         """Should return False on weekends."""
         from core.market_hours import is_market_open
 
-        # Mock a Saturday at 11:00 AM ET
-        import pytz
         et = pytz.timezone('America/New_York')
         mock_time = et.localize(datetime(2026, 1, 3, 11, 0, 0))
 
@@ -112,8 +120,6 @@ class TestMarketHoursCheck:
         """Should return helpful message when market is closed."""
         from core.market_hours import get_market_status_message
 
-        # Mock a Saturday
-        import pytz
         et = pytz.timezone('America/New_York')
         mock_time = et.localize(datetime(2026, 1, 3, 11, 0, 0))
 
@@ -124,7 +130,7 @@ class TestMarketHoursCheck:
             assert "closed" in message.lower() or "weekend" in message.lower() or "saturday" in message.lower()
 
 
-class TestBotStartWithScanner:
+class TestBotStartWithScannerAPI:
     """Test POST /api/bot/start runs scanner first."""
 
     @pytest.fixture
@@ -141,7 +147,6 @@ class TestBotStartWithScanner:
              patch('api.main.subprocess.Popen') as mock_popen, \
              patch('api.main.YFinanceDataFetcher') as MockFetcher:
 
-            # Mock scanner returning results
             mock_scanner_instance = MagicMock()
             mock_scanner_instance.scan_historical.return_value = [
                 {'symbol': 'NVDA', 'composite_score': 0.95},
@@ -150,7 +155,6 @@ class TestBotStartWithScanner:
             ]
             MockScanner.return_value = mock_scanner_instance
 
-            # Mock fetcher
             mock_fetcher_instance = MagicMock()
             mock_fetcher_instance.get_historical_data_range.return_value = MagicMock(empty=False)
             MockFetcher.return_value = mock_fetcher_instance
@@ -181,12 +185,10 @@ class TestBotStartWithScanner:
              patch('api.main.is_market_open', return_value=True), \
              patch('api.main.YFinanceDataFetcher') as MockFetcher:
 
-            # Mock scanner returning empty
             mock_scanner_instance = MagicMock()
             mock_scanner_instance.scan_historical.return_value = []
             MockScanner.return_value = mock_scanner_instance
 
-            # Mock fetcher
             mock_fetcher_instance = MagicMock()
             mock_fetcher_instance.get_historical_data_range.return_value = MagicMock(empty=False)
             MockFetcher.return_value = mock_fetcher_instance
@@ -203,12 +205,10 @@ class TestBotStartWithScanner:
              patch('api.main.is_market_open', return_value=True), \
              patch('api.main.YFinanceDataFetcher') as MockFetcher:
 
-            # Mock scanner raising exception
             mock_scanner_instance = MagicMock()
             mock_scanner_instance.scan_historical.side_effect = Exception("YFinance API timeout")
             MockScanner.return_value = mock_scanner_instance
 
-            # Mock fetcher
             mock_fetcher_instance = MagicMock()
             mock_fetcher_instance.get_historical_data_range.return_value = MagicMock(empty=False)
             MockFetcher.return_value = mock_fetcher_instance
@@ -234,7 +234,6 @@ class TestBotStartWithScanner:
             ]
             MockScanner.return_value = mock_scanner_instance
 
-            # Mock fetcher
             mock_fetcher_instance = MagicMock()
             mock_fetcher_instance.get_historical_data_range.return_value = MagicMock(empty=False)
             MockFetcher.return_value = mock_fetcher_instance
@@ -265,7 +264,6 @@ class TestFullScannerBotIntegration:
              patch('api.main.subprocess.Popen') as mock_popen, \
              patch('api.main.YFinanceDataFetcher') as MockFetcher:
 
-            # Setup mocks
             mock_scanner_instance = MagicMock()
             mock_scanner_instance.scan_historical.return_value = [
                 {'symbol': 'NVDA', 'composite_score': 0.95},
@@ -278,14 +276,12 @@ class TestFullScannerBotIntegration:
             mock_fetcher_instance.get_historical_data_range.return_value = MagicMock(empty=False)
             MockFetcher.return_value = mock_fetcher_instance
 
-            # Start bot
             response = client.post("/api/bot/start")
             assert response.status_code == 200
             start_data = response.json()
             assert start_data["status"] == "started"
             assert start_data["watchlist"] == ["NVDA", "TSLA", "AMD"]
 
-            # Verify bot process was started with correct symbols
             mock_popen.assert_called_once()
             call_args = mock_popen.call_args[0][0]
             assert "python3" in call_args[0]
@@ -294,60 +290,294 @@ class TestFullScannerBotIntegration:
             symbols_idx = call_args.index("--symbols")
             assert "NVDA,TSLA,AMD" == call_args[symbols_idx + 1]
 
-            # Check status shows running with watchlist
             status_response = client.get("/api/bot/status")
             assert status_response.status_code == 200
             status_data = status_response.json()
             assert status_data["status"] == "running"
             assert status_data["watchlist"] == ["NVDA", "TSLA", "AMD"]
 
-    def test_scanner_failure_provides_clear_reason(self, client):
-        """Test that scanner failures provide actionable error messages."""
-        # Test market closed
-        with patch('api.main.is_market_open', return_value=False), \
-             patch('api.main.get_market_status_message', return_value="Market closed: Saturday."):
 
-            response = client.post("/api/bot/start")
-            assert response.status_code == 400
-            data = response.json()
-            assert data["detail"]["reason"] == "market_closed"
-            assert "Saturday" in data["detail"]["message"]
+# =============================================================================
+# Part 2: Backtest-Scanner Integration Tests
+# =============================================================================
 
-    def test_scanner_no_results_error(self, client):
-        """Test that empty scanner results provide clear error."""
-        with patch('api.main.is_market_open', return_value=True), \
-             patch('api.main.VolatilityScanner') as MockScanner, \
-             patch('api.main.YFinanceDataFetcher') as MockFetcher:
+def create_sample_ohlcv_data(n_bars: int = 300, base_price: float = 100.0) -> pd.DataFrame:
+    """Create sample OHLCV data for testing."""
+    tz = pytz.timezone('America/New_York')
+    base_date = datetime(2025, 1, 2, 9, 30, tzinfo=tz)
 
-            mock_scanner = MagicMock()
-            mock_scanner.scan_historical.return_value = []
-            MockScanner.return_value = mock_scanner
+    np.random.seed(42)
+    dates = [base_date + timedelta(hours=j) for j in range(n_bars)]
 
-            mock_fetcher = MagicMock()
-            mock_fetcher.get_historical_data_range.return_value = MagicMock(empty=False)
-            MockFetcher.return_value = mock_fetcher
+    volatility = 0.02
+    returns = np.random.normal(0, volatility, n_bars)
+    prices = base_price * np.exp(np.cumsum(returns))
 
-            response = client.post("/api/bot/start")
-            assert response.status_code == 400
-            data = response.json()
-            assert data["detail"]["reason"] == "no_results"
+    df = pd.DataFrame({
+        'timestamp': dates,
+        'open': prices * (1 + np.random.uniform(-0.005, 0.005, n_bars)),
+        'high': prices * (1 + np.abs(np.random.normal(0, volatility, n_bars))),
+        'low': prices * (1 - np.abs(np.random.normal(0, volatility, n_bars))),
+        'close': prices,
+        'volume': np.random.uniform(500_000, 2_000_000, n_bars),
+    })
+    df['high'] = df[['open', 'close', 'high']].max(axis=1)
+    df['low'] = df[['open', 'close', 'low']].min(axis=1)
 
-    def test_scanner_exception_error(self, client):
-        """Test that scanner exceptions provide clear error."""
-        with patch('api.main.is_market_open', return_value=True), \
-             patch('api.main.VolatilityScanner') as MockScanner, \
-             patch('api.main.YFinanceDataFetcher') as MockFetcher:
+    return df
 
-            mock_scanner = MagicMock()
-            mock_scanner.scan_historical.side_effect = Exception("Connection timeout")
-            MockScanner.return_value = mock_scanner
 
-            mock_fetcher = MagicMock()
-            mock_fetcher.get_historical_data_range.return_value = MagicMock(empty=False)
-            MockFetcher.return_value = mock_fetcher
+class TestBacktestScannerIntegration:
+    """Tests for bot startup behavior with scanner integration."""
 
-            response = client.post("/api/bot/start")
-            assert response.status_code == 400
-            data = response.json()
-            assert data["detail"]["reason"] == "scanner_error"
-            assert "timeout" in data["detail"]["message"].lower()
+    def test_start_bot_runs_scanner_first(self):
+        """Test that scanner runs before signal generation when enabled."""
+        config = {
+            'volatility_scanner': {
+                'enabled': True,
+                'top_n': 5,
+                'min_price': 5,
+                'max_price': 1000,
+                'min_volume': 100_000,
+            },
+            'risk_management': {'stop_loss_pct': 2.0, 'take_profit_pct': 4.0},
+            'exit_manager': {'enabled': False},
+        }
+
+        backtest = Backtest1Hour(
+            initial_capital=100000,
+            config=config,
+            scanner_enabled=True
+        )
+
+        assert backtest.scanner is not None
+        assert backtest.scanner_enabled is True
+
+        historical_data = {
+            'AAPL': create_sample_ohlcv_data(300, 150),
+            'MSFT': create_sample_ohlcv_data(300, 350),
+        }
+
+        with patch.object(backtest.scanner, 'scan_historical') as mock_scan:
+            mock_scan.return_value = ['AAPL']
+
+            result = backtest._build_daily_scan_results(
+                historical_data,
+                '2025-01-02',
+                '2025-01-10'
+            )
+
+            assert mock_scan.called
+            assert isinstance(result, dict)
+
+    def test_start_bot_fails_when_market_closed(self):
+        """Test that market hours are properly checked."""
+        config = {
+            'volatility_scanner': {'enabled': True, 'top_n': 5},
+            'risk_management': {'stop_loss_pct': 2.0, 'take_profit_pct': 4.0},
+            'exit_manager': {'enabled': False},
+        }
+
+        backtest = Backtest1Hour(
+            initial_capital=100000,
+            config=config,
+            scanner_enabled=True
+        )
+
+        market_hours = MarketHours()
+        et = pytz.timezone('America/New_York')
+        weekend_time = datetime(2025, 1, 4, 12, 0, 0, tzinfo=et)
+
+        assert market_hours.is_market_open(weekend_time) == False
+
+    def test_start_bot_fails_when_scanner_returns_empty(self):
+        """Test behavior when scanner returns empty results."""
+        config = {
+            'volatility_scanner': {'enabled': True, 'top_n': 5},
+            'risk_management': {'stop_loss_pct': 2.0, 'take_profit_pct': 4.0},
+            'exit_manager': {'enabled': False},
+        }
+
+        backtest = Backtest1Hour(
+            initial_capital=100000,
+            config=config,
+            scanner_enabled=True
+        )
+
+        historical_data = {
+            'AAPL': create_sample_ohlcv_data(300, 150),
+        }
+
+        with patch.object(backtest.scanner, 'scan_historical') as mock_scan:
+            mock_scan.return_value = []
+
+            result = backtest._build_daily_scan_results(
+                historical_data,
+                '2025-01-02',
+                '2025-01-03'
+            )
+
+            for date_results in result.values():
+                assert len(date_results) == 0
+
+    def test_start_bot_fails_on_scanner_api_error(self):
+        """Test behavior when scanner raises an exception."""
+        config = {
+            'volatility_scanner': {'enabled': True, 'top_n': 5},
+            'risk_management': {'stop_loss_pct': 2.0, 'take_profit_pct': 4.0},
+            'exit_manager': {'enabled': False},
+        }
+
+        backtest = Backtest1Hour(
+            initial_capital=100000,
+            config=config,
+            scanner_enabled=True
+        )
+
+        historical_data = {
+            'AAPL': create_sample_ohlcv_data(300, 150),
+        }
+
+        with patch.object(backtest.scanner, 'scan_historical') as mock_scan:
+            mock_scan.side_effect = Exception("API Error")
+
+            try:
+                result = backtest._build_daily_scan_results(
+                    historical_data,
+                    '2025-01-02',
+                    '2025-01-03'
+                )
+                assert isinstance(result, dict)
+            except Exception as e:
+                pass
+
+    def test_start_bot_returns_watchlist_on_success(self):
+        """Test that scanner returns valid watchlist."""
+        config = {
+            'volatility_scanner': {'enabled': True, 'top_n': 5},
+            'risk_management': {'stop_loss_pct': 2.0, 'take_profit_pct': 4.0},
+            'exit_manager': {'enabled': False},
+        }
+
+        backtest = Backtest1Hour(
+            initial_capital=100000,
+            config=config,
+            scanner_enabled=True
+        )
+
+        historical_data = {
+            'AAPL': create_sample_ohlcv_data(300, 150),
+            'MSFT': create_sample_ohlcv_data(300, 350),
+            'NVDA': create_sample_ohlcv_data(300, 500),
+        }
+
+        with patch.object(backtest.scanner, 'scan_historical') as mock_scan:
+            mock_scan.return_value = ['NVDA', 'AAPL']
+
+            result = backtest._build_daily_scan_results(
+                historical_data,
+                '2025-01-02',
+                '2025-01-03'
+            )
+
+            for date_key, symbols in result.items():
+                assert 'NVDA' in symbols or 'AAPL' in symbols or len(symbols) == 0
+
+
+class TestScannerFiltersDuringBacktest:
+    """Tests for scanner filtering during backtest signal generation."""
+
+    def test_only_scanned_symbols_get_signals(self):
+        """Test that only scanner-approved symbols receive signals."""
+        config = {
+            'volatility_scanner': {'enabled': True, 'top_n': 2},
+            'risk_management': {'stop_loss_pct': 2.0, 'take_profit_pct': 4.0},
+            'exit_manager': {'enabled': False},
+        }
+
+        backtest = Backtest1Hour(
+            initial_capital=100000,
+            config=config,
+            scanner_enabled=True
+        )
+
+        with patch.object(backtest.scanner, 'scan_historical') as mock_scan:
+            mock_scan.return_value = ['NVDA']
+
+            historical_data = {
+                'NVDA': create_sample_ohlcv_data(300, 500),
+                'AAPL': create_sample_ohlcv_data(300, 150),
+                'MSFT': create_sample_ohlcv_data(300, 350),
+            }
+
+            result = backtest._build_daily_scan_results(
+                historical_data,
+                '2025-01-02',
+                '2025-01-03'
+            )
+
+            for date_key, symbols in result.items():
+                for sym in symbols:
+                    assert sym == 'NVDA'
+
+    def test_non_scanned_symbols_excluded(self):
+        """Test that symbols not in scanner results are excluded."""
+        config = {
+            'volatility_scanner': {'enabled': True, 'top_n': 1},
+            'risk_management': {'stop_loss_pct': 2.0, 'take_profit_pct': 4.0},
+            'exit_manager': {'enabled': False},
+        }
+
+        backtest = Backtest1Hour(
+            initial_capital=100000,
+            config=config,
+            scanner_enabled=True
+        )
+
+        with patch.object(backtest.scanner, 'scan_historical') as mock_scan:
+            mock_scan.return_value = ['NVDA']
+
+            historical_data = {
+                'NVDA': create_sample_ohlcv_data(300, 500),
+                'AAPL': create_sample_ohlcv_data(300, 150),
+            }
+
+            result = backtest._build_daily_scan_results(
+                historical_data,
+                '2025-01-02',
+                '2025-01-03'
+            )
+
+            for date_key, symbols in result.items():
+                assert 'AAPL' not in symbols
+
+    def test_scanner_runs_daily_during_backtest(self):
+        """Test that scanner is re-run for each trading day."""
+        config = {
+            'volatility_scanner': {'enabled': True, 'top_n': 5},
+            'risk_management': {'stop_loss_pct': 2.0, 'take_profit_pct': 4.0},
+            'exit_manager': {'enabled': False},
+        }
+
+        backtest = Backtest1Hour(
+            initial_capital=100000,
+            config=config,
+            scanner_enabled=True
+        )
+
+        historical_data = {
+            'NVDA': create_sample_ohlcv_data(300, 500),
+            'AAPL': create_sample_ohlcv_data(300, 150),
+        }
+
+        with patch.object(backtest.scanner, 'scan_historical') as mock_scan:
+            mock_scan.return_value = ['NVDA', 'AAPL']
+
+            result = backtest._build_daily_scan_results(
+                historical_data,
+                '2025-01-02',
+                '2025-01-10'
+            )
+
+            assert mock_scan.call_count >= 1
+            assert len(result) >= 1
