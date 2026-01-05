@@ -780,6 +780,14 @@ class TradingBot:
                 fill_price = float(order.filled_avg_price) if hasattr(order, 'filled_avg_price') and order.filled_avg_price else price
                 fill_qty = int(order.filled_qty) if hasattr(order, 'filled_qty') and order.filled_qty else qty
 
+                # FIX (Jan 2026): Log partial fills for visibility and debugging
+                # Partial fills can occur due to market conditions or liquidity
+                if fill_qty < qty:
+                    logger.warning(
+                        f"PARTIAL_FILL | ENTRY | {symbol} | "
+                        f"Filled {fill_qty}/{qty} shares ({fill_qty/qty*100:.1f}%)"
+                    )
+
                 # Register with exit manager (LONG and SHORT - Jan 2026)
                 if self.use_tiered_exits and self.exit_manager:
                     self.exit_manager.register_position(
@@ -871,17 +879,39 @@ class TradingBot:
             if order and order.status in ['filled', 'new', 'accepted']:
                 exit_price = float(order.filled_avg_price) if hasattr(order, 'filled_avg_price') and order.filled_avg_price else exit_signal.get('price', 0)
 
-                # Calculate P&L
-                if direction == 'LONG':
-                    pnl = (exit_price - entry_price) * qty
+                # FIX (Jan 2026): Handle partial fills gracefully
+                # Use actual filled quantity, not requested quantity
+                # Note: filled_qty=0 means complete fill failure, treat differently from partial
+                if hasattr(order, 'filled_qty') and order.filled_qty is not None:
+                    filled_qty = int(order.filled_qty)
                 else:
-                    pnl = (entry_price - exit_price) * qty
+                    filled_qty = qty  # Fallback if broker doesn't report filled_qty
 
-                # Log trade
+                remaining_qty = qty - filled_qty
+                is_partial_fill = remaining_qty > 0 and filled_qty > 0
+
+                # Handle complete fill failure (filled_qty = 0)
+                if filled_qty == 0:
+                    logger.warning(f"EXIT_FAILED | {symbol} | Order accepted but 0 shares filled")
+                    return {'filled': False, 'reason': 'Order accepted but 0 shares filled'}
+
+                if is_partial_fill:
+                    logger.warning(
+                        f"PARTIAL_FILL | EXIT | {symbol} | "
+                        f"Filled {filled_qty}/{qty} shares, {remaining_qty} remaining"
+                    )
+
+                # Calculate P&L based on ACTUALLY FILLED quantity
+                if direction == 'LONG':
+                    pnl = (exit_price - entry_price) * filled_qty
+                else:
+                    pnl = (entry_price - exit_price) * filled_qty
+
+                # Log trade with filled quantity
                 self.trade_logger.log_trade(
                     symbol=symbol,
                     action='SELL' if direction == 'LONG' else 'BUY',
-                    quantity=qty,
+                    quantity=filled_qty,
                     price=exit_price,
                     strategy=position.get('strategy', 'Unknown'),
                     pnl=pnl,
@@ -898,30 +928,45 @@ class TradingBot:
 
                 # Record trade in losing streak guard (Jan 4, 2026)
                 if self.losing_streak_guard.enabled:
-                    risk_amount = position.get('risk_amount', abs(pnl))  # Fallback to pnl if not stored
+                    # Scale risk_amount proportionally to filled quantity vs requested quantity
+                    full_risk_amount = position.get('risk_amount', abs(pnl))
+                    scaled_risk_amount = full_risk_amount * (filled_qty / qty) if qty > 0 else full_risk_amount
                     self.losing_streak_guard.record_trade(
                         symbol=symbol,
                         realized_pnl=pnl,
-                        risk_amount=risk_amount,
+                        risk_amount=scaled_risk_amount,
                         close_time=datetime.now()
                     )
 
-                # Unregister from exit manager (LONG and SHORT - Jan 2026)
-                if self.use_tiered_exits and self.exit_manager:
-                    self.exit_manager.unregister_position(symbol)
+                # FIX (Jan 2026): Handle partial vs full fill differently
+                if is_partial_fill:
+                    # Partial fill: Update position quantity, keep tracking
+                    self.open_positions[symbol]['qty'] = remaining_qty
+                    logger.info(f"EXIT (PARTIAL): {symbol} closed {filled_qty} @ ${exit_price:.2f}, {remaining_qty} remaining [{exit_reason}] P&L: ${pnl:+.2f}")
 
-                # Cleanup
-                self._cleanup_position(symbol)
-                del self.open_positions[symbol]
+                    # Update ExitManager quantity instead of unregistering
+                    if self.use_tiered_exits and self.exit_manager:
+                        self.exit_manager.update_quantity(symbol, remaining_qty)
+                else:
+                    # Full fill: Complete cleanup
+                    # Unregister from exit manager (LONG and SHORT - Jan 2026)
+                    if self.use_tiered_exits and self.exit_manager:
+                        self.exit_manager.unregister_position(symbol)
 
-                logger.info(f"EXIT: {symbol} @ ${exit_price:.2f} [{exit_reason}] P&L: ${pnl:+.2f}")
+                    # Cleanup
+                    self._cleanup_position(symbol)
+                    del self.open_positions[symbol]
+
+                    logger.info(f"EXIT: {symbol} @ ${exit_price:.2f} [{exit_reason}] P&L: ${pnl:+.2f}")
 
                 return {
                     'filled': True,
                     'order_id': order.id,
                     'exit_price': exit_price,
                     'pnl': pnl,
-                    'reason': exit_reason
+                    'reason': exit_reason,
+                    'filled_qty': filled_qty,
+                    'remaining_qty': remaining_qty
                 }
 
             return {'filled': False, 'reason': 'Order not filled'}

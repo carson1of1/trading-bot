@@ -660,6 +660,7 @@ proven_symbols:
         mock_order.status = 'filled'
         mock_order.id = 'order456'
         mock_order.filled_avg_price = 155.0
+        mock_order.filled_qty = 100  # Full fill
         bot.broker.submit_order.return_value = mock_order
 
         exit_signal = {'exit': True, 'reason': 'take_profit', 'price': 155.0, 'qty': 100}
@@ -699,6 +700,7 @@ proven_symbols:
         mock_order.status = 'filled'
         mock_order.id = 'order456'
         mock_order.filled_avg_price = 155.0
+        mock_order.filled_qty = 100  # Full fill
         bot.broker.submit_order.return_value = mock_order
 
         exit_signal = {'exit': True, 'reason': 'take_profit', 'price': 155.0, 'qty': 100}
