@@ -474,6 +474,11 @@ class TradingBot:
         if bar_low is None:
             bar_low = current_price
 
+        # Defensive check for missing entry_price (prevents KeyError crashes)
+        if 'entry_price' not in position:
+            logger.error(f"EXIT_CHECK | {symbol} | SKIPPED - missing entry_price in position dict: {position}")
+            return None
+
         entry_price = position['entry_price']
         direction = position.get('direction', 'LONG')
         entry_time = position.get('entry_time', datetime.now())
