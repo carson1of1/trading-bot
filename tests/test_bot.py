@@ -128,6 +128,7 @@ proven_symbols:
         mock_account = MagicMock()
         mock_account.cash = 50000.0
         mock_account.portfolio_value = 55000.0
+        mock_account.last_equity = 55000.0  # Alpaca's official start-of-day value
         bot.broker.get_account.return_value = mock_account
 
         bot.sync_account()
@@ -143,6 +144,7 @@ proven_symbols:
         mock_account = MagicMock()
         mock_account.cash = 50000.0
         mock_account.portfolio_value = 60000.0
+        mock_account.last_equity = 60000.0  # Alpaca's official start-of-day value
         bot.broker.get_account.return_value = mock_account
 
         bot.sync_account()
@@ -153,11 +155,11 @@ proven_symbols:
         """sync_account triggers kill switch on daily loss limit."""
         bot = bot_with_mocks
         bot.current_trading_day = datetime.now().date()
-        bot.daily_starting_capital = 100000.0
 
         mock_account = MagicMock()
-        mock_account.cash = 96000.0
-        mock_account.portfolio_value = 96000.0  # 4% loss
+        mock_account.cash = 94000.0
+        mock_account.portfolio_value = 94000.0  # 6% loss from last_equity
+        mock_account.last_equity = 100000.0  # Alpaca's official start-of-day value
         bot.broker.get_account.return_value = mock_account
 
         bot.sync_account()
@@ -165,21 +167,22 @@ proven_symbols:
         assert bot.kill_switch_triggered is True
 
     def test_sync_account_resets_on_new_day(self, bot_with_mocks):
-        """sync_account resets daily tracking on new day."""
+        """sync_account resets kill switch on new day and uses last_equity for P&L."""
         bot = bot_with_mocks
         bot.current_trading_day = datetime.now().date() - timedelta(days=1)
-        bot.daily_pnl = 500.0
         bot.kill_switch_triggered = True
 
         mock_account = MagicMock()
-        mock_account.cash = 100000.0
-        mock_account.portfolio_value = 100000.0
+        mock_account.cash = 100500.0
+        mock_account.portfolio_value = 100500.0  # Up $500 from last_equity
+        mock_account.last_equity = 100000.0  # Alpaca's official start-of-day value
         bot.broker.get_account.return_value = mock_account
 
         bot.sync_account()
 
         assert bot.current_trading_day == datetime.now().date()
-        assert bot.daily_pnl == 0.0
+        assert bot.daily_pnl == 500.0  # portfolio_value - last_equity
+        assert bot.daily_starting_capital == 100000.0  # Uses last_equity
         assert bot.kill_switch_triggered is False
 
 
@@ -509,6 +512,22 @@ proven_symbols:
         assert result is not None
         assert result['exit'] is True
         assert result['reason'] == 'trailing_stop'
+
+    def test_check_exit_missing_entry_price(self, bot_with_mocks):
+        """check_exit returns None when position is missing entry_price (defensive)."""
+        bot = bot_with_mocks
+
+        # Malformed position dict missing entry_price
+        position = {
+            'qty': 100,
+            'direction': 'LONG',
+            'entry_time': datetime.now()
+        }
+
+        # Should return None, not crash with KeyError
+        result = bot.check_exit('AAPL', position, 100.0, bar_high=101.0, bar_low=99.0)
+
+        assert result is None
 
 
 class TestExecuteEntry:
@@ -866,6 +885,7 @@ proven_symbols:
         mock_account = MagicMock()
         mock_account.cash = 100000.0
         mock_account.portfolio_value = 100000.0
+        mock_account.last_equity = 100000.0  # Alpaca's official start-of-day value
         bot.broker.get_account.return_value = mock_account
         bot.broker.get_positions.return_value = []
 
