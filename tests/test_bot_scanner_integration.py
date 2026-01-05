@@ -144,6 +144,7 @@ class TestBotStartWithScannerAPI:
         """POST /api/bot/start should run scanner before starting bot."""
         with patch('api.main.VolatilityScanner') as MockScanner, \
              patch('api.main.is_market_open', return_value=True), \
+             patch('api.main._is_bot_running', return_value=False), \
              patch('api.main.subprocess.Popen') as mock_popen, \
              patch('api.main.YFinanceDataFetcher') as MockFetcher:
 
@@ -170,6 +171,7 @@ class TestBotStartWithScannerAPI:
     def test_start_bot_fails_when_market_closed(self, client):
         """Should return 400 with reason='market_closed' outside trading hours."""
         with patch('api.main.is_market_open', return_value=False), \
+             patch('api.main._is_bot_running', return_value=False), \
              patch('api.main.get_market_status_message', return_value="Market closed: Saturday."):
 
             response = client.post("/api/bot/start")
@@ -183,6 +185,7 @@ class TestBotStartWithScannerAPI:
         """Should return 400 with reason='no_results' if scanner finds nothing."""
         with patch('api.main.VolatilityScanner') as MockScanner, \
              patch('api.main.is_market_open', return_value=True), \
+             patch('api.main._is_bot_running', return_value=False), \
              patch('api.main.YFinanceDataFetcher') as MockFetcher:
 
             mock_scanner_instance = MagicMock()
@@ -203,6 +206,7 @@ class TestBotStartWithScannerAPI:
         """Should return 400 with reason='scanner_error' on data fetch failure."""
         with patch('api.main.VolatilityScanner') as MockScanner, \
              patch('api.main.is_market_open', return_value=True), \
+             patch('api.main._is_bot_running', return_value=False), \
              patch('api.main.YFinanceDataFetcher') as MockFetcher:
 
             mock_scanner_instance = MagicMock()
@@ -224,6 +228,7 @@ class TestBotStartWithScannerAPI:
         """Response should include list of scanned symbols and timestamp."""
         with patch('api.main.VolatilityScanner') as MockScanner, \
              patch('api.main.is_market_open', return_value=True), \
+             patch('api.main._is_bot_running', return_value=False), \
              patch('api.main.subprocess.Popen'), \
              patch('api.main.YFinanceDataFetcher') as MockFetcher:
 
@@ -259,8 +264,11 @@ class TestFullScannerBotIntegration:
 
     def test_full_flow_start_to_running(self, client):
         """Test complete flow: start bot -> scanner runs -> bot starts with symbols."""
+        # _is_bot_running returns False for start check, then True for status check
+        is_running_mock = MagicMock(side_effect=[False, True])
         with patch('api.main.VolatilityScanner') as MockScanner, \
              patch('api.main.is_market_open', return_value=True), \
+             patch('api.main._is_bot_running', is_running_mock), \
              patch('api.main.subprocess.Popen') as mock_popen, \
              patch('api.main.YFinanceDataFetcher') as MockFetcher:
 
@@ -388,7 +396,9 @@ class TestBacktestScannerIntegration:
         et = pytz.timezone('America/New_York')
         weekend_time = datetime(2025, 1, 4, 12, 0, 0, tzinfo=et)
 
-        assert market_hours.is_market_open(weekend_time) == False
+        # Mock get_market_time to return weekend time
+        with patch.object(market_hours, 'get_market_time', return_value=weekend_time):
+            assert market_hours.is_market_open() == False
 
     def test_start_bot_fails_when_scanner_returns_empty(self):
         """Test behavior when scanner returns empty results."""

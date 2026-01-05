@@ -979,6 +979,8 @@ class TestMain:
         # Mock argument parser
         mock_args = MagicMock()
         mock_args.config = None
+        mock_args.symbols = None
+        mock_args.candle_delay = 2
         mock_parser_instance = MagicMock()
         mock_parser_instance.parse_args.return_value = mock_args
         mock_parser.return_value = mock_parser_instance
@@ -1001,6 +1003,8 @@ class TestMain:
         # Mock argument parser
         mock_args = MagicMock()
         mock_args.config = None
+        mock_args.symbols = None
+        mock_args.candle_delay = 2
         mock_parser_instance = MagicMock()
         mock_parser_instance.parse_args.return_value = mock_args
         mock_parser.return_value = mock_parser_instance
