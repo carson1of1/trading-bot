@@ -423,7 +423,7 @@ class RiskManager:
             return max(0, position_size)
 
         except Exception as e:
-            self.logger.error(f"Error calculating position size: {e}")
+            self.logger.error(f"Error calculating position size: {e}", exc_info=True)
             return 0
 
     def check_daily_loss_limit(self, current_pnl, portfolio_value):
@@ -646,7 +646,7 @@ class RiskManager:
             return conditions
 
         except Exception as e:
-            self.logger.error(f"Error assessing market conditions: {e}")
+            self.logger.error(f"Error assessing market conditions: {e}", exc_info=True)
             return {'risk_level': 'normal', 'volatility': 0.2, 'volume_ratio': 1.0, 'trend_strength': 0}
 
     def _calculate_trend_strength(self, data):
@@ -791,7 +791,7 @@ class RiskManager:
             return validation_results
 
         except Exception as e:
-            self.logger.error(f"Error validating trade: {e}")
+            self.logger.error(f"Error validating trade: {e}", exc_info=True)
             return {'approved': False, 'reasons': ['Validation error']}
 
     def update_risk_metrics(self, trade_data):
@@ -815,7 +815,7 @@ class RiskManager:
                     del self.positions_risk[symbol]
 
         except Exception as e:
-            self.logger.error(f"Error updating risk metrics: {e}")
+            self.logger.error(f"Error updating risk metrics: {e}", exc_info=True)
 
     def get_risk_summary(self):
         """Get current risk summary"""
@@ -1060,7 +1060,7 @@ class ExitManager:
 
             self.logger.debug(f"EXIT_MGR | Saved state for {len(state_to_save)} positions")
         except Exception as e:
-            self.logger.error(f"EXIT_MGR | Failed to save state: {e}")
+            self.logger.error(f"EXIT_MGR | Failed to save state: {e}", exc_info=True)
 
     def _restore_position_state(self, symbol: str, state: PositionExitState) -> PositionExitState:
         """
@@ -2219,7 +2219,7 @@ class DailyDrawdownGuard:
                     broker.cancel_all_orders()
                     self.logger.info("DRAWDOWN_GUARD | Cancelled all pending orders")
                 except Exception as e:
-                    self.logger.error(f"DRAWDOWN_GUARD | Failed to cancel orders: {e}")
+                    self.logger.error(f"DRAWDOWN_GUARD | Failed to cancel orders: {e}", exc_info=True)
 
             # Close each position
             for pos in positions:
@@ -2263,7 +2263,7 @@ class DailyDrawdownGuard:
                         results['failed'].append({'symbol': symbol, 'reason': 'order_failed'})
 
                 except Exception as e:
-                    self.logger.error(f"DRAWDOWN_GUARD | LIQUIDATION_ERROR | {symbol}: {e}")
+                    self.logger.error(f"DRAWDOWN_GUARD | LIQUIDATION_ERROR | {symbol}: {e}", exc_info=True)
                     results['failed'].append({'symbol': symbol, 'reason': str(e)})
 
             if results['failed']:

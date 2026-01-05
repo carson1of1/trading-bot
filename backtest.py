@@ -339,7 +339,7 @@ class Backtest1Hour:
             return df
 
         except Exception as e:
-            logger.error(f"Error fetching data for {symbol}: {e}")
+            logger.error(f"Error fetching data for {symbol}: {e}", exc_info=True)
             return None
 
     def generate_signals(self, symbol: str, data: pd.DataFrame) -> pd.DataFrame:

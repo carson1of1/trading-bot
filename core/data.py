@@ -128,7 +128,7 @@ class YFinanceDataFetcher:
                     prepost=False  # No pre/post market data
                 )
             except Exception as e:
-                self.logger.error(f"yfinance download error for {symbol}: {e}")
+                self.logger.error(f"yfinance download error for {symbol}: {e}", exc_info=True)
                 return None
 
             if df is None or df.empty:
@@ -310,7 +310,7 @@ class YFinanceDataFetcher:
             return df
 
         except Exception as e:
-            self.logger.error(f"Error fetching historical data for {symbol}: {e}")
+            self.logger.error(f"Error fetching historical data for {symbol}: {e}", exc_info=True)
 
             # BUG FIX (Dec 2025): Implement fallback - return stale cache on error
             if cache_key in self.cache:
@@ -390,7 +390,7 @@ class YFinanceDataFetcher:
                     prepost=False
                 )
             except Exception as e:
-                self.logger.error(f"yfinance download error for {symbol}: {e}")
+                self.logger.error(f"yfinance download error for {symbol}: {e}", exc_info=True)
                 return None
 
             if df is None or df.empty:
@@ -433,7 +433,7 @@ class YFinanceDataFetcher:
             return df
 
         except Exception as e:
-            self.logger.error(f"Error fetching historical data range for {symbol}: {e}")
+            self.logger.error(f"Error fetching historical data range for {symbol}: {e}", exc_info=True)
             return None
 
     def _fetch_chunked_1min_data(self, symbol, start_date, end_date):
@@ -590,7 +590,7 @@ class YFinanceDataFetcher:
                     return None
 
             except (ValueError, TypeError) as e:
-                self.logger.error(f"Could not parse close price for {symbol}: {e}")
+                self.logger.error(f"Could not parse close price for {symbol}: {e}", exc_info=True)
                 return None
 
             # Create a quote-like object
@@ -611,7 +611,7 @@ class YFinanceDataFetcher:
             return quote
 
         except Exception as e:
-            self.logger.error(f"Error fetching quote for {symbol}: {e}")
+            self.logger.error(f"Error fetching quote for {symbol}: {e}", exc_info=True)
             return None
 
     def get_historical_data_batch(self, symbols: list, timeframe: str = '1Min', limit: int = 100, max_workers: int = 10):

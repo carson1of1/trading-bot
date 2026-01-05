@@ -68,7 +68,7 @@ class LiveBacktestComparator:
             logger.info(f"Loaded {len(df)} live trades from {start_date} to {end_date}")
             return df
         except Exception as e:
-            logger.error(f"Error loading live trades: {e}")
+            logger.error(f"Error loading live trades: {e}", exc_info=True)
             return pd.DataFrame()
 
     def load_live_scans(self, start_date: str, end_date: str) -> pd.DataFrame:
@@ -85,7 +85,7 @@ class LiveBacktestComparator:
             logger.info(f"Loaded {len(df)} live scan results")
             return df
         except Exception as e:
-            logger.error(f"Error loading live scans: {e}")
+            logger.error(f"Error loading live scans: {e}", exc_info=True)
             return pd.DataFrame()
 
     def load_backtest_scans(self, start_date: str, end_date: str) -> pd.DataFrame:
@@ -102,7 +102,7 @@ class LiveBacktestComparator:
             logger.info(f"Loaded {len(df)} backtest scan results")
             return df
         except Exception as e:
-            logger.error(f"Error loading backtest scans: {e}")
+            logger.error(f"Error loading backtest scans: {e}", exc_info=True)
             return pd.DataFrame()
 
     def run_backtest(self, start_date: str, end_date: str) -> pd.DataFrame:
@@ -126,7 +126,7 @@ class LiveBacktestComparator:
                 return pd.DataFrame()
 
         except Exception as e:
-            logger.error(f"Error running backtest: {e}")
+            logger.error(f"Error running backtest: {e}", exc_info=True)
             return pd.DataFrame()
 
     def compare_scanners(self, live_scans: pd.DataFrame, backtest_scans: pd.DataFrame) -> Dict:

@@ -252,7 +252,7 @@ class TradingBot:
             logger.debug(f"Account synced: cash=${self.cash:.2f}, portfolio=${self.portfolio_value:.2f}")
 
         except Exception as e:
-            logger.error(f"Failed to sync account: {e}")
+            logger.error(f"Failed to sync account: {e}", exc_info=True)
 
     def sync_positions(self):
         """Sync open positions from broker."""
@@ -318,7 +318,7 @@ class TradingBot:
             logger.debug(f"Positions synced: {len(self.open_positions)} open")
 
         except Exception as e:
-            logger.error(f"Failed to sync positions: {e}")
+            logger.error(f"Failed to sync positions: {e}", exc_info=True)
 
     def _cleanup_position(self, symbol: str):
         """Clean up tracking state for a closed position."""
@@ -449,7 +449,7 @@ class TradingBot:
             return no_signal
 
         except Exception as e:
-            logger.error(f"Error checking entry for {symbol}: {e}")
+            logger.error(f"Error checking entry for {symbol}: {e}", exc_info=True)
             return {**no_signal, 'reasoning': f'Error: {e}'}
 
     def check_exit(self, symbol: str, position: dict, current_price: float,
@@ -842,7 +842,7 @@ class TradingBot:
             return {'filled': False, 'reason': 'Order not filled'}
 
         except Exception as e:
-            logger.error(f"Error executing entry for {symbol}: {e}")
+            logger.error(f"Error executing entry for {symbol}: {e}", exc_info=True)
             return {'filled': False, 'reason': str(e)}
 
     def execute_exit(self, symbol: str, exit_signal: dict) -> dict:
@@ -972,7 +972,7 @@ class TradingBot:
             return {'filled': False, 'reason': 'Order not filled'}
 
         except Exception as e:
-            logger.error(f"Error executing exit for {symbol}: {e}")
+            logger.error(f"Error executing exit for {symbol}: {e}", exc_info=True)
             return {'filled': False, 'reason': str(e)}
 
     def fetch_data(self, symbol: str, bars: int = 200) -> Optional[pd.DataFrame]:
@@ -1019,7 +1019,7 @@ class TradingBot:
             return df
 
         except Exception as e:
-            logger.error(f"Error fetching data for {symbol}: {e}")
+            logger.error(f"Error fetching data for {symbol}: {e}", exc_info=True)
             return None
 
     def run_trading_cycle(self):
@@ -1201,7 +1201,7 @@ class TradingBot:
             logger.info(f"=== Cycle Complete: {len(self.open_positions)} positions ===")
 
         except Exception as e:
-            logger.error(f"Trading cycle error: {e}")
+            logger.error(f"Trading cycle error: {e}", exc_info=True)
 
     def start(self):
         """Start the trading bot."""
