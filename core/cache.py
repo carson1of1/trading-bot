@@ -178,7 +178,7 @@ class DataCache:
             return True
 
         except Exception as e:
-            self.logger.error(f"Error saving cache for {symbol}: {e}")
+            self.logger.error(f"Error saving cache for {symbol}: {e}", exc_info=True)
             return False
 
     def load_batch(self, symbols: List[str], start_date: str = None, end_date: str = None) -> Dict[str, pd.DataFrame]:
