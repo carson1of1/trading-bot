@@ -18,6 +18,9 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Skip entire module if fastapi is not installed (CI environment)
+pytest.importorskip("fastapi", reason="fastapi not installed")
+
 from fastapi.testclient import TestClient
 
 from core.broker import FakeBroker, Account, Position, Order
