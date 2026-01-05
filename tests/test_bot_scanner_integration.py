@@ -136,6 +136,7 @@ class TestBotStartWithScannerAPI:
     @pytest.fixture
     def client(self):
         """Create test client."""
+        pytest.importorskip("fastapi", reason="fastapi not installed")
         from api.main import app
         from fastapi.testclient import TestClient
         return TestClient(app)
@@ -258,6 +259,7 @@ class TestFullScannerBotIntegration:
     @pytest.fixture
     def client(self):
         """Create test client."""
+        pytest.importorskip("fastapi", reason="fastapi not installed")
         from api.main import app
         from fastapi.testclient import TestClient
         return TestClient(app)
