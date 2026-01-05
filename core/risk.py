@@ -907,6 +907,8 @@ class PositionExitState:
     trailing_activation_pct: float = 0.0175      # +1.75%
     partial_tp_pct: float = 0.02                 # +2.00%
     partial_tp_size: float = 0.50                # Close 50% at partial TP
+    partial_tp2_pct: float = 0.05                # +5.00% second partial TP
+    partial_tp2_size: float = 1.0                # Close 100% of remaining at TP2
     hard_stop_pct: float = 0.005                 # -0.50% hard stop (from entry)
 
     # State tracking
@@ -916,6 +918,8 @@ class PositionExitState:
     trailing_stop_price: float = 0.0             # Trailing stop (only goes UP)
     partial_tp_executed: bool = False
     partial_tp_qty: int = 0                      # Shares closed at partial TP
+    partial_tp2_executed: bool = False
+    partial_tp2_qty: int = 0                     # Shares closed at second partial TP
 
     # Peak/trough tracking for trailing (peak for LONG, trough for SHORT)
     peak_price: float = 0.0              # Highest price seen (for LONG trailing)
@@ -960,6 +964,7 @@ class ExitManager:
     REASON_PROFIT_FLOOR = 'profit_floor'
     REASON_ATR_TRAILING = 'atr_trailing'
     REASON_PARTIAL_TP = 'partial_tp'
+    REASON_PARTIAL_TP2 = 'partial_tp2'
     REASON_HARD_STOP = 'hard_stop'
 
     def __init__(self, bot_settings: dict = None):
@@ -982,6 +987,8 @@ class ExitManager:
         self.trailing_activation_pct = risk_settings.get('trailing_activation_pct', 1.75) / 100
         self.partial_tp_pct = risk_settings.get('partial_tp_pct', 2.0) / 100
         self.partial_tp_size = risk_settings.get('partial_tp_size', 0.50)  # 50% default
+        self.partial_tp2_pct = risk_settings.get('partial_tp2_pct', 5.0) / 100  # 5% second TP
+        self.partial_tp2_size = risk_settings.get('partial_tp2_size', 1.0)  # 100% of remaining
         self.hard_stop_pct = risk_settings.get('hard_stop_pct', 0.50) / 100
 
         # ATR settings
@@ -992,6 +999,7 @@ class ExitManager:
             f"profit_floor={self.profit_floor_activation_pct*100:.2f}%->{self.profit_floor_lock_pct*100:.2f}%, "
             f"trailing_activation={self.trailing_activation_pct*100:.2f}%, "
             f"partial_tp={self.partial_tp_pct*100:.2f}%@{self.partial_tp_size*100:.0f}%, "
+            f"partial_tp2={self.partial_tp2_pct*100:.2f}%@{self.partial_tp2_size*100:.0f}%, "
             f"hard_stop=-{self.hard_stop_pct*100:.2f}%, "
             f"ATR_mult={self.atr_multiplier}"
         )
@@ -1031,6 +1039,8 @@ class ExitManager:
             trailing_activation_pct=self.trailing_activation_pct,
             partial_tp_pct=self.partial_tp_pct,
             partial_tp_size=self.partial_tp_size,
+            partial_tp2_pct=self.partial_tp2_pct,
+            partial_tp2_size=self.partial_tp2_size,
             hard_stop_pct=self.hard_stop_pct,
             atr_multiplier=self.atr_multiplier,
             peak_price=entry_price,
@@ -1393,6 +1403,39 @@ class ExitManager:
                         'qty': partial_qty
                     }
 
+        # ================================================================
+        # TIER 4: SECOND PARTIAL TAKE PROFIT (FULL EXIT)
+        # Close 100% of remaining position at 5% profit
+        # ================================================================
+        if state.partial_tp_executed and not state.partial_tp2_executed:
+            if unrealized_pnl_pct >= state.partial_tp2_pct:
+                # Calculate shares to close (100% of current quantity)
+                # Note: state.quantity has already been reduced by update_quantity() after TP1
+                partial_qty2 = int(state.quantity * state.partial_tp2_size)
+
+                if partial_qty2 > 0:
+                    state.partial_tp2_executed = True
+                    state.partial_tp2_qty = partial_qty2
+
+                    self._log_exit_trigger(
+                        symbol, self.REASON_PARTIAL_TP2,
+                        current_price, current_price, unrealized_pnl_pct
+                    )
+
+                    self.logger.info(
+                        f"EXIT_MGR | {symbol} | PARTIAL_TP2_TRIGGERED | "
+                        f"Direction: {state.direction}, Current: ${current_price:.2f} (+{unrealized_pnl_pct*100:.2f}%), "
+                        f"Closing: {partial_qty2} shares (remaining position)"
+                    )
+
+                    return {
+                        'action': 'full_exit',
+                        'reason': self.REASON_PARTIAL_TP2,
+                        'stop_price': current_price,  # Exit at current price
+                        'unrealized_pnl_pct': unrealized_pnl_pct,
+                        'qty': partial_qty2
+                    }
+
         # No exit triggered
         return None
 
@@ -1463,6 +1506,8 @@ class ExitManager:
             'trailing_stop_price': state.trailing_stop_price,
             'partial_tp_executed': state.partial_tp_executed,
             'partial_tp_qty': state.partial_tp_qty,
+            'partial_tp2_executed': state.partial_tp2_executed,
+            'partial_tp2_qty': state.partial_tp2_qty,
             'current_atr': state.current_atr,
             'hard_stop_price': hard_stop_price
         }
