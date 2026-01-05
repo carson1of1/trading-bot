@@ -23,6 +23,9 @@ import subprocess
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Skip entire module if fastapi is not installed (CI environment)
+pytest.importorskip("fastapi", reason="fastapi not installed")
+
 
 class TestPIDFileOperations:
     """Test PID file read/write/clear operations."""

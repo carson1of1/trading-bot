@@ -13,6 +13,10 @@ import pytz
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Skip entire module if pyarrow is not installed (CI environment)
+# Cache tests require parquet support
+pytest.importorskip("pyarrow", reason="pyarrow not installed for parquet support")
+
 from core.cache import DataCache, get_cache
 
 
