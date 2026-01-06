@@ -532,15 +532,15 @@ class TestScanHistorical:
 class TestNoOpenBBDependency:
     """Test that scanner has no OpenBB dependencies."""
 
-    def test_no_scan_method(self):
-        """Test that live scan() method is not present."""
+    def test_scan_method_exists(self):
+        """Test that live scan() method exists (uses YFinance, not OpenBB)."""
         scanner = VolatilityScanner()
 
-        # Verify scan_historical exists
+        # Verify both methods exist
         assert hasattr(scanner, 'scan_historical')
+        assert hasattr(scanner, 'scan')
 
-        # The live scan() should not exist in minimal extraction
-        assert not hasattr(scanner, 'scan')
+        # FIX (Jan 2026): scan() now uses YFinanceDataFetcher for backtest/live alignment
 
     def test_no_universe_manager(self):
         """Test that UniverseManager is not used."""

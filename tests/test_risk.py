@@ -20,8 +20,8 @@ class TestRiskManagerInitialization:
         rm = RiskManager()
         assert rm.max_risk_per_trade == 0.015  # 1.5%
         assert rm.max_daily_loss == 0.04  # 4%
-        assert rm.max_position_size == 0.25  # 25%
-        assert rm.max_positions == 9999  # Effectively unlimited
+        assert rm.max_position_size == 0.03  # 3% (conservative default)
+        assert rm.max_positions == 5  # Conservative default
         assert rm.stop_loss_pct == 0.02  # 2%
         assert rm.take_profit_pct == 0.04  # 4%
         assert rm.risk_reward_ratio == 2.0
@@ -290,18 +290,18 @@ class TestCalculatePositionSize:
         # Portfolio: $100K, risk 1.5% = $1500 max risk
         # Entry $100, stop $98, risk per share = $2
         # Position size = $1500 / $2 = 750 shares
-        # But capped by 25% position size = $25K / $100 = 250 shares
-        # Also capped by $10K max = 100 shares
+        # But capped by 3% position size = $3K / $100 = 30 shares
         size = rm.calculate_position_size(
             portfolio_value=100000,
             entry_price=100,
             stop_loss_price=98
         )
-        assert size == 100  # Capped at $10K default
+        assert size == 30  # Capped at 3% of portfolio ($3K)
 
     def test_respects_max_position_dollars(self):
         """Should respect max_position_dollars setting"""
-        rm = RiskManager(bot_settings={'max_position_dollars': 5000})
+        # Set max_position_size high enough that max_position_dollars becomes the limit
+        rm = RiskManager(bot_settings={'max_position_dollars': 5000, 'max_position_size': 0.25})
         size = rm.calculate_position_size(
             portfolio_value=100000,
             entry_price=100,

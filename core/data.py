@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .market_hours import MarketHours  # FIX (Dec 9, 2025): Check market hours for stale threshold
 from .config import get_global_config  # FIX (Dec 9, 2025): Load configurable stale thresholds
+from .cache import get_cache  # Disk cache for backtest data
 
 class YFinanceDataFetcher:
     """
@@ -127,7 +128,7 @@ class YFinanceDataFetcher:
                     prepost=False  # No pre/post market data
                 )
             except Exception as e:
-                self.logger.error(f"yfinance download error for {symbol}: {e}")
+                self.logger.error(f"yfinance download error for {symbol}: {e}", exc_info=True)
                 return None
 
             if df is None or df.empty:
@@ -309,7 +310,7 @@ class YFinanceDataFetcher:
             return df
 
         except Exception as e:
-            self.logger.error(f"Error fetching historical data for {symbol}: {e}")
+            self.logger.error(f"Error fetching historical data for {symbol}: {e}", exc_info=True)
 
             # BUG FIX (Dec 2025): Implement fallback - return stale cache on error
             if cache_key in self.cache:
@@ -318,7 +319,7 @@ class YFinanceDataFetcher:
 
             return None
 
-    def get_historical_data_range(self, symbol, timeframe='1Min', start_date=None, end_date=None):
+    def get_historical_data_range(self, symbol, timeframe='1Min', start_date=None, end_date=None, use_cache=True):
         """
         Get historical data for a specific date range (for backtesting)
 
@@ -327,6 +328,7 @@ class YFinanceDataFetcher:
             timeframe: '1Min', '5Min', '15Min', '1Hour', '1Day'
             start_date: Start date (string YYYY-MM-DD or datetime)
             end_date: End date (string YYYY-MM-DD or datetime)
+            use_cache: Whether to use disk cache (default True for 1Hour timeframe)
 
         Returns:
             pandas DataFrame with columns: timestamp, open, high, low, close, volume
@@ -348,10 +350,24 @@ class YFinanceDataFetcher:
             yf_interval = interval_map[timeframe]
 
             # Format dates
+            start_date_str = start_date if isinstance(start_date, str) else start_date.strftime('%Y-%m-%d') if start_date else None
+            end_date_str = end_date if isinstance(end_date, str) else end_date.strftime('%Y-%m-%d') if end_date else None
+
             if isinstance(start_date, str):
                 start_date = datetime.strptime(start_date, '%Y-%m-%d')
             if isinstance(end_date, str):
                 end_date = datetime.strptime(end_date, '%Y-%m-%d')
+
+            # Use disk cache for hourly data (most common for backtesting)
+            if use_cache and timeframe == '1Hour':
+                cache = get_cache()
+
+                # Check if we have fresh cached data
+                if cache.has_fresh_data(symbol, end_date_str):
+                    cached_df = cache.load(symbol, start_date_str, end_date_str)
+                    if cached_df is not None and len(cached_df) > 0:
+                        self.logger.info(f"[CACHE HIT] {symbol}: {len(cached_df)} bars from disk cache")
+                        return cached_df
 
             # FIX (Dec 21, 2025): yfinance only allows 8 days of 1-minute data per request
             # For longer ranges, we need to chunk into 7-day windows and combine
@@ -374,7 +390,7 @@ class YFinanceDataFetcher:
                     prepost=False
                 )
             except Exception as e:
-                self.logger.error(f"yfinance download error for {symbol}: {e}")
+                self.logger.error(f"yfinance download error for {symbol}: {e}", exc_info=True)
                 return None
 
             if df is None or df.empty:
@@ -408,10 +424,16 @@ class YFinanceDataFetcher:
 
             self.logger.info(f"[OK] Fetched {len(df)} bars for {symbol} ({start_date} to {end_date})")
 
+            # Save to disk cache for hourly data
+            if use_cache and timeframe == '1Hour':
+                cache = get_cache()
+                cache.save(symbol, df)
+                self.logger.debug(f"[CACHE SAVE] {symbol}: {len(df)} bars saved to disk cache")
+
             return df
 
         except Exception as e:
-            self.logger.error(f"Error fetching historical data range for {symbol}: {e}")
+            self.logger.error(f"Error fetching historical data range for {symbol}: {e}", exc_info=True)
             return None
 
     def _fetch_chunked_1min_data(self, symbol, start_date, end_date):
@@ -568,7 +590,7 @@ class YFinanceDataFetcher:
                     return None
 
             except (ValueError, TypeError) as e:
-                self.logger.error(f"Could not parse close price for {symbol}: {e}")
+                self.logger.error(f"Could not parse close price for {symbol}: {e}", exc_info=True)
                 return None
 
             # Create a quote-like object
@@ -589,7 +611,7 @@ class YFinanceDataFetcher:
             return quote
 
         except Exception as e:
-            self.logger.error(f"Error fetching quote for {symbol}: {e}")
+            self.logger.error(f"Error fetching quote for {symbol}: {e}", exc_info=True)
             return None
 
     def get_historical_data_batch(self, symbols: list, timeframe: str = '1Min', limit: int = 100, max_workers: int = 10):

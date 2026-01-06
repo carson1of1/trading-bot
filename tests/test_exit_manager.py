@@ -82,17 +82,6 @@ class TestPositionExitState:
         assert state.partial_tp_executed is False
         assert state.bars_held == 0
 
-    def test_minimum_hold_defaults(self):
-        """Test minimum hold time defaults."""
-        state = PositionExitState(
-            symbol="AAPL",
-            entry_price=100.0,
-            entry_time=datetime.now(pytz.UTC),
-            quantity=100
-        )
-        assert state.min_hold_bars == 12
-        assert state.min_hold_bypass_loss_pct == 0.003  # 0.30%
-
 
 class TestExitManagerInitialization:
     """Tests for ExitManager initialization and configuration."""
@@ -107,7 +96,6 @@ class TestExitManagerInitialization:
         assert exit_mgr.partial_tp_pct == 0.02  # 2.0%
         assert exit_mgr.hard_stop_pct == 0.005  # 0.50%
         assert exit_mgr.atr_multiplier == 2.0
-        assert exit_mgr.min_hold_bars == 12
 
     def test_custom_configuration(self):
         """Test ExitManager with custom settings."""
@@ -118,9 +106,7 @@ class TestExitManagerInitialization:
                 'trailing_activation_pct': 0.60,  # 0.60%
                 'partial_tp_pct': 1.0,  # 1.0%
                 'hard_stop_pct': 0.50,  # 0.50%
-                'atr_trailing_multiplier': 1.5,
-                'min_hold_bars': 8,
-                'min_hold_bypass_loss_pct': 0.20  # 0.20%
+                'atr_trailing_multiplier': 1.5
             }
         }
         exit_mgr = ExitManager(settings)
@@ -130,8 +116,6 @@ class TestExitManagerInitialization:
         assert exit_mgr.partial_tp_pct == 0.01  # 1.0%
         assert exit_mgr.hard_stop_pct == 0.005  # 0.50%
         assert exit_mgr.atr_multiplier == 1.5
-        assert exit_mgr.min_hold_bars == 8
-        assert exit_mgr.min_hold_bypass_loss_pct == 0.002  # 0.20%
 
     def test_factory_function(self):
         """Test create_exit_manager factory function."""
@@ -248,11 +232,10 @@ class TestTier0HardStop:
         assert result['action'] == 'full_exit'
         assert result['reason'] == ExitManager.REASON_HARD_STOP
 
-    def test_hard_stop_bypasses_min_hold(self):
-        """Test hard stop triggers even during min hold period."""
+    def test_hard_stop_immediate(self):
+        """Test hard stop triggers immediately on first bar."""
         exit_mgr = ExitManager()
         exit_mgr.register_position("AAPL", 100.0, 100)
-        # No bars held - still in min hold period
 
         # Hard stop at -0.50%
         result = exit_mgr.evaluate_exit("AAPL", 99.50)
@@ -276,72 +259,6 @@ class TestTier0HardStop:
         result = exit_mgr.evaluate_exit("AAPL", 99.50)
 
         assert result['reason'] == ExitManager.REASON_HARD_STOP
-
-
-class TestMinimumHoldTime:
-    """Tests for minimum hold time logic."""
-
-    def test_exits_blocked_during_min_hold(self):
-        """Test non-stop exits are blocked during min hold period."""
-        exit_mgr = ExitManager()
-        exit_mgr.register_position("AAPL", 100.0, 100)
-        # Only 5 bars held (less than 12 default)
-        for _ in range(5):
-            exit_mgr.increment_bars_held("AAPL")
-
-        # Even at +2% (partial TP level), no exit during min hold
-        result = exit_mgr.evaluate_exit("AAPL", 102.0)
-
-        assert result is None
-
-    def test_exits_allowed_after_min_hold(self):
-        """Test exits allowed after min hold period."""
-        # Use custom settings for faster activation
-        settings = {
-            'risk': {
-                'profit_floor_activation_pct': 0.40,
-                'partial_tp_pct': 2.0,
-            }
-        }
-        exit_mgr = ExitManager(settings)
-        exit_mgr.register_position("AAPL", 100.0, 100)
-        # 15 bars held (more than 12 default)
-        for _ in range(15):
-            exit_mgr.increment_bars_held("AAPL")
-
-        # At +2% should trigger partial TP
-        result = exit_mgr.evaluate_exit("AAPL", 102.0)
-
-        assert result is not None
-
-    def test_min_hold_bypass_for_significant_loss(self):
-        """Test min hold can be bypassed for significant loss."""
-        # Use custom settings with tighter thresholds for testing
-        settings = {
-            'risk': {
-                'profit_floor_activation_pct': 0.30,  # Activate at 0.30%
-                'trailing_stop_min_profit_floor': 0.10,  # Lock at 0.10%
-            }
-        }
-        exit_mgr = ExitManager(settings)
-        state = exit_mgr.register_position("AAPL", 100.0, 100)
-        # Only 2 bars held
-        exit_mgr.increment_bars_held("AAPL")
-        exit_mgr.increment_bars_held("AAPL")
-
-        # Simulate profit floor was activated previously
-        state.profit_floor_active = True
-        state.profit_floor_price = 100.10  # Floor at +0.10%
-
-        # Now price drops to floor (but above hard stop)
-        # This should trigger profit floor exit despite min hold
-        result = exit_mgr.evaluate_exit("AAPL", 100.00)  # At breakeven, below floor
-
-        # The min hold bypass only applies if loss > bypass threshold
-        # Since we're at breakeven (not a loss > 0.30%), and under min hold,
-        # we should NOT trigger (min hold blocks it)
-        # But if loss exceeds bypass threshold, it would trigger
-        assert result is None  # Still blocked by min hold
 
 
 class TestTier1ProfitFloor:
@@ -831,4 +748,186 @@ class TestImports:
         assert ExitManager.REASON_PROFIT_FLOOR == 'profit_floor'
         assert ExitManager.REASON_ATR_TRAILING == 'atr_trailing'
         assert ExitManager.REASON_PARTIAL_TP == 'partial_tp'
+        assert ExitManager.REASON_PARTIAL_TP2 == 'partial_tp2'
         assert ExitManager.REASON_HARD_STOP == 'hard_stop'
+
+
+class TestSecondPartialTakeProfit:
+    """Tests for Tier 4: Second Partial Take Profit (full exit at 5%)."""
+
+    def test_partial_tp2_triggers_after_partial_tp(self):
+        """Test partial TP2 triggers at 5% after partial TP executed."""
+        settings = {
+            'risk': {
+                'partial_tp_pct': 2.0,
+                'partial_tp_size': 0.50,
+                'partial_tp2_pct': 5.0,
+                'partial_tp2_size': 1.0,
+            }
+        }
+        exit_mgr = ExitManager(settings)
+        exit_mgr.register_position("AAPL", 100.0, 100)
+
+        # First partial TP at 2%
+        result1 = exit_mgr.evaluate_exit("AAPL", 102.0)
+        assert result1 is not None
+        assert result1['action'] == 'partial_tp'
+        assert result1['qty'] == 50
+
+        # Update quantity after partial close
+        exit_mgr.update_quantity("AAPL", 50)
+
+        # Second partial TP at 5%
+        result2 = exit_mgr.evaluate_exit("AAPL", 105.0)
+        assert result2 is not None
+        assert result2['action'] == 'full_exit'
+        assert result2['reason'] == ExitManager.REASON_PARTIAL_TP2
+        assert result2['qty'] == 50  # 100% of remaining 50 shares
+
+    def test_partial_tp2_requires_partial_tp_first(self):
+        """Test partial TP2 doesn't trigger without partial TP executed first."""
+        settings = {
+            'risk': {
+                'partial_tp_pct': 2.0,
+                'partial_tp2_pct': 5.0,
+                'partial_tp2_size': 1.0,
+            }
+        }
+        exit_mgr = ExitManager(settings)
+        exit_mgr.register_position("AAPL", 100.0, 100)
+
+        # Jump directly to 5% - should trigger partial TP first, not TP2
+        result = exit_mgr.evaluate_exit("AAPL", 105.0)
+        assert result is not None
+        assert result['action'] == 'partial_tp'  # First partial triggers, not TP2
+        assert result['reason'] == ExitManager.REASON_PARTIAL_TP
+
+    def test_partial_tp2_executes_only_once(self):
+        """Test partial TP2 only executes once per position."""
+        settings = {
+            'risk': {
+                'partial_tp_pct': 2.0,
+                'partial_tp_size': 0.50,
+                'partial_tp2_pct': 5.0,
+                'partial_tp2_size': 1.0,
+            }
+        }
+        exit_mgr = ExitManager(settings)
+        exit_mgr.register_position("AAPL", 100.0, 100)
+
+        # First partial TP
+        exit_mgr.evaluate_exit("AAPL", 102.0)
+        exit_mgr.update_quantity("AAPL", 50)
+
+        # Second partial TP
+        result1 = exit_mgr.evaluate_exit("AAPL", 105.0)
+        assert result1 is not None
+        assert result1['reason'] == ExitManager.REASON_PARTIAL_TP2
+
+        # Price goes even higher - no action since TP2 already executed
+        result2 = exit_mgr.evaluate_exit("AAPL", 110.0)
+        assert result2 is None or result2['reason'] != ExitManager.REASON_PARTIAL_TP2
+
+    def test_partial_tp2_state_tracking(self):
+        """Test partial TP2 state is correctly tracked."""
+        settings = {
+            'risk': {
+                'partial_tp_pct': 2.0,
+                'partial_tp_size': 0.50,
+                'partial_tp2_pct': 5.0,
+                'partial_tp2_size': 1.0,
+            }
+        }
+        exit_mgr = ExitManager(settings)
+        state = exit_mgr.register_position("AAPL", 100.0, 100)
+
+        # Initial state
+        assert state.partial_tp2_executed is False
+        assert state.partial_tp2_qty == 0
+
+        # After first partial TP
+        exit_mgr.evaluate_exit("AAPL", 102.0)
+        exit_mgr.update_quantity("AAPL", 50)
+        assert state.partial_tp2_executed is False
+
+        # After second partial TP
+        exit_mgr.evaluate_exit("AAPL", 105.0)
+        assert state.partial_tp2_executed is True
+        assert state.partial_tp2_qty == 50
+
+    def test_partial_tp2_config_defaults(self):
+        """Test partial TP2 uses correct default values."""
+        exit_mgr = ExitManager({})
+        state = exit_mgr.register_position("AAPL", 100.0, 100)
+
+        assert state.partial_tp2_pct == 0.05  # 5%
+        assert state.partial_tp2_size == 1.0  # 100%
+
+    def test_partial_tp2_custom_config(self):
+        """Test partial TP2 respects custom config values."""
+        settings = {
+            'risk': {
+                'partial_tp2_pct': 7.0,  # 7%
+                'partial_tp2_size': 0.75,  # 75%
+            }
+        }
+        exit_mgr = ExitManager(settings)
+        state = exit_mgr.register_position("AAPL", 100.0, 100)
+
+        assert state.partial_tp2_pct == 0.07  # 7%
+        assert state.partial_tp2_size == 0.75  # 75%
+
+    def test_partial_tp2_in_status_summary(self):
+        """Test partial TP2 info appears in status summary."""
+        settings = {
+            'risk': {
+                'partial_tp_pct': 2.0,
+                'partial_tp_size': 0.50,
+                'partial_tp2_pct': 5.0,
+            }
+        }
+        exit_mgr = ExitManager(settings)
+        exit_mgr.register_position("AAPL", 100.0, 100)
+
+        # Before any TPs
+        status = exit_mgr.get_status_summary("AAPL")
+        assert 'partial_tp2_executed' in status
+        assert 'partial_tp2_qty' in status
+        assert status['partial_tp2_executed'] is False
+        assert status['partial_tp2_qty'] == 0
+
+        # After first partial TP
+        exit_mgr.evaluate_exit("AAPL", 102.0)
+        exit_mgr.update_quantity("AAPL", 50)
+
+        # After second partial TP
+        exit_mgr.evaluate_exit("AAPL", 105.0)
+        status = exit_mgr.get_status_summary("AAPL")
+        assert status['partial_tp2_executed'] is True
+        assert status['partial_tp2_qty'] == 50
+
+    def test_partial_tp2_short_position(self):
+        """Test partial TP2 works correctly for SHORT positions."""
+        settings = {
+            'risk': {
+                'partial_tp_pct': 2.0,
+                'partial_tp_size': 0.50,
+                'partial_tp2_pct': 5.0,
+                'partial_tp2_size': 1.0,
+            }
+        }
+        exit_mgr = ExitManager(settings)
+        exit_mgr.register_position("AAPL", 100.0, 100, direction='SHORT')
+
+        # First partial TP at 2% profit (price drops to 98)
+        result1 = exit_mgr.evaluate_exit("AAPL", 98.0)
+        assert result1 is not None
+        assert result1['action'] == 'partial_tp'
+
+        exit_mgr.update_quantity("AAPL", 50)
+
+        # Second partial TP at 5% profit (price drops to 95)
+        result2 = exit_mgr.evaluate_exit("AAPL", 95.0)
+        assert result2 is not None
+        assert result2['action'] == 'full_exit'
+        assert result2['reason'] == ExitManager.REASON_PARTIAL_TP2

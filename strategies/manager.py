@@ -117,7 +117,7 @@ class StrategyManager:
                 results.append(result)
 
             except Exception as e:
-                logger.error(f"Error in {strategy.name} for {symbol}: {e}")
+                logger.error(f"Error in {strategy.name} for {symbol}: {e}", exc_info=True)
 
         # Sort by confidence descending
         results.sort(key=lambda x: x['confidence'], reverse=True)
