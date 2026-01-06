@@ -1469,6 +1469,21 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Trading cycle error: {e}", exc_info=True)
 
+    def _check_broker_health(self) -> dict:
+        """Check broker connection is active."""
+        try:
+            account = self.broker.get_account()
+            broker_name = getattr(self.broker, 'get_broker_name', lambda: 'Unknown')()
+            return {
+                'status': 'PASS',
+                'message': f'Connected to {broker_name}'
+            }
+        except Exception as e:
+            return {
+                'status': 'FAIL',
+                'message': f'Broker connection failed: {e}'
+            }
+
     def run_health_check(self) -> dict:
         """
         Run comprehensive health check on bot systems.
@@ -1491,6 +1506,26 @@ class TradingBot:
                 'info': 0
             }
         }
+
+        # Check broker connection
+        results['checks']['broker_connected'] = self._check_broker_health()
+
+        # Calculate summary
+        for check_name, check_result in results['checks'].items():
+            results['summary']['total_checks'] += 1
+            status = check_result.get('status', 'FAIL')
+            if status == 'PASS':
+                results['summary']['passed'] += 1
+            elif status == 'INFO':
+                results['summary']['info'] += 1
+            else:
+                results['summary']['failed'] += 1
+
+        # Determine overall status
+        if results['summary']['failed'] >= 3:
+            results['overall_status'] = 'UNHEALTHY'
+        elif results['summary']['failed'] >= 1:
+            results['overall_status'] = 'DEGRADED'
 
         return results
 

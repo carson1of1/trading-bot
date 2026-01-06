@@ -73,3 +73,44 @@ class TestHealthCheckStructure:
         assert 'passed' in summary
         assert 'failed' in summary
         assert 'info' in summary
+
+
+class TestBrokerHealthCheck:
+    """Test broker connection health check."""
+
+    @pytest.fixture
+    def mock_bot(self):
+        """Create a bot with mocked components."""
+        with patch('bot.VolatilityScanner') as mock_scanner, \
+             patch('bot.create_broker') as mock_broker, \
+             patch('bot.TradeLogger'), \
+             patch('bot.YFinanceDataFetcher'):
+
+            mock_scanner_instance = MagicMock()
+            mock_scanner_instance.scan.return_value = ['AAPL']
+            mock_scanner.return_value = mock_scanner_instance
+
+            mock_broker_instance = MagicMock()
+            mock_account = MagicMock()
+            mock_account.cash = 10000.0
+            mock_account.portfolio_value = 50000.0
+            mock_account.last_equity = 50000.0
+            mock_broker_instance.get_account.return_value = mock_account
+            mock_broker_instance.get_positions.return_value = []
+            mock_broker.return_value = mock_broker_instance
+
+            bot = TradingBot()
+            bot.cash = 10000.0
+            bot.portfolio_value = 50000.0
+            yield bot
+
+    def test_broker_connected_passes(self, mock_bot):
+        """Broker check passes when connection works."""
+        result = mock_bot.run_health_check()
+        assert result['checks']['broker_connected']['status'] == 'PASS'
+
+    def test_broker_connected_fails_on_exception(self, mock_bot):
+        """Broker check fails when get_account raises exception."""
+        mock_bot.broker.get_account.side_effect = Exception("Connection failed")
+        result = mock_bot.run_health_check()
+        assert result['checks']['broker_connected']['status'] == 'FAIL'
