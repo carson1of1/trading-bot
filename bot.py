@@ -1630,6 +1630,26 @@ class TradingBot:
         elif results['summary']['failed'] >= 1:
             results['overall_status'] = 'DEGRADED'
 
+        # Log summary
+        summary = results['summary']
+        status = results['overall_status']
+        positions_count = len(self.open_positions)
+        exit_mgr_count = len(self.exit_manager.positions) if self.exit_manager else 0
+        kill_switch = 'ON' if self.kill_switch_triggered else 'OFF'
+
+        logger.info(
+            f"HEALTH_CHECK | {status} | "
+            f"{summary['passed']}/{summary['total_checks']} PASS | "
+            f"{summary['failed']} FAIL | {summary['info']} INFO | "
+            f"Positions: {positions_count} | ExitMgr: {exit_mgr_count} | "
+            f"KillSwitch: {kill_switch}"
+        )
+
+        # Log individual failures at WARNING level
+        for check_name, check_result in results['checks'].items():
+            if check_result.get('status') == 'FAIL':
+                logger.warning(f"HEALTH_CHECK | {check_name} FAIL: {check_result.get('message', 'Unknown')}")
+
         return results
 
     def start(self):
