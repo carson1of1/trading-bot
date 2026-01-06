@@ -478,9 +478,32 @@ class TradingBot:
                 indicators=self.indicators
             )
 
+            # ODE-97: Signal logging - log ALL signals for debugging visibility
+            debug_config = self.config.get('debug', {})
+            log_all_signals = debug_config.get('log_all_signals', False)
+
             if signal and signal.get('action') != 'HOLD':
                 confidence = signal.get('confidence', 0)
                 threshold = self.strategy_manager.confidence_threshold
+                result = 'PASSED' if confidence >= threshold else 'BELOW_THRESHOLD'
+
+                # Log signal (always for non-HOLD, or when debug enabled)
+                if log_all_signals or result == 'PASSED':
+                    logger.info(
+                        f"SIGNAL | {symbol} | {signal['action']} | "
+                        f"Confidence: {confidence:.1f} | "
+                        f"Strategy: {signal.get('strategy', 'Unknown')} | "
+                        f"Threshold: {threshold} | "
+                        f"Result: {result}"
+                    )
+
+                # Log components if debug enabled
+                if debug_config.get('log_signal_components', False):
+                    components = signal.get('components', {})
+                    if components:
+                        comp_str = ' | '.join(f"{k}: {v:.2f}" if isinstance(v, (int, float)) else f"{k}: {v}"
+                                              for k, v in components.items())
+                        logger.info(f"SIGNAL_COMPONENTS | {symbol} | {comp_str}")
 
                 if signal['action'] == 'BUY' and confidence >= threshold:
                     return {
@@ -488,7 +511,8 @@ class TradingBot:
                         'confidence': confidence,
                         'strategy': signal.get('strategy', 'Unknown'),
                         'reasoning': signal.get('reasoning', ''),
-                        'direction': 'LONG'
+                        'direction': 'LONG',
+                        'components': signal.get('components', {})
                     }
                 elif signal['action'] == 'SELL' and confidence >= threshold:
                     # SHORT signal
@@ -497,7 +521,8 @@ class TradingBot:
                         'confidence': confidence,
                         'strategy': signal.get('strategy', 'Unknown'),
                         'reasoning': signal.get('reasoning', ''),
-                        'direction': 'SHORT'
+                        'direction': 'SHORT',
+                        'components': signal.get('components', {})
                     }
 
             return no_signal
@@ -1292,6 +1317,18 @@ class TradingBot:
                 logger.warning(f"DRAWDOWN_GUARD | Entries blocked at tier {self.drawdown_guard.tier.name}")
                 return
 
+            # ODE-97: Signal summary tracking
+            signal_stats = {
+                'total': 0,
+                'buy': 0,
+                'sell': 0,
+                'hold': 0,
+                'above_threshold': 0,
+                'executed': 0,
+                'blocked': 0,
+                'block_reasons': {}
+            }
+
             # Collect ALL qualifying signals first, then pick highest confidence
             # This ensures deterministic selection matching backtest behavior
             qualifying_signals = []
@@ -1324,12 +1361,38 @@ class TradingBot:
                 current_price = data['close'].iloc[-1]
                 entry_signal = self.check_entry(symbol, data, current_price)
 
+                # ODE-97: Track signal statistics
+                signal_stats['total'] += 1
+                action = entry_signal.get('action', 'HOLD')
+                if action == 'BUY':
+                    signal_stats['buy'] += 1
+                elif action == 'SELL':
+                    signal_stats['sell'] += 1
+                else:
+                    signal_stats['hold'] += 1
+
                 if entry_signal and entry_signal.get('action') in ['BUY', 'SELL']:
+                    signal_stats['above_threshold'] += 1
                     qualifying_signals.append({
                         'symbol': symbol,
                         'signal': entry_signal,
                         'price': current_price
                     })
+                elif entry_signal.get('reasoning'):
+                    # Track block reasons
+                    reason = entry_signal.get('reasoning', 'unknown')
+                    # Simplify reason for grouping
+                    if 'Entry gate' in reason:
+                        reason_key = 'entry_gate'
+                    elif 'Cooldown' in reason:
+                        reason_key = 'cooldown'
+                    elif 'position' in reason.lower():
+                        reason_key = 'position_limit'
+                    elif 'threshold' in reason.lower():
+                        reason_key = 'below_threshold'
+                    else:
+                        reason_key = 'other'
+                    signal_stats['block_reasons'][reason_key] = signal_stats['block_reasons'].get(reason_key, 0) + 1
 
             # Sort by confidence (highest first) for deterministic selection
             qualifying_signals.sort(key=lambda x: x['signal'].get('confidence', 0), reverse=True)
@@ -1337,6 +1400,8 @@ class TradingBot:
             # Execute trades for top signals up to position limit
             for entry in qualifying_signals:
                 if len(self.open_positions) >= max_positions:
+                    signal_stats['block_reasons']['position_limit'] = signal_stats['block_reasons'].get('position_limit', 0) + 1
+                    signal_stats['blocked'] += 1
                     break
 
                 symbol = entry['symbol']
@@ -1346,13 +1411,29 @@ class TradingBot:
 
                 logger.info(f"Selected {symbol} with confidence {entry_signal.get('confidence', 0):.1f} (best of {len(qualifying_signals)} signals)")
 
-                self.execute_entry(
+                result = self.execute_entry(
                     symbol=symbol,
                     direction=direction,
                     price=current_price,
                     strategy=entry_signal.get('strategy', 'Unknown'),
                     reasoning=entry_signal.get('reasoning', '')
                 )
+
+                if result.get('filled'):
+                    signal_stats['executed'] += 1
+                else:
+                    signal_stats['blocked'] += 1
+                    signal_stats['block_reasons']['execution_failed'] = signal_stats['block_reasons'].get('execution_failed', 0) + 1
+
+            # ODE-97: Log signal summary
+            signal_stats['blocked'] = signal_stats['above_threshold'] - signal_stats['executed']
+            logger.info(
+                f"SIGNAL_SUMMARY | Total: {signal_stats['total']} | "
+                f"BUY: {signal_stats['buy']} | SELL: {signal_stats['sell']} | HOLD: {signal_stats['hold']} | "
+                f"Above threshold: {signal_stats['above_threshold']} | "
+                f"Executed: {signal_stats['executed']} | "
+                f"Blocked: {signal_stats['blocked']} (reasons: {signal_stats['block_reasons']})"
+            )
 
             logger.info(f"=== Cycle Complete: {len(self.open_positions)} positions ===")
 
