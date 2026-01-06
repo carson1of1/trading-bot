@@ -281,6 +281,7 @@ trading:
   watchlist_file: "universe.yaml"
 risk_management:
   max_open_positions: 2
+  max_position_dollars: 50000  # High limit to prevent position size guard triggering
 entry_gate:
   confidence_threshold: 60
 logging:
