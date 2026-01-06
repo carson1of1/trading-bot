@@ -182,6 +182,7 @@ class TradingBot:
         self.daily_starting_capital = 0.0
         self.current_trading_day = None
         self.kill_switch_triggered = False
+        self._partial_liquidation_done_today = False  # ODE-90: Track partial liquidation
 
         # Emergency stop - force close if unrealized loss exceeds threshold
         # FIX (Jan 2026): Added after $4K loss on single SHORT with no stop
@@ -238,6 +239,10 @@ class TradingBot:
             if self.current_trading_day != now.date():
                 self.current_trading_day = now.date()
                 self.kill_switch_triggered = False
+                # ODE-90: Reset drawdown guard and partial liquidation flag for new day
+                if self.drawdown_guard.enabled:
+                    self.drawdown_guard.reset_day(self.daily_starting_capital, now.date())
+                self._partial_liquidation_done_today = False
                 logger.info(f"New trading day: start equity=${self.daily_starting_capital:.2f}")
 
             # Kill switch check
@@ -1241,6 +1246,30 @@ class TradingBot:
                             self.open_positions.clear()
                     logger.error("DRAWDOWN_GUARD | DAY HALTED - No further trading")
                     return
+
+                # ODE-90: Handle medium limit - partial liquidation (funded account protection)
+                if tier == DrawdownTier.MEDIUM and self.drawdown_guard.partial_liquidation_triggered:
+                    # Only trigger partial liquidation once per day
+                    if not getattr(self, '_partial_liquidation_done_today', False):
+                        logger.warning("DRAWDOWN_GUARD | MEDIUM TIER - PARTIAL LIQUIDATION")
+                        positions_list = list(self.open_positions.values())
+                        if positions_list:
+                            result = self.drawdown_guard.force_partial_liquidate(self.broker, positions_list)
+                            if result['success']:
+                                logger.warning(
+                                    f"DRAWDOWN_GUARD | Partial liquidation: {len(result['reduced'])} positions reduced"
+                                )
+                                # Update position quantities in our tracking
+                                for reduced_pos in result['reduced']:
+                                    symbol = reduced_pos['symbol']
+                                    if symbol in self.open_positions:
+                                        old_qty = self.open_positions[symbol].get('qty', 0)
+                                        new_qty = reduced_pos['remaining_qty']
+                                        self.open_positions[symbol]['qty'] = new_qty
+                                        logger.info(
+                                            f"DRAWDOWN_GUARD | {symbol}: Qty {old_qty} -> {new_qty}"
+                                        )
+                        self._partial_liquidation_done_today = True
 
                 # Handle day halted state
                 if self.drawdown_guard.day_halted:

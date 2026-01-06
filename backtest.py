@@ -1233,6 +1233,60 @@ class Backtest1Hour:
                 excess_returns = returns - daily_rf
                 sharpe_ratio = (excess_returns.mean() / returns.std()) * np.sqrt(252)
 
+        # Calculate worst daily drops from actual trade P&L (not equity curve)
+        # This avoids the bug where equity curve mixes per-symbol data
+        worst_daily_drops = []
+        if trades:
+            from collections import defaultdict
+            daily_pnl = defaultdict(float)
+            for t in trades:
+                exit_date = t.get('exit_date', '')
+                if hasattr(exit_date, 'strftime'):
+                    date_str = exit_date.strftime('%Y-%m-%d')
+                elif hasattr(exit_date, 'isoformat'):
+                    date_str = str(exit_date)[:10]
+                else:
+                    date_str = str(exit_date)[:10]
+                daily_pnl[date_str] += t.get('pnl', 0)
+
+            # Convert to list and calculate % of initial capital
+            daily_list = []
+            for date_str, pnl in daily_pnl.items():
+                pct = (pnl / self.initial_capital) * 100
+                daily_list.append({
+                    'date': date_str,
+                    'open': 0,  # Not tracked per-day
+                    'close': 0,
+                    'high': 0,
+                    'low': 0,
+                    'change_pct': pct,
+                    'change_dollars': pnl
+                })
+
+            # Sort by change_pct ascending (worst first) and take top 5
+            daily_list.sort(key=lambda x: x['change_pct'])
+            worst_daily_drops = daily_list[:5]
+
+        # Calculate drawdown peak/trough dates
+        drawdown_peak_date = None
+        drawdown_peak_value = self.initial_capital
+        drawdown_trough_date = None
+        drawdown_trough_value = self.initial_capital
+        if self.equity_curve:
+            peak_val = 0
+            trough_val = float('inf')
+            for entry in self.equity_curve:
+                val = entry.get('portfolio_value', 0)
+                ts = entry.get('timestamp', '')
+                if val > peak_val:
+                    peak_val = val
+                    drawdown_peak_date = str(ts)
+                    drawdown_peak_value = val
+                if val < trough_val:
+                    trough_val = val
+                    drawdown_trough_date = str(ts)
+                    drawdown_trough_value = val
+
         return {
             'initial_capital': self.initial_capital,
             'final_value': self.cash,
@@ -1250,7 +1304,12 @@ class Backtest1Hour:
             'sharpe_ratio': sharpe_ratio,
             'best_trade': max(t['pnl'] for t in trades) if trades else 0,
             'worst_trade': min(t['pnl'] for t in trades) if trades else 0,
-            'avg_bars_held': np.mean([t['bars_held'] for t in trades]) if trades else 0
+            'avg_bars_held': np.mean([t['bars_held'] for t in trades]) if trades else 0,
+            'worst_daily_drops': worst_daily_drops,
+            'drawdown_peak_date': drawdown_peak_date,
+            'drawdown_peak_value': drawdown_peak_value,
+            'drawdown_trough_date': drawdown_trough_date,
+            'drawdown_trough_value': drawdown_trough_value
         }
 
     def run(self, symbols: List[str], start_date: str, end_date: str) -> Dict:

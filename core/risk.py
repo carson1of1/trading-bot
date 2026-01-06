@@ -1923,11 +1923,18 @@ from enum import Enum
 
 
 class DrawdownTier(Enum):
-    """Drawdown protection tier levels."""
+    """Drawdown protection tier levels.
+
+    ODE-90: Updated for funded account protection (Apex, FTMO).
+    - SOFT_LIMIT (3%): Block new entries
+    - MEDIUM (4%): Partial liquidation of existing positions (50%)
+    - HARD_LIMIT (5%): Full liquidation + halt
+    """
     NORMAL = 0      # No drawdown concerns
     WARNING = 1     # -2.5%: Reduce position sizes
-    SOFT_LIMIT = 2  # -3.5%: Block entries, tighten stops
-    HARD_LIMIT = 3  # -4.0%: Full liquidation
+    SOFT_LIMIT = 2  # -3.0%: Block entries
+    MEDIUM = 3      # -4.0%: Partial liquidation (ODE-90)
+    HARD_LIMIT = 4  # -5.0%: Full liquidation
 
 
 class DailyDrawdownGuard:
@@ -1973,13 +1980,17 @@ class DailyDrawdownGuard:
         self.enabled = guard_config.get('enabled', True)
 
         # Thresholds (as percentages, stored as decimals)
+        # ODE-90: Updated defaults for funded account protection (3%/4%/5%)
         self.warning_pct = guard_config.get('warning_pct', 2.5) / 100
-        self.soft_limit_pct = guard_config.get('soft_limit_pct', 3.5) / 100
-        self.hard_limit_pct = guard_config.get('hard_limit_pct', 4.0) / 100
+        self.soft_limit_pct = guard_config.get('soft_limit_pct', 3.0) / 100  # Block entries
+        self.medium_limit_pct = guard_config.get('medium_limit_pct', 4.0) / 100  # Partial liquidation
+        self.hard_limit_pct = guard_config.get('hard_limit_pct', 5.0) / 100  # Full liquidation
 
         # Behavior settings
         self.warning_size_multiplier = guard_config.get('warning_size_multiplier', 0.5)
         self.tighten_stops_at_soft = guard_config.get('tighten_stops_at_soft', True)
+        # ODE-90: Partial liquidation percentage at MEDIUM tier
+        self.partial_liquidation_pct = guard_config.get('partial_liquidation_pct', 50) / 100
 
         # Execution settings
         self.liquidation_timeout_sec = guard_config.get('liquidation_timeout_sec', 30)
@@ -1999,15 +2010,20 @@ class DailyDrawdownGuard:
         self.entries_allowed = True
         self.position_size_multiplier = 1.0
         self.day_halted = False
+        # ODE-90: Partial liquidation flag for MEDIUM tier
+        self.partial_liquidation_triggered = False
 
         # Safety flags
         self._liquidation_in_progress = False
+        # ODE-90: API error failsafe - block trading if equity fetch fails
+        self.api_error_occurred = False
 
         if self.enabled:
             self.logger.info(
                 f"DailyDrawdownGuard initialized: "
                 f"warning={self.warning_pct*100:.1f}%, "
                 f"soft_limit={self.soft_limit_pct*100:.1f}%, "
+                f"medium={self.medium_limit_pct*100:.1f}%, "
                 f"hard_limit={self.hard_limit_pct*100:.1f}%"
             )
         else:
@@ -2043,6 +2059,9 @@ class DailyDrawdownGuard:
         self.position_size_multiplier = 1.0
         self.day_halted = False
         self._liquidation_in_progress = False
+        # ODE-90: Reset new flags
+        self.partial_liquidation_triggered = False
+        self.api_error_occurred = False
 
         self.logger.info(
             f"DRAWDOWN_GUARD | DAY_RESET | "
@@ -2067,12 +2086,18 @@ class DailyDrawdownGuard:
             return DrawdownTier.NORMAL
 
         # Get current equity from account
+        # ODE-90: If we can't get equity, set API error flag and block trading
         if hasattr(account, 'equity'):
             self.current_equity = float(account.equity)
         elif hasattr(account, 'portfolio_value'):
             self.current_equity = float(account.portfolio_value)
         else:
-            self.logger.error("Cannot determine equity from account object")
+            self.logger.error(
+                "DRAWDOWN_GUARD | API_ERROR | Cannot determine equity from account object - "
+                "BLOCKING ALL TRADING as failsafe"
+            )
+            self.api_error_occurred = True
+            self.entries_allowed = False
             return self.tier
 
         # Check for new day (use provided date for backtest, else real time)
@@ -2106,9 +2131,18 @@ class DailyDrawdownGuard:
         return self.tier
 
     def _calculate_tier(self) -> DrawdownTier:
-        """Calculate current tier based on drawdown percentage."""
+        """Calculate current tier based on drawdown percentage.
+
+        ODE-90: Updated tiers for funded account protection:
+        - HARD_LIMIT (5%): Full liquidation
+        - MEDIUM (4%): Partial liquidation
+        - SOFT_LIMIT (3%): Block entries
+        - WARNING (2.5%): Reduce position sizes
+        """
         if self.drawdown_pct >= self.hard_limit_pct:
             return DrawdownTier.HARD_LIMIT
+        elif self.drawdown_pct >= self.medium_limit_pct:
+            return DrawdownTier.MEDIUM
         elif self.drawdown_pct >= self.soft_limit_pct:
             return DrawdownTier.SOFT_LIMIT
         elif self.drawdown_pct >= self.warning_pct:
@@ -2117,28 +2151,42 @@ class DailyDrawdownGuard:
             return DrawdownTier.NORMAL
 
     def _update_flags(self):
-        """Update flags based on current tier."""
+        """Update flags based on current tier.
+
+        ODE-90: Added MEDIUM tier for partial liquidation.
+        """
         tier = self._highest_tier_reached
 
         if tier == DrawdownTier.NORMAL:
             self.entries_allowed = True
             self.position_size_multiplier = 1.0
             self.day_halted = False
+            self.partial_liquidation_triggered = False
 
         elif tier == DrawdownTier.WARNING:
             self.entries_allowed = True
             self.position_size_multiplier = self.warning_size_multiplier
             self.day_halted = False
+            self.partial_liquidation_triggered = False
 
         elif tier == DrawdownTier.SOFT_LIMIT:
             self.entries_allowed = False
             self.position_size_multiplier = 0.0  # No new positions
             self.day_halted = False
+            self.partial_liquidation_triggered = False
+
+        elif tier == DrawdownTier.MEDIUM:
+            # ODE-90: Partial liquidation tier - close 50% of existing positions
+            self.entries_allowed = False
+            self.position_size_multiplier = 0.0
+            self.day_halted = False
+            self.partial_liquidation_triggered = True
 
         elif tier == DrawdownTier.HARD_LIMIT:
             self.entries_allowed = False
             self.position_size_multiplier = 0.0
             self.day_halted = True
+            self.partial_liquidation_triggered = True  # Already triggered or skip to full
 
     def _on_tier_change(self, old_tier: DrawdownTier, new_tier: DrawdownTier):
         """Handle tier escalation."""
@@ -2159,6 +2207,14 @@ class DailyDrawdownGuard:
             self.logger.warning(
                 f"DRAWDOWN_GUARD | SOFT_LIMIT | "
                 f"New entries BLOCKED, stops should be moved to breakeven"
+            )
+
+        elif new_tier == DrawdownTier.MEDIUM:
+            # ODE-90: Partial liquidation tier
+            self.logger.error(
+                f"DRAWDOWN_GUARD | MEDIUM | "
+                f"PARTIAL LIQUIDATION REQUIRED: Close {self.partial_liquidation_pct*100:.0f}% "
+                f"of existing positions"
             )
 
         elif new_tier == DrawdownTier.HARD_LIMIT:
@@ -2275,6 +2331,96 @@ class DailyDrawdownGuard:
         self.logger.info(
             f"DRAWDOWN_GUARD | LIQUIDATION_COMPLETE | "
             f"Liquidated: {len(results['liquidated'])}, Failed: {len(results['failed'])}"
+        )
+
+        return results
+
+    def force_partial_liquidate(self, broker, positions: list) -> dict:
+        """
+        Partial liquidation of positions at MEDIUM tier (ODE-90).
+
+        Reduces each position by partial_liquidation_pct (default 50%).
+        Called when MEDIUM tier is reached to reduce exposure.
+
+        Args:
+            broker: Broker interface with submit_order method
+            positions: List of position dicts with symbol, qty, direction
+
+        Returns:
+            Dict with partial liquidation results
+        """
+        results = {
+            'success': True,
+            'reduced': [],
+            'failed': [],
+            'total_shares_closed': 0
+        }
+
+        if not positions:
+            return results
+
+        self.logger.warning(
+            f"DRAWDOWN_GUARD | PARTIAL_LIQUIDATION_START | "
+            f"Reducing {len(positions)} positions by {self.partial_liquidation_pct*100:.0f}%"
+        )
+
+        for pos in positions:
+            symbol = pos.get('symbol') or (pos.symbol if hasattr(pos, 'symbol') else None)
+            current_qty = pos.get('qty') or (int(pos.qty) if hasattr(pos, 'qty') else 0)
+            direction = pos.get('direction', 'LONG')
+
+            # Handle position object or dict
+            if hasattr(pos, 'side'):
+                direction = 'LONG' if pos.side == 'long' else 'SHORT'
+
+            if not symbol or current_qty <= 0:
+                continue
+
+            # Calculate shares to close (partial liquidation)
+            qty_to_close = int(current_qty * self.partial_liquidation_pct)
+            if qty_to_close < 1:
+                qty_to_close = 1  # At least close 1 share if position exists
+
+            try:
+                # Submit market order to reduce position
+                side = 'sell' if direction == 'LONG' else 'buy'
+                order = broker.submit_order(
+                    symbol=symbol,
+                    qty=qty_to_close,
+                    side=side,
+                    type='market',
+                    time_in_force='day'
+                )
+
+                if order and order.status in ['filled', 'new', 'accepted']:
+                    fill_price = float(order.filled_avg_price) if hasattr(order, 'filled_avg_price') and order.filled_avg_price else 0
+                    results['reduced'].append({
+                        'symbol': symbol,
+                        'qty_closed': qty_to_close,
+                        'qty_remaining': current_qty - qty_to_close,
+                        'direction': direction,
+                        'fill_price': fill_price
+                    })
+                    results['total_shares_closed'] += qty_to_close
+
+                    self.logger.info(
+                        f"DRAWDOWN_GUARD | PARTIAL_LIQUIDATED | "
+                        f"{symbol}: closed {qty_to_close}/{current_qty} shares @ ${fill_price:.2f}"
+                    )
+                else:
+                    results['failed'].append({'symbol': symbol, 'reason': 'order_failed'})
+
+            except Exception as e:
+                self.logger.error(f"DRAWDOWN_GUARD | PARTIAL_LIQUIDATION_ERROR | {symbol}: {e}", exc_info=True)
+                results['failed'].append({'symbol': symbol, 'reason': str(e)})
+
+        if results['failed']:
+            results['success'] = False
+
+        self.logger.info(
+            f"DRAWDOWN_GUARD | PARTIAL_LIQUIDATION_COMPLETE | "
+            f"Reduced: {len(results['reduced'])}, Failed: {len(results['failed'])}, "
+            f"Total shares closed: {results['total_shares_closed']}"
         )
 
         return results
