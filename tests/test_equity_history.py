@@ -3,13 +3,19 @@
 import pytest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
-from fastapi.testclient import TestClient
 
 from core.broker import (
     PortfolioHistory,
     AlpacaBroker,
     FakeBroker,
 )
+
+# Optional import for API tests
+try:
+    from fastapi.testclient import TestClient
+    HAS_FASTAPI = True
+except ImportError:
+    HAS_FASTAPI = False
 
 
 class TestPortfolioHistoryDataclass:
@@ -120,6 +126,7 @@ class TestAlpacaBrokerPortfolioHistory:
         assert len(history.equity) == 0
 
 
+@pytest.mark.skipif(not HAS_FASTAPI, reason="FastAPI not installed")
 class TestEquityHistoryAPI:
     """Test the /api/equity-history endpoint."""
 
