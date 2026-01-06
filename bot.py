@@ -352,6 +352,17 @@ class TradingBot:
                     f"Broker: NOT FOUND | Action: Position may have been closed externally"
                 )
 
+        # 2. Orphan positions (broker but not internal)
+        for symbol, bp in broker_positions.items():
+            if symbol not in self.open_positions:
+                logger.warning(
+                    f"RECONCILE | ORPHAN | {symbol} | "
+                    f"Internal: NOT TRACKED | "
+                    f"Broker: {int(bp.qty)} shares @ ${float(bp.avg_entry_price):.2f} | "
+                    f"Action: Position opened externally or bot restarted mid-trade"
+                )
+                continue  # Skip further checks for orphans
+
     def _calculate_atr(self, data: pd.DataFrame, period: int = 14) -> float:
         """
         Calculate ATR (Average True Range) from historical data.

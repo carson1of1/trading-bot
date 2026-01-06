@@ -62,3 +62,23 @@ proven_symbols:
         assert 'RECONCILE | GHOST | AAPL' in caplog.text
         assert 'Internal: 100 shares @ $150.00' in caplog.text
         assert 'Broker: NOT FOUND' in caplog.text
+
+    def test_orphan_position_logs_warning(self, bot_with_mocks, caplog):
+        """Orphan position (broker exists, internal doesn't) logs warning."""
+        bot = bot_with_mocks
+
+        # Internal state is empty
+        bot.open_positions = {}
+
+        # Broker has MSFT position
+        mock_position = MagicMock()
+        mock_position.symbol = 'MSFT'
+        mock_position.qty = 50
+        mock_position.avg_entry_price = 400.00
+        bot.broker.get_positions.return_value = [mock_position]
+
+        bot._reconcile_broker_state()
+
+        assert 'RECONCILE | ORPHAN | MSFT' in caplog.text
+        assert 'Internal: NOT TRACKED' in caplog.text
+        assert 'Broker: 50 shares @ $400.00' in caplog.text
