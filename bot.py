@@ -1081,6 +1081,7 @@ class TradingBot:
         Run one trading cycle.
 
         Called every hour (or on demand):
+        0. Reconcile broker state (detect divergence)
         1. Sync account and update drawdown guard
         2. Handle hard limit liquidation if needed
         3. Check exits for all positions
@@ -1093,6 +1094,9 @@ class TradingBot:
             expected_candle_hour = (now.hour - 1) % 24  # Previous hour's candle
             logger.info(f"=== Trading Cycle Start @ {now.strftime('%H:%M:%S')} EST ===")
             logger.info(f"Expecting candles from {expected_candle_hour}:00 hour")
+
+            # 0. Reconcile broker state BEFORE syncing (detect divergence)
+            self._reconcile_broker_state()
 
             # 1. Sync state
             self.sync_account()

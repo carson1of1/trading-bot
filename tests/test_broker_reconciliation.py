@@ -215,3 +215,74 @@ proven_symbols:
         bot._reconcile_broker_state()
 
         assert 'RECONCILE |' not in caplog.text
+
+
+class TestReconciliationIntegration:
+    """Test _reconcile_broker_state() integration with run_trading_cycle()."""
+
+    @pytest.fixture
+    def bot_with_mocks(self, tmp_path):
+        """Create a bot with mocked components."""
+        config = """
+mode: PAPER
+timeframe: 1Hour
+trading:
+  watchlist_file: "universe.yaml"
+risk_management:
+  max_daily_loss_pct: 3.0
+  max_open_positions: 5
+logging:
+  database: "logs/trades.db"
+"""
+        universe = """
+proven_symbols:
+  - AAPL
+"""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(config)
+        universe_path = tmp_path / "universe.yaml"
+        universe_path.write_text(universe)
+
+        with patch('bot.create_broker') as mock_broker, \
+             patch('bot.TradeLogger'), \
+             patch('bot.YFinanceDataFetcher'):
+            mock_broker_instance = MagicMock()
+            mock_broker.return_value = mock_broker_instance
+
+            # Mock account for sync_account
+            mock_account = MagicMock()
+            mock_account.cash = 50000.0
+            mock_account.portfolio_value = 50000.0
+            mock_account.last_equity = 50000.0
+            mock_broker_instance.get_account.return_value = mock_account
+
+            from bot import TradingBot
+            bot = TradingBot(config_path=str(config_path))
+            return bot
+
+    def test_reconcile_called_before_sync(self, bot_with_mocks):
+        """_reconcile_broker_state() is called before sync_positions()."""
+        bot = bot_with_mocks
+
+        call_order = []
+
+        original_reconcile = bot._reconcile_broker_state
+        original_sync = bot.sync_positions
+
+        def track_reconcile():
+            call_order.append('reconcile')
+            original_reconcile()
+
+        def track_sync():
+            call_order.append('sync')
+            original_sync()
+
+        bot._reconcile_broker_state = track_reconcile
+        bot.sync_positions = track_sync
+        bot.broker.get_positions.return_value = []
+
+        bot.run_trading_cycle()
+
+        assert 'reconcile' in call_order
+        assert 'sync' in call_order
+        assert call_order.index('reconcile') < call_order.index('sync')
