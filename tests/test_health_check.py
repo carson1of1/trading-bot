@@ -199,3 +199,48 @@ class TestPositionSyncCheck:
         mock_bot.broker.get_positions.return_value = []  # Broker has 0
         result = mock_bot.run_health_check()
         assert result['checks']['positions_synced']['status'] == 'FAIL'
+
+
+class TestExitManagerCheck:
+    """Test ExitManager health check."""
+
+    @pytest.fixture
+    def mock_bot(self):
+        """Create a bot with mocked components."""
+        with patch('bot.VolatilityScanner') as mock_scanner, \
+             patch('bot.create_broker') as mock_broker, \
+             patch('bot.TradeLogger'), \
+             patch('bot.YFinanceDataFetcher'):
+
+            mock_scanner_instance = MagicMock()
+            mock_scanner_instance.scan.return_value = ['AAPL']
+            mock_scanner.return_value = mock_scanner_instance
+
+            mock_broker_instance = MagicMock()
+            mock_account = MagicMock()
+            mock_account.cash = 10000.0
+            mock_account.portfolio_value = 50000.0
+            mock_account.last_equity = 50000.0
+            mock_broker_instance.get_account.return_value = mock_account
+            mock_broker_instance.get_positions.return_value = []
+            mock_broker.return_value = mock_broker_instance
+
+            bot = TradingBot()
+            bot.cash = 10000.0
+            bot.portfolio_value = 50000.0
+            yield bot
+
+    def test_exit_manager_passes_when_all_registered(self, mock_bot):
+        """ExitManager check passes when all positions registered."""
+        mock_bot.open_positions = {'AAPL': {'qty': 100, 'entry_price': 150.0}}
+        mock_bot.exit_manager.positions = {'AAPL': MagicMock()}
+        result = mock_bot.run_health_check()
+        assert result['checks']['positions_registered']['status'] == 'PASS'
+
+    def test_exit_manager_fails_when_missing(self, mock_bot):
+        """ExitManager check fails when position not registered."""
+        mock_bot.open_positions = {'AAPL': {'qty': 100, 'entry_price': 150.0}}
+        mock_bot.exit_manager.positions = {}  # Empty - not registered
+        result = mock_bot.run_health_check()
+        assert result['checks']['positions_registered']['status'] == 'FAIL'
+        assert 'AAPL' in result['checks']['positions_registered']['message']

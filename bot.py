@@ -1507,6 +1507,36 @@ class TradingBot:
                 'message': f'Position sync check failed: {e}'
             }
 
+    def _check_exit_manager_health(self) -> dict:
+        """Check ExitManager has all positions registered correctly."""
+        if not self.use_tiered_exits or not self.exit_manager:
+            return {
+                'status': 'INFO',
+                'message': 'Tiered exits disabled'
+            }
+
+        bot_symbols = set(self.open_positions.keys())
+        exit_mgr_symbols = set(self.exit_manager.positions.keys())
+
+        missing = bot_symbols - exit_mgr_symbols
+        orphaned = exit_mgr_symbols - bot_symbols
+
+        if not missing and not orphaned:
+            return {
+                'status': 'PASS',
+                'message': f'{len(bot_symbols)}/{len(bot_symbols)} positions registered'
+            }
+        else:
+            issues = []
+            if missing:
+                issues.append(f'missing: {list(missing)}')
+            if orphaned:
+                issues.append(f'orphaned: {list(orphaned)}')
+            return {
+                'status': 'FAIL',
+                'message': f'ExitManager mismatch - {", ".join(issues)}'
+            }
+
     def run_health_check(self) -> dict:
         """
         Run comprehensive health check on bot systems.
@@ -1547,6 +1577,9 @@ class TradingBot:
 
         # Check position sync
         results['checks']['positions_synced'] = self._check_position_sync()
+
+        # Check ExitManager registration
+        results['checks']['positions_registered'] = self._check_exit_manager_health()
 
         # Calculate summary
         for check_name, check_result in results['checks'].items():
