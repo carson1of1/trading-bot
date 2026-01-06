@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import {
   AreaChart,
   Area,
@@ -10,6 +9,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { useMounted } from "@/lib/utils";
+import { EquityPeriod } from "@/lib/api";
 
 interface DataPoint {
   date: string;
@@ -18,14 +18,17 @@ interface DataPoint {
 
 interface EquityCurveChartProps {
   data: DataPoint[];
+  selectedPeriod?: EquityPeriod;
+  onPeriodChange?: (period: EquityPeriod) => void;
 }
 
-type TimeRange = "7D" | "30D" | "90D" | "ALL";
+const timeRanges: EquityPeriod[] = ["7D", "30D", "90D", "ALL"];
 
-const timeRanges: TimeRange[] = ["7D", "30D", "90D", "ALL"];
-
-export function EquityCurveChart({ data }: EquityCurveChartProps) {
-  const [selectedRange, setSelectedRange] = useState<TimeRange>("30D");
+export function EquityCurveChart({
+  data,
+  selectedPeriod = "30D",
+  onPeriodChange,
+}: EquityCurveChartProps) {
   const mounted = useMounted();
 
   const formatValue = (value: number) => {
@@ -63,9 +66,9 @@ export function EquityCurveChart({ data }: EquityCurveChartProps) {
           {timeRanges.map((range) => (
             <button
               key={range}
-              onClick={() => setSelectedRange(range)}
+              onClick={() => onPeriodChange?.(range)}
               className={`px-3 py-1 text-xs font-medium rounded-md transition-all hover:scale-105 ${
-                selectedRange === range
+                selectedPeriod === range
                   ? "bg-blue text-white"
                   : "text-text-muted hover:text-white hover:bg-surface-2"
               }`}

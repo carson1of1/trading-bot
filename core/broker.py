@@ -9,7 +9,7 @@ Combined from:
 
 from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import logging
 import math
@@ -179,6 +179,15 @@ class Order:
 
 
 @dataclass
+class PortfolioHistory:
+    """Represents historical portfolio equity values."""
+    timestamps: List[datetime]
+    equity: List[float]
+    timeframe: str  # e.g., "1D", "1H"
+    base_value: float
+
+
+@dataclass
 class Account:
     """Represents trading account information"""
     equity: float
@@ -274,6 +283,18 @@ class BrokerInterface(ABC):
     @abstractmethod
     def get_broker_name(self) -> str:
         """Get broker implementation name"""
+        pass
+
+    @abstractmethod
+    def get_portfolio_history(self, period: str = "30D") -> PortfolioHistory:
+        """Get historical portfolio equity values.
+
+        Args:
+            period: Time period for history. Options: "7D", "30D", "90D", "1Y", "ALL"
+
+        Returns:
+            PortfolioHistory with timestamps and equity values
+        """
         pass
 
 
@@ -658,6 +679,63 @@ class AlpacaBroker(BrokerInterface):
 
     def get_broker_name(self) -> str:
         return "AlpacaBroker"
+
+    @retry_on_failure(max_retries=2, delay=0.5, backoff=2.0)
+    def get_portfolio_history(self, period: str = "30D") -> PortfolioHistory:
+        """Get historical portfolio equity values from Alpaca.
+
+        Args:
+            period: Time period. Options: "7D", "30D", "90D", "1Y", "ALL"
+
+        Returns:
+            PortfolioHistory with timestamps and equity values
+        """
+        self._check_rate_limit()
+        try:
+            # Map our periods to Alpaca's period format
+            period_map = {
+                "7D": "1W",
+                "30D": "1M",
+                "90D": "3M",
+                "1Y": "1A",
+                "ALL": "all",
+            }
+            alpaca_period = period_map.get(period, "1M")
+
+            # Use 1D timeframe for daily granularity
+            alpaca_history = self.api.get_portfolio_history(
+                period=alpaca_period,
+                timeframe="1D"
+            )
+
+            # Convert timestamps from Unix to datetime
+            timestamps = []
+            if alpaca_history.timestamp:
+                for ts in alpaca_history.timestamp:
+                    if isinstance(ts, (int, float)):
+                        timestamps.append(datetime.fromtimestamp(ts, tz=pytz.UTC))
+                    else:
+                        timestamps.append(ts)
+
+            equity = list(alpaca_history.equity) if alpaca_history.equity else []
+            base_value = float(alpaca_history.base_value) if alpaca_history.base_value else 0.0
+
+            return PortfolioHistory(
+                timestamps=timestamps,
+                equity=equity,
+                timeframe="1D",
+                base_value=base_value
+            )
+
+        except Exception as e:
+            self.logger.error(f"Failed to get portfolio history: {e}", exc_info=True)
+            # Return empty history on error
+            return PortfolioHistory(
+                timestamps=[],
+                equity=[],
+                timeframe="1D",
+                base_value=0.0
+            )
 
 
 class FakeBroker(BrokerInterface):
@@ -1102,6 +1180,56 @@ class FakeBroker(BrokerInterface):
 
     def get_broker_name(self) -> str:
         return "FakeBroker"
+
+    def get_portfolio_history(self, period: str = "30D") -> PortfolioHistory:
+        """Get mock portfolio history for simulation.
+
+        Generates synthetic equity curve data based on initial cash
+        and a slight upward trend with noise.
+
+        Args:
+            period: Time period. Options: "7D", "30D", "90D", "1Y", "ALL"
+
+        Returns:
+            PortfolioHistory with mock timestamps and equity values
+        """
+        import random
+
+        # Map period to number of days
+        period_days = {
+            "7D": 7,
+            "30D": 30,
+            "90D": 90,
+            "1Y": 365,
+            "ALL": 365,
+        }
+        num_days = period_days.get(period, 30)
+
+        # Generate timestamps
+        now = datetime.now(pytz.UTC)
+        timestamps = [
+            now - timedelta(days=num_days - i)
+            for i in range(num_days)
+        ]
+
+        # Generate mock equity curve
+        # Start at initial cash, add small random daily changes
+        equity = []
+        current_value = self.initial_cash
+        random.seed(42)  # Reproducible for testing
+
+        for i in range(num_days):
+            # Small daily change: -0.5% to +0.7% (slight positive bias)
+            daily_return = random.uniform(-0.005, 0.007)
+            current_value *= (1 + daily_return)
+            equity.append(round(current_value, 2))
+
+        return PortfolioHistory(
+            timestamps=timestamps,
+            equity=equity,
+            timeframe="1D",
+            base_value=self.initial_cash
+        )
 
     def get_execution_log(self) -> List[Dict[str, Any]]:
         """Get all executions for analysis"""

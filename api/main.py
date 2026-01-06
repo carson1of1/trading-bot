@@ -266,6 +266,19 @@ class AccountResponse(BaseModel):
     daily_pnl_percent: float
 
 
+class EquityHistoryPoint(BaseModel):
+    """Single point on equity history curve."""
+    timestamp: str
+    equity: float
+
+
+class EquityHistoryResponse(BaseModel):
+    """Response model for equity history endpoint."""
+    data: List[EquityHistoryPoint]
+    period: str
+    base_value: float
+
+
 class PositionResponse(BaseModel):
     """Single position response."""
     symbol: str
@@ -857,6 +870,54 @@ async def get_account():
             daily_pnl=round(account.daily_pnl, 2),
             daily_pnl_percent=round(account.daily_pnl_percent * 100, 2)
         )
+    except BrokerAPIError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/equity-history", response_model=EquityHistoryResponse)
+async def get_equity_history(period: str = "30D"):
+    """Get historical portfolio equity values.
+
+    Args:
+        period: Time period for history. Options: "7D", "30D", "90D", "1Y", "ALL"
+
+    Returns:
+        EquityHistoryResponse with timestamps and equity values
+    """
+    # Validate period
+    valid_periods = ["7D", "30D", "90D", "1Y", "ALL"]
+    if period not in valid_periods:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid period '{period}'. Must be one of: {valid_periods}"
+        )
+
+    try:
+        broker = get_broker()
+        history = broker.get_portfolio_history(period=period)
+
+        # Convert to response format
+        data = []
+        for ts, eq in zip(history.timestamps, history.equity):
+            # Format timestamp as ISO string
+            if hasattr(ts, 'isoformat'):
+                timestamp_str = ts.isoformat()
+            else:
+                timestamp_str = str(ts)
+
+            data.append(EquityHistoryPoint(
+                timestamp=timestamp_str,
+                equity=round(eq, 2)
+            ))
+
+        return EquityHistoryResponse(
+            data=data,
+            period=period,
+            base_value=round(history.base_value, 2)
+        )
+
     except BrokerAPIError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
