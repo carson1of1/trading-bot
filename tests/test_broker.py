@@ -613,6 +613,8 @@ class TestBrokerImports:
             Order,
             Account,
             BrokerAPIError,
+            RetryableOrderError,
+            RETRYABLE_ORDER_EXCEPTIONS,
             create_broker
         )
 
@@ -624,6 +626,8 @@ class TestBrokerImports:
         assert Order is not None
         assert Account is not None
         assert BrokerAPIError is not None
+        assert RetryableOrderError is not None
+        assert RETRYABLE_ORDER_EXCEPTIONS is not None
         assert create_broker is not None
 
 
