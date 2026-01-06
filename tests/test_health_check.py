@@ -370,3 +370,49 @@ class TestHealthCheckLogging:
             mock_bot.run_health_check()
 
         assert any('HEALTH_CHECK' in record.message for record in caplog.records)
+
+
+class TestHealthCheckIntegration:
+    """Test health check integration with trading cycle."""
+
+    @pytest.fixture
+    def mock_bot(self):
+        """Create a bot with mocked components."""
+        with patch('bot.VolatilityScanner') as mock_scanner, \
+             patch('bot.create_broker') as mock_broker, \
+             patch('bot.TradeLogger'), \
+             patch('bot.YFinanceDataFetcher'):
+
+            mock_scanner_instance = MagicMock()
+            mock_scanner_instance.scan.return_value = ['AAPL']
+            mock_scanner.return_value = mock_scanner_instance
+
+            mock_broker_instance = MagicMock()
+            mock_account = MagicMock()
+            mock_account.cash = 10000.0
+            mock_account.portfolio_value = 50000.0
+            mock_account.buying_power = 20000.0
+            mock_account.equity = 50000.0
+            mock_account.last_equity = 50000.0
+            mock_account.daily_pnl = 0.0
+            mock_broker_instance.get_account.return_value = mock_account
+            mock_broker_instance.get_positions.return_value = []
+            mock_broker_instance.get_open_orders.return_value = []
+            mock_broker.return_value = mock_broker_instance
+
+            bot = TradingBot()
+            bot.cash = 10000.0
+            bot.portfolio_value = 50000.0
+            yield bot
+
+    def test_trading_cycle_runs_health_check(self, mock_bot, caplog):
+        """Trading cycle calls run_health_check."""
+        import logging
+        with caplog.at_level(logging.INFO):
+            # Mock to avoid actual data fetching and market hour checks
+            mock_bot.market_hours.is_market_open = MagicMock(return_value=True)
+            mock_bot.fetch_data = MagicMock(return_value=None)
+            mock_bot.run_trading_cycle()
+
+        # Health check should have run
+        assert any('HEALTH_CHECK' in record.message for record in caplog.records)

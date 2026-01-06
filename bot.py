@@ -1212,6 +1212,9 @@ class TradingBot:
             # 0. Reconcile broker state BEFORE syncing (detect divergence)
             self._reconcile_broker_state()
 
+            # 0.5 Run health check (ODE-95)
+            self.run_health_check()
+
             # 1. Sync state
             self.sync_account()
             self.sync_positions()
