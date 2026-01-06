@@ -330,6 +330,60 @@ class TradingBot:
         if self.use_tiered_exits and self.exit_manager:
             self.exit_manager.unregister_position(symbol)
 
+    def _reconcile_broker_state(self):
+        """
+        Detect divergence between internal state and broker state.
+
+        Runs BEFORE sync_positions() to capture mismatches before overwriting.
+        Alert-only mode - logs warnings but takes no corrective action.
+        """
+        try:
+            broker_positions = {p.symbol: p for p in self.broker.get_positions()}
+        except Exception as e:
+            logger.error(f"RECONCILE | Failed to fetch broker positions: {e}", exc_info=True)
+            return
+
+        # 1. Ghost positions (internal but not broker)
+        for symbol, pos in self.open_positions.items():
+            if symbol not in broker_positions:
+                logger.warning(
+                    f"RECONCILE | GHOST | {symbol} | "
+                    f"Internal: {pos['qty']} shares @ ${pos['entry_price']:.2f} | "
+                    f"Broker: NOT FOUND | Action: Position may have been closed externally"
+                )
+
+        # 2. Orphan positions (broker but not internal)
+        for symbol, bp in broker_positions.items():
+            if symbol not in self.open_positions:
+                logger.warning(
+                    f"RECONCILE | ORPHAN | {symbol} | "
+                    f"Internal: NOT TRACKED | "
+                    f"Broker: {int(bp.qty)} shares @ ${float(bp.avg_entry_price):.2f} | "
+                    f"Action: Position opened externally or bot restarted mid-trade"
+                )
+                continue  # Skip further checks for orphans
+
+            pos = self.open_positions[symbol]
+
+            # 3. Quantity mismatch
+            if int(bp.qty) != pos['qty']:
+                logger.warning(
+                    f"RECONCILE | QTY_MISMATCH | {symbol} | "
+                    f"Internal: {pos['qty']} shares | Broker: {int(bp.qty)} shares | "
+                    f"Action: Partial fill or manual trade occurred"
+                )
+
+            # 4. Entry price mismatch (>1% tolerance)
+            broker_price = float(bp.avg_entry_price)
+            if pos['entry_price'] > 0:
+                price_diff_pct = abs(broker_price - pos['entry_price']) / pos['entry_price']
+                if price_diff_pct > 0.01:
+                    logger.warning(
+                        f"RECONCILE | PRICE_MISMATCH | {symbol} | "
+                        f"Internal: ${pos['entry_price']:.2f} | Broker: ${broker_price:.2f} | "
+                        f"Diff: {price_diff_pct*100:.2f}% | Action: Significant slippage or averaging occurred"
+                    )
+
     def _calculate_atr(self, data: pd.DataFrame, period: int = 14) -> float:
         """
         Calculate ATR (Average True Range) from historical data.
@@ -1027,6 +1081,7 @@ class TradingBot:
         Run one trading cycle.
 
         Called every hour (or on demand):
+        0. Reconcile broker state (detect divergence)
         1. Sync account and update drawdown guard
         2. Handle hard limit liquidation if needed
         3. Check exits for all positions
@@ -1039,6 +1094,9 @@ class TradingBot:
             expected_candle_hour = (now.hour - 1) % 24  # Previous hour's candle
             logger.info(f"=== Trading Cycle Start @ {now.strftime('%H:%M:%S')} EST ===")
             logger.info(f"Expecting candles from {expected_candle_hour}:00 hour")
+
+            # 0. Reconcile broker state BEFORE syncing (detect divergence)
+            self._reconcile_broker_state()
 
             # 1. Sync state
             self.sync_account()
