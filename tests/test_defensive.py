@@ -30,6 +30,7 @@ trading:
   watchlist_file: "universe.yaml"
 risk_management:
   max_open_positions: 5
+  max_position_dollars: 50000  # High limit to prevent position size guard triggering in tests
 exit_manager:
   enabled: false
 logging:

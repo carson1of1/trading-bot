@@ -1076,6 +1076,90 @@ class TradingBot:
             logger.error(f"Error fetching data for {symbol}: {e}", exc_info=True)
             return None
 
+    def _check_position_size_violations(self) -> list:
+        """
+        Check for and liquidate positions exceeding size limits.
+
+        Checks each position against:
+        - max_position_dollars: Absolute dollar limit (default $10,000)
+        - max_position_size_pct: Percentage of portfolio (from config)
+
+        Returns:
+            List of violation dicts with symbol, value, reason, liquidated
+        """
+        violations = []
+
+        risk_config = self.config.get('risk_management', {})
+        max_dollars = risk_config.get('max_position_dollars', 10000)
+        max_pct = risk_config.get('max_position_size_pct', 10.0) / 100
+
+        for symbol, pos in list(self.open_positions.items()):
+            qty = pos['qty']
+            current_price = pos.get('current_price', pos.get('entry_price', 0))
+            direction = pos.get('direction', 'LONG')
+            value = qty * current_price
+
+            violation = None
+
+            # Check absolute dollar limit
+            if value > max_dollars:
+                violation = {
+                    'symbol': symbol,
+                    'value': value,
+                    'limit': max_dollars,
+                    'reason': 'exceeds_max_position_dollars'
+                }
+            # Check percentage of portfolio limit
+            elif self.portfolio_value > 0 and value > self.portfolio_value * max_pct:
+                violation = {
+                    'symbol': symbol,
+                    'value': value,
+                    'limit': self.portfolio_value * max_pct,
+                    'reason': 'exceeds_max_position_pct'
+                }
+
+            if violation:
+                logger.critical(
+                    f"POSITION_VIOLATION | {symbol} | "
+                    f"Value: ${value:,.2f} | Limit: ${violation['limit']:,.2f} | "
+                    f"Reason: {violation['reason']} | ACTION: LIQUIDATING"
+                )
+
+                # Force liquidate
+                try:
+                    side = 'sell' if direction == 'LONG' else 'buy'
+                    order = self.broker.submit_order(
+                        symbol=symbol,
+                        qty=qty,
+                        side=side,
+                        type='market',
+                        time_in_force='day'
+                    )
+
+                    if order:
+                        violation['liquidated'] = True
+                        violation['order_id'] = order.id
+
+                        # Cleanup position tracking
+                        self._cleanup_position(symbol)
+                        del self.open_positions[symbol]
+
+                        logger.critical(
+                            f"POSITION_VIOLATION | {symbol} | LIQUIDATED | Order: {order.id}"
+                        )
+                    else:
+                        violation['liquidated'] = False
+                        logger.error(f"POSITION_VIOLATION | {symbol} | LIQUIDATION FAILED - no order")
+
+                except Exception as e:
+                    violation['liquidated'] = False
+                    violation['error'] = str(e)
+                    logger.error(f"POSITION_VIOLATION | {symbol} | LIQUIDATION ERROR: {e}", exc_info=True)
+
+                violations.append(violation)
+
+        return violations
+
     def run_trading_cycle(self):
         """
         Run one trading cycle.
@@ -1138,7 +1222,13 @@ class TradingBot:
                     logger.warning("DRAWDOWN_GUARD | Day halted - skipping cycle")
                     return
 
-            # 2. Check exits for all positions
+            # 2. Check position size violations (before exit checks)
+            # FIX (Jan 2026): ODE-89 - Auto-liquidate oversized positions
+            violations = self._check_position_size_violations()
+            if violations:
+                logger.warning(f"POSITION_SIZE_GUARD | Liquidated {len(violations)} oversized positions")
+
+            # 3. Check exits for all positions
             logger.info(f"Checking exits for {len(self.open_positions)} positions")
             for symbol, position in list(self.open_positions.items()):
                 # FIX (Jan 2026): Use 100 bars to ensure sufficient data for ATR and indicators
@@ -1183,7 +1273,7 @@ class TradingBot:
                     logger.info(f"EXIT_TRIGGER | {symbol} | {exit_signal.get('reason', 'unknown')} @ ${exit_signal.get('price', current_price):.2f}")
                     self.execute_exit(symbol, exit_signal)
 
-            # 3. Check entries for watchlist (only if not at position limit and entries allowed)
+            # 4. Check entries for watchlist (only if not at position limit and entries allowed)
             max_positions = self.config.get('risk_management', {}).get('max_open_positions', 5)
             if len(self.open_positions) >= max_positions:
                 logger.info(f"At max positions ({max_positions}), skipping entries")
