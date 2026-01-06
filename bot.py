@@ -1581,6 +1581,38 @@ class TradingBot:
         # Check ExitManager registration
         results['checks']['positions_registered'] = self._check_exit_manager_health()
 
+        # Check strategy manager
+        if self.strategy_manager and len(self.strategy_manager.strategies) > 0:
+            strategy_names = [s.__class__.__name__ for s in self.strategy_manager.strategies]
+            results['checks']['strategy_manager_ready'] = {
+                'status': 'PASS',
+                'message': f'{len(self.strategy_manager.strategies)} strategies: {strategy_names}'
+            }
+        else:
+            results['checks']['strategy_manager_ready'] = {
+                'status': 'FAIL',
+                'message': 'No strategies loaded'
+            }
+
+        # Kill switch status (INFO only)
+        results['checks']['kill_switch_status'] = {
+            'status': 'INFO',
+            'message': 'TRIGGERED' if self.kill_switch_triggered else 'Not triggered'
+        }
+
+        # Drawdown guard status (INFO only)
+        if self.drawdown_guard.enabled:
+            status = self.drawdown_guard.get_status()
+            results['checks']['drawdown_guard_status'] = {
+                'status': 'INFO',
+                'message': f"Tier: {status.get('tier', 'NORMAL')}, Entries: {'allowed' if status.get('entries_allowed', True) else 'BLOCKED'}"
+            }
+        else:
+            results['checks']['drawdown_guard_status'] = {
+                'status': 'INFO',
+                'message': 'Disabled'
+            }
+
         # Calculate summary
         for check_name, check_result in results['checks'].items():
             results['summary']['total_checks'] += 1

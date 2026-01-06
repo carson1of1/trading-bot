@@ -244,3 +244,91 @@ class TestExitManagerCheck:
         result = mock_bot.run_health_check()
         assert result['checks']['positions_registered']['status'] == 'FAIL'
         assert 'AAPL' in result['checks']['positions_registered']['message']
+
+
+class TestStrategyManagerCheck:
+    """Test strategy manager health check."""
+
+    @pytest.fixture
+    def mock_bot(self):
+        """Create a bot with mocked components."""
+        with patch('bot.VolatilityScanner') as mock_scanner, \
+             patch('bot.create_broker') as mock_broker, \
+             patch('bot.TradeLogger'), \
+             patch('bot.YFinanceDataFetcher'):
+
+            mock_scanner_instance = MagicMock()
+            mock_scanner_instance.scan.return_value = ['AAPL']
+            mock_scanner.return_value = mock_scanner_instance
+
+            mock_broker_instance = MagicMock()
+            mock_account = MagicMock()
+            mock_account.cash = 10000.0
+            mock_account.portfolio_value = 50000.0
+            mock_account.last_equity = 50000.0
+            mock_broker_instance.get_account.return_value = mock_account
+            mock_broker_instance.get_positions.return_value = []
+            mock_broker.return_value = mock_broker_instance
+
+            bot = TradingBot()
+            bot.cash = 10000.0
+            bot.portfolio_value = 50000.0
+            yield bot
+
+    def test_strategy_manager_passes_with_strategies(self, mock_bot):
+        """Strategy manager check passes when strategies loaded."""
+        # Bot should have strategies loaded by default from config
+        result = mock_bot.run_health_check()
+        assert result['checks']['strategy_manager_ready']['status'] == 'PASS'
+
+    def test_strategy_manager_fails_with_no_strategies(self, mock_bot):
+        """Strategy manager check fails when no strategies."""
+        mock_bot.strategy_manager.strategies = []
+        result = mock_bot.run_health_check()
+        assert result['checks']['strategy_manager_ready']['status'] == 'FAIL'
+
+
+class TestStatusChecks:
+    """Test INFO-level status checks (kill switch, drawdown guard)."""
+
+    @pytest.fixture
+    def mock_bot(self):
+        """Create a bot with mocked components."""
+        with patch('bot.VolatilityScanner') as mock_scanner, \
+             patch('bot.create_broker') as mock_broker, \
+             patch('bot.TradeLogger'), \
+             patch('bot.YFinanceDataFetcher'):
+
+            mock_scanner_instance = MagicMock()
+            mock_scanner_instance.scan.return_value = ['AAPL']
+            mock_scanner.return_value = mock_scanner_instance
+
+            mock_broker_instance = MagicMock()
+            mock_account = MagicMock()
+            mock_account.cash = 10000.0
+            mock_account.portfolio_value = 50000.0
+            mock_account.last_equity = 50000.0
+            mock_broker_instance.get_account.return_value = mock_account
+            mock_broker_instance.get_positions.return_value = []
+            mock_broker.return_value = mock_broker_instance
+
+            bot = TradingBot()
+            bot.cash = 10000.0
+            bot.portfolio_value = 50000.0
+            yield bot
+
+    def test_kill_switch_status_is_info(self, mock_bot):
+        """Kill switch status is INFO, not PASS/FAIL."""
+        result = mock_bot.run_health_check()
+        assert result['checks']['kill_switch_status']['status'] == 'INFO'
+
+    def test_kill_switch_triggered_reported(self, mock_bot):
+        """Kill switch triggered state is reported."""
+        mock_bot.kill_switch_triggered = True
+        result = mock_bot.run_health_check()
+        assert 'TRIGGERED' in result['checks']['kill_switch_status']['message']
+
+    def test_drawdown_guard_status_is_info(self, mock_bot):
+        """Drawdown guard status is INFO."""
+        result = mock_bot.run_health_check()
+        assert result['checks']['drawdown_guard_status']['status'] == 'INFO'
