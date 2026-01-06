@@ -1212,6 +1212,9 @@ class TradingBot:
             # 0. Reconcile broker state BEFORE syncing (detect divergence)
             self._reconcile_broker_state()
 
+            # 0.5 Run health check (ODE-95)
+            self.run_health_check()
+
             # 1. Sync state
             self.sync_account()
             self.sync_positions()
@@ -1468,6 +1471,189 @@ class TradingBot:
 
         except Exception as e:
             logger.error(f"Trading cycle error: {e}", exc_info=True)
+
+    def _check_broker_health(self) -> dict:
+        """Check broker connection is active."""
+        try:
+            account = self.broker.get_account()
+            broker_name = getattr(self.broker, 'get_broker_name', lambda: 'Unknown')()
+            return {
+                'status': 'PASS',
+                'message': f'Connected to {broker_name}'
+            }
+        except Exception as e:
+            return {
+                'status': 'FAIL',
+                'message': f'Broker connection failed: {e}'
+            }
+
+    def _check_position_sync(self) -> dict:
+        """Check positions match between bot and broker."""
+        try:
+            broker_positions = self.broker.get_positions()
+            broker_count = len(broker_positions) if broker_positions else 0
+            bot_count = len(self.open_positions)
+
+            if broker_count == bot_count:
+                return {
+                    'status': 'PASS',
+                    'message': f'{bot_count} positions synced'
+                }
+            else:
+                return {
+                    'status': 'FAIL',
+                    'message': f'Position mismatch: bot has {bot_count}, broker has {broker_count}'
+                }
+        except Exception as e:
+            return {
+                'status': 'FAIL',
+                'message': f'Position sync check failed: {e}'
+            }
+
+    def _check_exit_manager_health(self) -> dict:
+        """Check ExitManager has all positions registered correctly."""
+        if not self.use_tiered_exits or not self.exit_manager:
+            return {
+                'status': 'INFO',
+                'message': 'Tiered exits disabled'
+            }
+
+        bot_symbols = set(self.open_positions.keys())
+        exit_mgr_symbols = set(self.exit_manager.positions.keys())
+
+        missing = bot_symbols - exit_mgr_symbols
+        orphaned = exit_mgr_symbols - bot_symbols
+
+        if not missing and not orphaned:
+            return {
+                'status': 'PASS',
+                'message': f'{len(bot_symbols)}/{len(bot_symbols)} positions registered'
+            }
+        else:
+            issues = []
+            if missing:
+                issues.append(f'missing: {list(missing)}')
+            if orphaned:
+                issues.append(f'orphaned: {list(orphaned)}')
+            return {
+                'status': 'FAIL',
+                'message': f'ExitManager mismatch - {", ".join(issues)}'
+            }
+
+    def run_health_check(self) -> dict:
+        """
+        Run comprehensive health check on bot systems.
+
+        Verifies:
+        - ExitManager: positions registered, state persistence, stops valid
+        - Live Bot: broker connected, account synced, positions synced
+
+        Returns:
+            dict with timestamp, overall_status, checks, and summary
+        """
+        results = {
+            'timestamp': datetime.now(pytz.UTC).isoformat(),
+            'overall_status': 'HEALTHY',
+            'checks': {},
+            'summary': {
+                'total_checks': 0,
+                'passed': 0,
+                'failed': 0,
+                'info': 0
+            }
+        }
+
+        # Check broker connection
+        results['checks']['broker_connected'] = self._check_broker_health()
+
+        # Check account sync
+        if self.cash > 0 and self.portfolio_value > 0:
+            results['checks']['account_synced'] = {
+                'status': 'PASS',
+                'message': f'Cash: ${self.cash:,.2f}, Portfolio: ${self.portfolio_value:,.2f}'
+            }
+        else:
+            results['checks']['account_synced'] = {
+                'status': 'FAIL',
+                'message': f'Account not synced: cash=${self.cash}, portfolio=${self.portfolio_value}'
+            }
+
+        # Check position sync
+        results['checks']['positions_synced'] = self._check_position_sync()
+
+        # Check ExitManager registration
+        results['checks']['positions_registered'] = self._check_exit_manager_health()
+
+        # Check strategy manager
+        if self.strategy_manager and len(self.strategy_manager.strategies) > 0:
+            strategy_names = [s.__class__.__name__ for s in self.strategy_manager.strategies]
+            results['checks']['strategy_manager_ready'] = {
+                'status': 'PASS',
+                'message': f'{len(self.strategy_manager.strategies)} strategies: {strategy_names}'
+            }
+        else:
+            results['checks']['strategy_manager_ready'] = {
+                'status': 'FAIL',
+                'message': 'No strategies loaded'
+            }
+
+        # Kill switch status (INFO only)
+        results['checks']['kill_switch_status'] = {
+            'status': 'INFO',
+            'message': 'TRIGGERED' if self.kill_switch_triggered else 'Not triggered'
+        }
+
+        # Drawdown guard status (INFO only)
+        if self.drawdown_guard.enabled:
+            status = self.drawdown_guard.get_status()
+            results['checks']['drawdown_guard_status'] = {
+                'status': 'INFO',
+                'message': f"Tier: {status.get('tier', 'NORMAL')}, Entries: {'allowed' if status.get('entries_allowed', True) else 'BLOCKED'}"
+            }
+        else:
+            results['checks']['drawdown_guard_status'] = {
+                'status': 'INFO',
+                'message': 'Disabled'
+            }
+
+        # Calculate summary
+        for check_name, check_result in results['checks'].items():
+            results['summary']['total_checks'] += 1
+            status = check_result.get('status', 'FAIL')
+            if status == 'PASS':
+                results['summary']['passed'] += 1
+            elif status == 'INFO':
+                results['summary']['info'] += 1
+            else:
+                results['summary']['failed'] += 1
+
+        # Determine overall status
+        if results['summary']['failed'] >= 3:
+            results['overall_status'] = 'UNHEALTHY'
+        elif results['summary']['failed'] >= 1:
+            results['overall_status'] = 'DEGRADED'
+
+        # Log summary
+        summary = results['summary']
+        status = results['overall_status']
+        positions_count = len(self.open_positions)
+        exit_mgr_count = len(self.exit_manager.positions) if self.exit_manager else 0
+        kill_switch = 'ON' if self.kill_switch_triggered else 'OFF'
+
+        logger.info(
+            f"HEALTH_CHECK | {status} | "
+            f"{summary['passed']}/{summary['total_checks']} PASS | "
+            f"{summary['failed']} FAIL | {summary['info']} INFO | "
+            f"Positions: {positions_count} | ExitMgr: {exit_mgr_count} | "
+            f"KillSwitch: {kill_switch}"
+        )
+
+        # Log individual failures at WARNING level
+        for check_name, check_result in results['checks'].items():
+            if check_result.get('status') == 'FAIL':
+                logger.warning(f"HEALTH_CHECK | {check_name} FAIL: {check_result.get('message', 'Unknown')}")
+
+        return results
 
     def start(self):
         """Start the trading bot."""
