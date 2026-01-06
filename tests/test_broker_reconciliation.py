@@ -165,3 +165,53 @@ proven_symbols:
         bot._reconcile_broker_state()
 
         assert 'PRICE_MISMATCH' not in caplog.text
+
+    def test_broker_api_failure_logs_error_and_returns(self, bot_with_mocks, caplog):
+        """Broker API failure logs error and returns gracefully."""
+        bot = bot_with_mocks
+
+        # Broker raises exception
+        bot.broker.get_positions.side_effect = Exception("API timeout")
+
+        # Should not raise, should log error
+        bot._reconcile_broker_state()
+
+        assert 'RECONCILE | Failed to fetch broker positions' in caplog.text
+        assert 'API timeout' in caplog.text
+
+    def test_no_divergence_no_warnings(self, bot_with_mocks, caplog):
+        """When internal matches broker exactly, no warnings logged."""
+        bot = bot_with_mocks
+
+        # Internal state
+        bot.open_positions = {
+            'AAPL': {
+                'symbol': 'AAPL',
+                'qty': 100,
+                'entry_price': 150.00,
+                'direction': 'LONG',
+                'entry_time': datetime.now()
+            }
+        }
+
+        # Broker matches exactly
+        mock_position = MagicMock()
+        mock_position.symbol = 'AAPL'
+        mock_position.qty = 100
+        mock_position.avg_entry_price = 150.00
+        bot.broker.get_positions.return_value = [mock_position]
+
+        bot._reconcile_broker_state()
+
+        assert 'RECONCILE |' not in caplog.text
+
+    def test_empty_positions_no_warnings(self, bot_with_mocks, caplog):
+        """When both internal and broker are empty, no warnings logged."""
+        bot = bot_with_mocks
+
+        bot.open_positions = {}
+        bot.broker.get_positions.return_value = []
+
+        bot._reconcile_broker_state()
+
+        assert 'RECONCILE |' not in caplog.text
