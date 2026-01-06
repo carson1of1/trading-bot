@@ -1229,49 +1229,57 @@ class TradingBot:
                 logger.warning(f"POSITION_SIZE_GUARD | Liquidated {len(violations)} oversized positions")
 
             # 3. Check exits for all positions
+            # FIX (Jan 2026): ODE-86 - Wrap each position in try/except to prevent
+            # one bad position from crashing the entire exit loop. Critical for ensuring
+            # stop losses execute on ALL positions even if one has an error.
             logger.info(f"Checking exits for {len(self.open_positions)} positions")
             for symbol, position in list(self.open_positions.items()):
-                # FIX (Jan 2026): Use 100 bars to ensure sufficient data for ATR and indicators
-                # Previously 50 bars could cause insufficient warmup for some calculations
-                data = self.fetch_data(symbol, bars=100)
-                if data is None:
-                    logger.warning(f"EXIT_CHECK | {symbol} | No data available")
-                    continue
+                try:
+                    # FIX (Jan 2026): Use 100 bars to ensure sufficient data for ATR and indicators
+                    # Previously 50 bars could cause insufficient warmup for some calculations
+                    data = self.fetch_data(symbol, bars=100)
+                    if data is None:
+                        logger.warning(f"EXIT_CHECK | {symbol} | No data available")
+                        continue
 
-                current_price = data['close'].iloc[-1]
-                bar_high = data['high'].iloc[-1]
-                bar_low = data['low'].iloc[-1]
+                    current_price = data['close'].iloc[-1]
+                    bar_high = data['high'].iloc[-1]
+                    bar_low = data['low'].iloc[-1]
 
-                # FIX (Jan 5, 2026): Defensive check for missing entry_price
-                # This prevents KeyError crashes when position dict is malformed
-                # (can happen if sync_positions fails mid-way or data corruption)
-                if 'entry_price' not in position:
-                    logger.error(f"EXIT_CHECK | {symbol} | SKIPPED - missing entry_price in position dict: {position}")
-                    continue
+                    # FIX (Jan 5, 2026): Defensive check for missing entry_price
+                    # This prevents KeyError crashes when position dict is malformed
+                    # (can happen if sync_positions fails mid-way or data corruption)
+                    if 'entry_price' not in position:
+                        logger.error(f"EXIT_CHECK | {symbol} | SKIPPED - missing entry_price in position dict: {position}")
+                        continue
 
-                entry_price = position['entry_price']
-                direction = position.get('direction', 'LONG')
+                    entry_price = position['entry_price']
+                    direction = position.get('direction', 'LONG')
 
-                # Calculate P&L for logging
-                if direction == 'LONG':
-                    pnl_pct = (current_price - entry_price) / entry_price * 100
-                else:
-                    pnl_pct = (entry_price - current_price) / entry_price * 100
+                    # Calculate P&L for logging
+                    if direction == 'LONG':
+                        pnl_pct = (current_price - entry_price) / entry_price * 100
+                    else:
+                        pnl_pct = (entry_price - current_price) / entry_price * 100
 
-                # FIX (Jan 2026): Increment bars_held for ExitManager minimum hold time
-                # Backtest.py:726-727 does this - without it, min_hold_bars never triggers
-                if self.use_tiered_exits and self.exit_manager and symbol in self.exit_manager.positions:
-                    self.exit_manager.increment_bars_held(symbol)
-                    bars_held = self.exit_manager.positions[symbol].bars_held
-                    state = self.exit_manager.positions[symbol]
-                    hard_stop = entry_price * (1 - state.hard_stop_pct) if direction == 'LONG' else entry_price * (1 + state.hard_stop_pct)
-                    logger.info(f"EXIT_CHECK | {symbol} | ${current_price:.2f} ({pnl_pct:+.2f}%) | Stop: ${hard_stop:.2f} | Bars: {bars_held}")
+                    # FIX (Jan 2026): Increment bars_held for ExitManager minimum hold time
+                    # Backtest.py:726-727 does this - without it, min_hold_bars never triggers
+                    if self.use_tiered_exits and self.exit_manager and symbol in self.exit_manager.positions:
+                        self.exit_manager.increment_bars_held(symbol)
+                        bars_held = self.exit_manager.positions[symbol].bars_held
+                        state = self.exit_manager.positions[symbol]
+                        hard_stop = entry_price * (1 - state.hard_stop_pct) if direction == 'LONG' else entry_price * (1 + state.hard_stop_pct)
+                        logger.info(f"EXIT_CHECK | {symbol} | ${current_price:.2f} ({pnl_pct:+.2f}%) | Stop: ${hard_stop:.2f} | Bars: {bars_held}")
 
-                exit_signal = self.check_exit(symbol, position, current_price, bar_high, bar_low, data)
+                    exit_signal = self.check_exit(symbol, position, current_price, bar_high, bar_low, data)
 
-                if exit_signal and exit_signal.get('exit'):
-                    logger.info(f"EXIT_TRIGGER | {symbol} | {exit_signal.get('reason', 'unknown')} @ ${exit_signal.get('price', current_price):.2f}")
-                    self.execute_exit(symbol, exit_signal)
+                    if exit_signal and exit_signal.get('exit'):
+                        logger.info(f"EXIT_TRIGGER | {symbol} | {exit_signal.get('reason', 'unknown')} @ ${exit_signal.get('price', current_price):.2f}")
+                        self.execute_exit(symbol, exit_signal)
+
+                except Exception as e:
+                    logger.error(f"EXIT_CHECK | {symbol} | FAILED: {e}", exc_info=True)
+                    continue  # Don't let one bad position crash all exits
 
             # 4. Check entries for watchlist (only if not at position limit and entries allowed)
             max_positions = self.config.get('risk_management', {}).get('max_open_positions', 5)
