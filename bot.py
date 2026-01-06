@@ -373,6 +373,17 @@ class TradingBot:
                     f"Action: Partial fill or manual trade occurred"
                 )
 
+            # 4. Entry price mismatch (>1% tolerance)
+            broker_price = float(bp.avg_entry_price)
+            if pos['entry_price'] > 0:
+                price_diff_pct = abs(broker_price - pos['entry_price']) / pos['entry_price']
+                if price_diff_pct > 0.01:
+                    logger.warning(
+                        f"RECONCILE | PRICE_MISMATCH | {symbol} | "
+                        f"Internal: ${pos['entry_price']:.2f} | Broker: ${broker_price:.2f} | "
+                        f"Diff: {price_diff_pct*100:.2f}% | Action: Significant slippage or averaging occurred"
+                    )
+
     def _calculate_atr(self, data: pd.DataFrame, period: int = 14) -> float:
         """
         Calculate ATR (Average True Range) from historical data.

@@ -110,3 +110,58 @@ proven_symbols:
         assert 'RECONCILE | QTY_MISMATCH | AAPL' in caplog.text
         assert 'Internal: 100 shares' in caplog.text
         assert 'Broker: 75 shares' in caplog.text
+
+    def test_price_mismatch_above_tolerance_logs_warning(self, bot_with_mocks, caplog):
+        """Price mismatch >1% logs warning."""
+        bot = bot_with_mocks
+
+        # Internal has entry at $100
+        bot.open_positions = {
+            'AAPL': {
+                'symbol': 'AAPL',
+                'qty': 100,
+                'entry_price': 100.00,
+                'direction': 'LONG',
+                'entry_time': datetime.now()
+            }
+        }
+
+        # Broker has entry at $102 (2% difference)
+        mock_position = MagicMock()
+        mock_position.symbol = 'AAPL'
+        mock_position.qty = 100
+        mock_position.avg_entry_price = 102.00
+        bot.broker.get_positions.return_value = [mock_position]
+
+        bot._reconcile_broker_state()
+
+        assert 'RECONCILE | PRICE_MISMATCH | AAPL' in caplog.text
+        assert 'Internal: $100.00' in caplog.text
+        assert 'Broker: $102.00' in caplog.text
+        assert 'Diff: 2.00%' in caplog.text
+
+    def test_price_mismatch_within_tolerance_no_warning(self, bot_with_mocks, caplog):
+        """Price mismatch <1% does NOT log warning."""
+        bot = bot_with_mocks
+
+        # Internal has entry at $100
+        bot.open_positions = {
+            'AAPL': {
+                'symbol': 'AAPL',
+                'qty': 100,
+                'entry_price': 100.00,
+                'direction': 'LONG',
+                'entry_time': datetime.now()
+            }
+        }
+
+        # Broker has entry at $100.50 (0.5% difference - within tolerance)
+        mock_position = MagicMock()
+        mock_position.symbol = 'AAPL'
+        mock_position.qty = 100
+        mock_position.avg_entry_price = 100.50
+        bot.broker.get_positions.return_value = [mock_position]
+
+        bot._reconcile_broker_state()
+
+        assert 'PRICE_MISMATCH' not in caplog.text
