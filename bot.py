@@ -363,6 +363,16 @@ class TradingBot:
                 )
                 continue  # Skip further checks for orphans
 
+            pos = self.open_positions[symbol]
+
+            # 3. Quantity mismatch
+            if int(bp.qty) != pos['qty']:
+                logger.warning(
+                    f"RECONCILE | QTY_MISMATCH | {symbol} | "
+                    f"Internal: {pos['qty']} shares | Broker: {int(bp.qty)} shares | "
+                    f"Action: Partial fill or manual trade occurred"
+                )
+
     def _calculate_atr(self, data: pd.DataFrame, period: int = 14) -> float:
         """
         Calculate ATR (Average True Range) from historical data.

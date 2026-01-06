@@ -82,3 +82,31 @@ proven_symbols:
         assert 'RECONCILE | ORPHAN | MSFT' in caplog.text
         assert 'Internal: NOT TRACKED' in caplog.text
         assert 'Broker: 50 shares @ $400.00' in caplog.text
+
+    def test_quantity_mismatch_logs_warning(self, bot_with_mocks, caplog):
+        """Quantity mismatch logs warning."""
+        bot = bot_with_mocks
+
+        # Internal has 100 shares
+        bot.open_positions = {
+            'AAPL': {
+                'symbol': 'AAPL',
+                'qty': 100,
+                'entry_price': 150.00,
+                'direction': 'LONG',
+                'entry_time': datetime.now()
+            }
+        }
+
+        # Broker has 75 shares (partial fill or manual trade)
+        mock_position = MagicMock()
+        mock_position.symbol = 'AAPL'
+        mock_position.qty = 75
+        mock_position.avg_entry_price = 150.00
+        bot.broker.get_positions.return_value = [mock_position]
+
+        bot._reconcile_broker_state()
+
+        assert 'RECONCILE | QTY_MISMATCH | AAPL' in caplog.text
+        assert 'Internal: 100 shares' in caplog.text
+        assert 'Broker: 75 shares' in caplog.text
