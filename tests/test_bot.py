@@ -1201,6 +1201,7 @@ proven_symbols:
         # Mock account sync
         mock_account = MagicMock()
         mock_account.cash = 100000.0
+        mock_account.equity = 100000.0  # ODE-90: Required for drawdown guard
         mock_account.portfolio_value = 100000.0
         mock_account.last_equity = 100000.0
         bot.broker.get_account.return_value = mock_account
@@ -1262,6 +1263,7 @@ proven_symbols:
 
         mock_account = MagicMock()
         mock_account.cash = 100000.0
+        mock_account.equity = 100000.0  # ODE-90: Required for drawdown guard
         mock_account.portfolio_value = 100000.0
         mock_account.last_equity = 100000.0
         bot.broker.get_account.return_value = mock_account
