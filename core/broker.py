@@ -24,6 +24,73 @@ from .config import get_global_config
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
+# Import requests exceptions for retry handling
+try:
+    import requests.exceptions
+except ImportError:
+    requests = None
+
+
+class RetryableOrderError(Exception):
+    """Exception for transient order failures that should be retried.
+
+    Used to wrap rate limit (429), temporary outages (5xx), and other
+    transient API errors that are likely to succeed on retry.
+    """
+    def __init__(self, message: str, original_exception: Exception = None):
+        super().__init__(message)
+        self.original_exception = original_exception
+
+
+# Tuple of exception types that should trigger order retry
+# These are transient failures that may succeed on a subsequent attempt
+RETRYABLE_ORDER_EXCEPTIONS = (
+    ConnectionError,
+    TimeoutError,
+    RetryableOrderError,
+)
+
+# Add requests exceptions if available
+if requests is not None:
+    RETRYABLE_ORDER_EXCEPTIONS = RETRYABLE_ORDER_EXCEPTIONS + (
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        requests.exceptions.ReadTimeout,
+        requests.exceptions.ConnectTimeout,
+    )
+
+
+def _is_retryable_api_error(exception: Exception) -> bool:
+    """Check if an API exception is retryable based on status code or message.
+
+    Args:
+        exception: The exception to check
+
+    Returns:
+        True if the error is transient and should be retried
+    """
+    # Check for status_code attribute (Alpaca APIError)
+    status_code = getattr(exception, 'status_code', None)
+    if status_code is not None:
+        # Rate limit (429) - definitely retryable
+        if status_code == 429:
+            return True
+        # Server errors (5xx) - likely transient
+        if 500 <= status_code < 600:
+            return True
+
+    # Check error message for common transient patterns
+    error_msg = str(exception).lower()
+    retryable_patterns = [
+        'rate limit',
+        'too many requests',
+        'service unavailable',
+        'gateway timeout',
+        'connection reset',
+        'temporary',
+    ]
+    return any(pattern in error_msg for pattern in retryable_patterns)
+
 
 # Retry decorator for transient API failures
 def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff: float = 2.0,
@@ -397,7 +464,19 @@ class AlpacaBroker(BrokerInterface):
         stop_price: Optional[float] = None,
         **kwargs
     ) -> Order:
-        """Submit order to Alpaca."""
+        """Submit order to Alpaca with retry logic for transient failures.
+
+        Retries on:
+        - ConnectionError, TimeoutError (network issues)
+        - Rate limit errors (429)
+        - Temporary API outages (5xx)
+
+        Does NOT retry on:
+        - Insufficient buying power
+        - Invalid symbol
+        - Order rejected by exchange
+        - Other business logic errors
+        """
         # Validate symbol input
         if not symbol or not isinstance(symbol, str) or not symbol.strip():
             raise BrokerAPIError(f"Invalid symbol: '{symbol}'. Symbol must be a non-empty string.")
@@ -431,46 +510,92 @@ class AlpacaBroker(BrokerInterface):
         if type in ['stop', 'stop_limit'] and stop_price is None:
             raise BrokerAPIError(f"stop_price required for {type} orders")
 
-        self._check_rate_limit()
+        # Retry configuration for order submission
+        max_retries = 3
+        delay = 1.0
+        backoff = 2.0
+        last_exception = None
+        current_delay = delay
 
-        try:
-            self.logger.info(
-                f"Submitting order: {side.upper()} {qty} {symbol} @ {type} "
-                f"(limit={limit_price}, stop={stop_price})"
-            )
+        for attempt in range(max_retries + 1):
+            self._check_rate_limit()
 
-            alpaca_order = self.api.submit_order(
-                symbol=symbol,
-                qty=qty,
-                side=side,
-                type=type,
-                time_in_force=time_in_force,
-                limit_price=limit_price,
-                stop_price=stop_price
-            )
+            try:
+                self.logger.info(
+                    f"Submitting order: {side.upper()} {qty} {symbol} @ {type} "
+                    f"(limit={limit_price}, stop={stop_price})"
+                )
 
-            self.logger.info(f"Order submitted successfully: {alpaca_order.id}")
+                alpaca_order = self.api.submit_order(
+                    symbol=symbol,
+                    qty=qty,
+                    side=side,
+                    type=type,
+                    time_in_force=time_in_force,
+                    limit_price=limit_price,
+                    stop_price=stop_price
+                )
 
-            return Order(
-                id=alpaca_order.id,
-                symbol=alpaca_order.symbol,
-                qty=float(alpaca_order.qty),
-                side=alpaca_order.side,
-                type=alpaca_order.type,
-                status=alpaca_order.status,
-                limit_price=float(alpaca_order.limit_price) if alpaca_order.limit_price else None,
-                stop_price=float(alpaca_order.stop_price) if alpaca_order.stop_price else None,
-                submitted_at=alpaca_order.submitted_at
-            )
-        except Exception as e:
-            self.logger.error(
-                f"Failed to submit order: {side.upper()} {qty} {symbol} @ {type} - {e}",
-                exc_info=True
-            )
-            raise BrokerAPIError(
-                f"Order submission failed for {symbol}: {e}",
-                original_exception=e
-            )
+                self.logger.info(f"Order submitted successfully: {alpaca_order.id}")
+
+                return Order(
+                    id=alpaca_order.id,
+                    symbol=alpaca_order.symbol,
+                    qty=float(alpaca_order.qty),
+                    side=alpaca_order.side,
+                    type=alpaca_order.type,
+                    status=alpaca_order.status,
+                    limit_price=float(alpaca_order.limit_price) if alpaca_order.limit_price else None,
+                    stop_price=float(alpaca_order.stop_price) if alpaca_order.stop_price else None,
+                    submitted_at=alpaca_order.submitted_at
+                )
+
+            except RETRYABLE_ORDER_EXCEPTIONS as e:
+                # Known retryable exceptions - retry with backoff
+                last_exception = e
+                if attempt < max_retries:
+                    self.logger.warning(
+                        f"submit_order failed (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                        f"Retrying in {current_delay:.1f}s..."
+                    )
+                    time.sleep(current_delay)
+                    current_delay *= backoff
+                else:
+                    self.logger.error(
+                        f"submit_order failed after {max_retries + 1} attempts: {e}",
+                        exc_info=True
+                    )
+
+            except Exception as e:
+                # Check if this is a retryable API error (rate limit, 5xx)
+                if _is_retryable_api_error(e):
+                    last_exception = e
+                    if attempt < max_retries:
+                        self.logger.warning(
+                            f"submit_order failed (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                            f"Retrying in {current_delay:.1f}s..."
+                        )
+                        time.sleep(current_delay)
+                        current_delay *= backoff
+                    else:
+                        self.logger.error(
+                            f"submit_order failed after {max_retries + 1} attempts: {e}",
+                            exc_info=True
+                        )
+                else:
+                    # Non-retryable error (business logic failure)
+                    self.logger.error(
+                        f"Failed to submit order: {side.upper()} {qty} {symbol} @ {type} - {e}",
+                        exc_info=True
+                    )
+                    raise BrokerAPIError(
+                        f"Order submission failed for {symbol}: {e}",
+                        original_exception=e
+                    )
+
+        # All retries exhausted
+        if last_exception:
+            raise last_exception
 
     def cancel_order(self, order_id: str) -> bool:
         """Cancel order by ID."""
