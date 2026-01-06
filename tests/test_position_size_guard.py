@@ -305,3 +305,31 @@ class TestPositionCleanupAfterLiquidation:
             assert 'AAPL' not in bot.highest_prices
             assert 'AAPL' not in bot.lowest_prices
             assert 'AAPL' not in bot.trailing_stops
+
+
+class TestPositionSizeGuardIntegration:
+    """Test position size guard integration with trading cycle."""
+
+    def test_guard_runs_in_trading_cycle(self):
+        """Verify _check_position_size_violations is called in run_trading_cycle."""
+        with patch('bot.create_broker') as mock_broker_factory:
+            mock_broker = MagicMock()
+            mock_account = MagicMock(
+                cash=50000,
+                portfolio_value=100000,
+                last_equity=100000,
+                equity=100000
+            )
+            mock_broker.get_account.return_value = mock_account
+            mock_broker.get_positions.return_value = []
+            mock_broker_factory.return_value = mock_broker
+
+            from bot import TradingBot
+            bot = TradingBot()
+            bot.portfolio_value = 100000
+            bot.daily_starting_capital = 100000
+
+            with patch.object(bot, '_check_position_size_violations') as mock_check:
+                mock_check.return_value = []
+                bot.run_trading_cycle()
+                mock_check.assert_called_once()
