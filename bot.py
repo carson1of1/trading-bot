@@ -109,7 +109,17 @@ class TradingBot:
         with open(universe_path, 'r') as f:
             universe = yaml.safe_load(f)
 
-        static_watchlist = universe.get('proven_symbols', [])
+        # Build watchlist from scanner_universe (400 symbols)
+        scanner_universe = universe.get('scanner_universe', {})
+        static_watchlist = []
+        for category, syms in scanner_universe.items():
+            if isinstance(syms, list):
+                for s in syms:
+                    if s not in static_watchlist:
+                        static_watchlist.append(s)
+        # Fallback to proven_symbols if scanner_universe empty
+        if not static_watchlist:
+            static_watchlist = universe.get('proven_symbols', [])
 
         # Check for scanner symbols override (from CLI)
         if scanner_symbols:

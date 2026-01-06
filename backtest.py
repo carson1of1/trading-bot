@@ -1435,8 +1435,19 @@ def run_backtest(
         if universe_path.exists():
             with open(universe_path, 'r') as f:
                 universe = yaml.safe_load(f)
-            symbols = universe.get('proven_symbols', [])
 
+            # Use scanner_universe (400 symbols) for full scanner benefit
+            scanner_universe = universe.get('scanner_universe', {})
+            symbols = []
+            for category, syms in scanner_universe.items():
+                if isinstance(syms, list):
+                    for s in syms:
+                        if s not in symbols:
+                            symbols.append(s)
+
+            # Fallback to proven_symbols if scanner_universe empty
+            if not symbols:
+                symbols = universe.get('proven_symbols', [])
             if not symbols:
                 symbols = universe.get('candidates', ['SPY', 'AAPL', 'MSFT'])
         else:

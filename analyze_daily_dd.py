@@ -9,11 +9,20 @@ import yaml
 from datetime import datetime
 from backtest import Backtest1Hour
 
-# Load symbols
+# Load symbols from scanner_universe (400 symbols)
 bot_dir = Path(__file__).parent
 with open(bot_dir / 'universe.yaml', 'r') as f:
     universe = yaml.safe_load(f)
-symbols = universe.get('proven_symbols', [])
+scanner_universe = universe.get('scanner_universe', {})
+symbols = []
+for category, syms in scanner_universe.items():
+    if isinstance(syms, list):
+        for s in syms:
+            if s not in symbols:
+                symbols.append(s)
+# Fallback to proven_symbols if scanner_universe empty
+if not symbols:
+    symbols = universe.get('proven_symbols', [])
 
 def analyze_actual_daily_dd(capital=100000, year='2025'):
     print(f"\n{'=' * 60}")
