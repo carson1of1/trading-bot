@@ -1484,6 +1484,29 @@ class TradingBot:
                 'message': f'Broker connection failed: {e}'
             }
 
+    def _check_position_sync(self) -> dict:
+        """Check positions match between bot and broker."""
+        try:
+            broker_positions = self.broker.get_positions()
+            broker_count = len(broker_positions) if broker_positions else 0
+            bot_count = len(self.open_positions)
+
+            if broker_count == bot_count:
+                return {
+                    'status': 'PASS',
+                    'message': f'{bot_count} positions synced'
+                }
+            else:
+                return {
+                    'status': 'FAIL',
+                    'message': f'Position mismatch: bot has {bot_count}, broker has {broker_count}'
+                }
+        except Exception as e:
+            return {
+                'status': 'FAIL',
+                'message': f'Position sync check failed: {e}'
+            }
+
     def run_health_check(self) -> dict:
         """
         Run comprehensive health check on bot systems.
@@ -1521,6 +1544,9 @@ class TradingBot:
                 'status': 'FAIL',
                 'message': f'Account not synced: cash=${self.cash}, portfolio=${self.portfolio_value}'
             }
+
+        # Check position sync
+        results['checks']['positions_synced'] = self._check_position_sync()
 
         # Calculate summary
         for check_name, check_result in results['checks'].items():

@@ -156,3 +156,46 @@ class TestAccountSyncCheck:
         mock_bot.portfolio_value = 0.0
         result = mock_bot.run_health_check()
         assert result['checks']['account_synced']['status'] == 'FAIL'
+
+
+class TestPositionSyncCheck:
+    """Test position sync health check."""
+
+    @pytest.fixture
+    def mock_bot(self):
+        """Create a bot with mocked components."""
+        with patch('bot.VolatilityScanner') as mock_scanner, \
+             patch('bot.create_broker') as mock_broker, \
+             patch('bot.TradeLogger'), \
+             patch('bot.YFinanceDataFetcher'):
+
+            mock_scanner_instance = MagicMock()
+            mock_scanner_instance.scan.return_value = ['AAPL']
+            mock_scanner.return_value = mock_scanner_instance
+
+            mock_broker_instance = MagicMock()
+            mock_account = MagicMock()
+            mock_account.cash = 10000.0
+            mock_account.portfolio_value = 50000.0
+            mock_account.last_equity = 50000.0
+            mock_broker_instance.get_account.return_value = mock_account
+            mock_broker_instance.get_positions.return_value = []
+            mock_broker.return_value = mock_broker_instance
+
+            bot = TradingBot()
+            bot.cash = 10000.0
+            bot.portfolio_value = 50000.0
+            yield bot
+
+    def test_positions_synced_passes_when_matching(self, mock_bot):
+        """Position sync passes when counts match."""
+        # Both have 0 positions
+        result = mock_bot.run_health_check()
+        assert result['checks']['positions_synced']['status'] == 'PASS'
+
+    def test_positions_synced_fails_when_mismatched(self, mock_bot):
+        """Position sync fails when counts don't match."""
+        mock_bot.open_positions = {'AAPL': {'qty': 100}}
+        mock_bot.broker.get_positions.return_value = []  # Broker has 0
+        result = mock_bot.run_health_check()
+        assert result['checks']['positions_synced']['status'] == 'FAIL'
