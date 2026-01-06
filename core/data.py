@@ -356,7 +356,9 @@ class YFinanceDataFetcher:
             if isinstance(start_date, str):
                 start_date = datetime.strptime(start_date, '%Y-%m-%d')
             if isinstance(end_date, str):
-                end_date = datetime.strptime(end_date, '%Y-%m-%d')
+                # FIX (Jan 2026): Add 1 day because yfinance end parameter is EXCLUSIVE
+                # Without this, end_date='2026-01-06' returns only data up to Jan 5
+                end_date = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
 
             # Use disk cache for hourly data (most common for backtesting)
             if use_cache and timeframe == '1Hour':
