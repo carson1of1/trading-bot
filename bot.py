@@ -1222,7 +1222,13 @@ class TradingBot:
                     logger.warning("DRAWDOWN_GUARD | Day halted - skipping cycle")
                     return
 
-            # 2. Check exits for all positions
+            # 2. Check position size violations (before exit checks)
+            # FIX (Jan 2026): ODE-89 - Auto-liquidate oversized positions
+            violations = self._check_position_size_violations()
+            if violations:
+                logger.warning(f"POSITION_SIZE_GUARD | Liquidated {len(violations)} oversized positions")
+
+            # 3. Check exits for all positions
             logger.info(f"Checking exits for {len(self.open_positions)} positions")
             for symbol, position in list(self.open_positions.items()):
                 # FIX (Jan 2026): Use 100 bars to ensure sufficient data for ATR and indicators
@@ -1267,7 +1273,7 @@ class TradingBot:
                     logger.info(f"EXIT_TRIGGER | {symbol} | {exit_signal.get('reason', 'unknown')} @ ${exit_signal.get('price', current_price):.2f}")
                     self.execute_exit(symbol, exit_signal)
 
-            # 3. Check entries for watchlist (only if not at position limit and entries allowed)
+            # 4. Check entries for watchlist (only if not at position limit and entries allowed)
             max_positions = self.config.get('risk_management', {}).get('max_open_positions', 5)
             if len(self.open_positions) >= max_positions:
                 logger.info(f"At max positions ({max_positions}), skipping entries")
