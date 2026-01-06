@@ -114,3 +114,45 @@ class TestBrokerHealthCheck:
         mock_bot.broker.get_account.side_effect = Exception("Connection failed")
         result = mock_bot.run_health_check()
         assert result['checks']['broker_connected']['status'] == 'FAIL'
+
+
+class TestAccountSyncCheck:
+    """Test account sync health check."""
+
+    @pytest.fixture
+    def mock_bot(self):
+        """Create a bot with mocked components."""
+        with patch('bot.VolatilityScanner') as mock_scanner, \
+             patch('bot.create_broker') as mock_broker, \
+             patch('bot.TradeLogger'), \
+             patch('bot.YFinanceDataFetcher'):
+
+            mock_scanner_instance = MagicMock()
+            mock_scanner_instance.scan.return_value = ['AAPL']
+            mock_scanner.return_value = mock_scanner_instance
+
+            mock_broker_instance = MagicMock()
+            mock_account = MagicMock()
+            mock_account.cash = 10000.0
+            mock_account.portfolio_value = 50000.0
+            mock_account.last_equity = 50000.0
+            mock_broker_instance.get_account.return_value = mock_account
+            mock_broker_instance.get_positions.return_value = []
+            mock_broker.return_value = mock_broker_instance
+
+            bot = TradingBot()
+            yield bot
+
+    def test_account_synced_passes_with_values(self, mock_bot):
+        """Account sync check passes when cash and portfolio populated."""
+        mock_bot.cash = 10000.0
+        mock_bot.portfolio_value = 50000.0
+        result = mock_bot.run_health_check()
+        assert result['checks']['account_synced']['status'] == 'PASS'
+
+    def test_account_synced_fails_with_zero_values(self, mock_bot):
+        """Account sync check fails when values are zero."""
+        mock_bot.cash = 0.0
+        mock_bot.portfolio_value = 0.0
+        result = mock_bot.run_health_check()
+        assert result['checks']['account_synced']['status'] == 'FAIL'

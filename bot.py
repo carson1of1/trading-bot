@@ -1510,6 +1510,18 @@ class TradingBot:
         # Check broker connection
         results['checks']['broker_connected'] = self._check_broker_health()
 
+        # Check account sync
+        if self.cash > 0 and self.portfolio_value > 0:
+            results['checks']['account_synced'] = {
+                'status': 'PASS',
+                'message': f'Cash: ${self.cash:,.2f}, Portfolio: ${self.portfolio_value:,.2f}'
+            }
+        else:
+            results['checks']['account_synced'] = {
+                'status': 'FAIL',
+                'message': f'Account not synced: cash=${self.cash}, portfolio=${self.portfolio_value}'
+            }
+
         # Calculate summary
         for check_name, check_result in results['checks'].items():
             results['summary']['total_checks'] += 1
