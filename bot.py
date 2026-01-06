@@ -330,6 +330,28 @@ class TradingBot:
         if self.use_tiered_exits and self.exit_manager:
             self.exit_manager.unregister_position(symbol)
 
+    def _reconcile_broker_state(self):
+        """
+        Detect divergence between internal state and broker state.
+
+        Runs BEFORE sync_positions() to capture mismatches before overwriting.
+        Alert-only mode - logs warnings but takes no corrective action.
+        """
+        try:
+            broker_positions = {p.symbol: p for p in self.broker.get_positions()}
+        except Exception as e:
+            logger.error(f"RECONCILE | Failed to fetch broker positions: {e}", exc_info=True)
+            return
+
+        # 1. Ghost positions (internal but not broker)
+        for symbol, pos in self.open_positions.items():
+            if symbol not in broker_positions:
+                logger.warning(
+                    f"RECONCILE | GHOST | {symbol} | "
+                    f"Internal: {pos['qty']} shares @ ${pos['entry_price']:.2f} | "
+                    f"Broker: NOT FOUND | Action: Position may have been closed externally"
+                )
+
     def _calculate_atr(self, data: pd.DataFrame, period: int = 14) -> float:
         """
         Calculate ATR (Average True Range) from historical data.
