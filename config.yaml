@@ -50,7 +50,7 @@ promotion_requirements:
   min_weeks_observed: 2
 exit_manager:
   tier_0_hard_stop: -0.05
-  tier_1_profit_floor: 0.015
+  tier_1_profit_floor: 0.0125  # 1.25% - actual value used (key mismatch means default is used)
   tier_2_atr_trailing: 0.02
   tier_3_partial_take: 0.03
   max_hold_hours: 48

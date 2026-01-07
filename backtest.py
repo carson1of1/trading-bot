@@ -577,9 +577,14 @@ class Backtest1Hour:
                                 exit_reason = 'trailing_stop'
 
                 # Tiered exit logic via ExitManager (LONG only)
+                # FIX (Jan 7, 2026): Pass current_price (close) instead of bar_low
+                # bar_low/bar_high are passed as kwargs for stop checks, matching bot.py
                 if not exit_triggered and position_direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
                     current_atr = self._calculate_atr(data, i, period=14)
-                    exit_action = self.exit_manager.evaluate_exit(symbol, bar_low, current_atr)
+                    exit_action = self.exit_manager.evaluate_exit(
+                        symbol, current_price, current_atr,
+                        bar_high=bar_high, bar_low=bar_low
+                    )
 
                     if exit_action:
                         exit_triggered = True
