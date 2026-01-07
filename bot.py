@@ -913,15 +913,15 @@ class TradingBot:
                     self.entry_gate.record_entry(symbol, datetime.now())
 
                 # Log entry trade to database
-                self.trade_logger.log_trade(
-                    symbol=symbol,
-                    action='BUY' if direction == 'LONG' else 'SELL',
-                    quantity=fill_qty,
-                    price=fill_price,
-                    strategy=strategy,
-                    pnl=0.0,  # No P&L on entry
-                    exit_reason=None
-                )
+                self.trade_logger.log_trade({
+                    'symbol': symbol,
+                    'action': 'BUY' if direction == 'LONG' else 'SELL',
+                    'quantity': fill_qty,
+                    'price': fill_price,
+                    'strategy': strategy,
+                    'pnl': 0.0,  # No P&L on entry
+                    'exit_reason': None
+                })
 
                 logger.info(f"ENTRY: {direction} {fill_qty} {symbol} @ ${fill_price:.2f} [{strategy}]")
 
@@ -1002,15 +1002,15 @@ class TradingBot:
                     pnl = (entry_price - exit_price) * filled_qty
 
                 # Log trade with filled quantity
-                self.trade_logger.log_trade(
-                    symbol=symbol,
-                    action='SELL' if direction == 'LONG' else 'BUY',
-                    quantity=filled_qty,
-                    price=exit_price,
-                    strategy=position.get('strategy', 'Unknown'),
-                    pnl=pnl,
-                    exit_reason=exit_reason
-                )
+                self.trade_logger.log_trade({
+                    'symbol': symbol,
+                    'action': 'SELL' if direction == 'LONG' else 'BUY',
+                    'quantity': filled_qty,
+                    'price': exit_price,
+                    'strategy': position.get('strategy', 'Unknown'),
+                    'pnl': pnl,
+                    'exit_reason': exit_reason
+                })
 
                 # Record loss in entry gate
                 if pnl < 0 and self.entry_gate:
@@ -1256,15 +1256,15 @@ class TradingBot:
                         pnl = (entry_price - exit_price) * qty
 
                     # Log trade
-                    self.trade_logger.log_trade(
-                        symbol=symbol,
-                        action='SELL' if direction == 'LONG' else 'BUY',
-                        quantity=qty,
-                        price=exit_price,
-                        strategy=pos.get('strategy', 'Unknown'),
-                        pnl=pnl,
-                        exit_reason='emergency_position_limit'
-                    )
+                    self.trade_logger.log_trade({
+                        'symbol': symbol,
+                        'action': 'SELL' if direction == 'LONG' else 'BUY',
+                        'quantity': qty,
+                        'price': exit_price,
+                        'strategy': pos.get('strategy', 'Unknown'),
+                        'pnl': pnl,
+                        'exit_reason': 'emergency_position_limit'
+                    })
 
                     # Update risk guards (same as execute_exit)
                     if pnl < 0 and self.entry_gate:
@@ -1798,19 +1798,26 @@ class TradingBot:
         logger.info("Trading Bot stopped")
 
 
-def get_seconds_until_next_hour(buffer_minutes: int = 2) -> int:
+def get_seconds_until_next_hour(buffer_minutes: int = 31) -> int:
     """
     Calculate seconds until X minutes past the next hour.
 
-    FIX (Jan 2026): Smart hourly scheduling - align bot cycles to candle boundaries.
-    For 1-hour bars, candles close at :00 (e.g., 9 AM candle closes at 10:00).
-    We add a buffer (default 2 min) to ensure the candle is fully available.
+    FIX (Jan 7, 2026): YFinance hourly bars are aligned to market open at 9:30 AM EST.
+    Bars are timestamped at 9:30, 10:30, 11:30, etc. and complete 60 minutes later.
+
+    Example timeline:
+    - 9:30 bar starts at 9:30, completes at 10:30
+    - 10:30 bar starts at 10:30, completes at 11:30
+
+    The bot must run AFTER bars complete to get valid data:
+    - Run at :31 to catch the :30 bar (e.g., run at 10:31 for the 9:30 bar)
+    - Default changed from 2 to 31 to align with :30 bar completion
 
     Args:
-        buffer_minutes: Minutes after the hour to run (default 2)
+        buffer_minutes: Minutes after the hour to run (default 31 for :30 bar alignment)
 
     Returns:
-        Seconds until next run time (e.g., 10:02, 11:02, etc.)
+        Seconds until next run time (e.g., 10:31, 11:31, etc.)
     """
     eastern = pytz.timezone('America/New_York')
     now = datetime.now(eastern)
@@ -2005,8 +2012,8 @@ def main():
                         help='Path to configuration file')
     parser.add_argument('--symbols', type=str, default=None,
                         help='Comma-separated list of symbols from scanner (overrides config)')
-    parser.add_argument('--candle-delay', type=int, default=2,
-                        help='Minutes after hour to run cycle (default: 2)')
+    parser.add_argument('--candle-delay', type=int, default=31,
+                        help='Minutes after hour to run cycle (default: 31 for :30 bar alignment)')
     args = parser.parse_args()
 
     # Parse symbols if provided
