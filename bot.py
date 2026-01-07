@@ -109,7 +109,17 @@ class TradingBot:
         with open(universe_path, 'r') as f:
             universe = yaml.safe_load(f)
 
-        static_watchlist = universe.get('proven_symbols', [])
+        # Build watchlist from scanner_universe (400 symbols)
+        scanner_universe = universe.get('scanner_universe', {})
+        static_watchlist = []
+        for category, syms in scanner_universe.items():
+            if isinstance(syms, list):
+                for s in syms:
+                    if s not in static_watchlist:
+                        static_watchlist.append(s)
+        # Fallback to proven_symbols if scanner_universe empty
+        if not static_watchlist:
+            static_watchlist = universe.get('proven_symbols', [])
 
         # Check for scanner symbols override (from CLI)
         if scanner_symbols:
@@ -182,6 +192,7 @@ class TradingBot:
         self.daily_starting_capital = 0.0
         self.current_trading_day = None
         self.kill_switch_triggered = False
+        self._partial_liquidation_done_today = False  # ODE-90: Track partial liquidation
 
         # Emergency stop - force close if unrealized loss exceeds threshold
         # FIX (Jan 2026): Added after $4K loss on single SHORT with no stop
@@ -238,6 +249,10 @@ class TradingBot:
             if self.current_trading_day != now.date():
                 self.current_trading_day = now.date()
                 self.kill_switch_triggered = False
+                # ODE-90: Reset drawdown guard and partial liquidation flag for new day
+                if self.drawdown_guard.enabled:
+                    self.drawdown_guard.reset_day(self.daily_starting_capital, now.date())
+                self._partial_liquidation_done_today = False
                 logger.info(f"New trading day: start equity=${self.daily_starting_capital:.2f}")
 
             # Kill switch check
@@ -329,6 +344,105 @@ class TradingBot:
         # FIX (Jan 2026): Unregister from ExitManager during cleanup
         if self.use_tiered_exits and self.exit_manager:
             self.exit_manager.unregister_position(symbol)
+
+    def _reconcile_broker_state(self):
+        """
+        Detect divergence between internal state and broker state.
+
+        Runs BEFORE sync_positions() to capture mismatches before overwriting.
+        Alert-only mode - logs warnings but takes no corrective action.
+        """
+        try:
+            broker_positions = {p.symbol: p for p in self.broker.get_positions()}
+        except Exception as e:
+            logger.error(f"RECONCILE | Failed to fetch broker positions: {e}", exc_info=True)
+            return
+
+        # 1. Ghost positions (internal but not broker)
+        for symbol, pos in self.open_positions.items():
+            if symbol not in broker_positions:
+                logger.warning(
+                    f"RECONCILE | GHOST | {symbol} | "
+                    f"Internal: {pos['qty']} shares @ ${pos['entry_price']:.2f} | "
+                    f"Broker: NOT FOUND | Action: Position may have been closed externally"
+                )
+
+        # 2. Orphan positions (broker but not internal)
+        for symbol, bp in broker_positions.items():
+            if symbol not in self.open_positions:
+                logger.warning(
+                    f"RECONCILE | ORPHAN | {symbol} | "
+                    f"Internal: NOT TRACKED | "
+                    f"Broker: {int(bp.qty)} shares @ ${float(bp.avg_entry_price):.2f} | "
+                    f"Action: Position opened externally or bot restarted mid-trade"
+                )
+                continue  # Skip further checks for orphans
+
+            pos = self.open_positions[symbol]
+
+            # 3. Quantity mismatch
+            if int(bp.qty) != pos['qty']:
+                logger.warning(
+                    f"RECONCILE | QTY_MISMATCH | {symbol} | "
+                    f"Internal: {pos['qty']} shares | Broker: {int(bp.qty)} shares | "
+                    f"Action: Partial fill or manual trade occurred"
+                )
+
+            # 4. Entry price mismatch (>1% tolerance)
+            broker_price = float(bp.avg_entry_price)
+            if pos['entry_price'] > 0:
+                price_diff_pct = abs(broker_price - pos['entry_price']) / pos['entry_price']
+                if price_diff_pct > 0.01:
+                    logger.warning(
+                        f"RECONCILE | PRICE_MISMATCH | {symbol} | "
+                        f"Internal: ${pos['entry_price']:.2f} | Broker: ${broker_price:.2f} | "
+                        f"Diff: {price_diff_pct*100:.2f}% | Action: Significant slippage or averaging occurred"
+                    )
+
+    def _reconcile_stop_orders(self):
+        """
+        Cancel orphaned broker-level stop orders from previous sessions.
+
+        ODE-117: Bracket orders create stop orders at the broker level. If the bot
+        crashes or restarts, these stops may remain active for positions that:
+        - Were closed manually
+        - Were closed by the stop itself during downtime
+        - Are no longer tracked by the bot
+
+        This method cancels any stop orders for symbols without active positions.
+        """
+        try:
+            # Get broker positions (symbols we actually hold)
+            broker_positions = {p.symbol for p in self.broker.get_positions()}
+
+            # Get all open orders
+            open_orders = self.broker.list_orders(status='open')
+
+            # Find stop orders for symbols we don't hold
+            orphaned_stops = []
+            for order in open_orders:
+                if order.type in ['stop', 'stop_limit']:
+                    if order.symbol not in broker_positions:
+                        orphaned_stops.append(order)
+
+            if orphaned_stops:
+                logger.info(f"RECONCILE | Found {len(orphaned_stops)} orphaned stop orders")
+
+                for order in orphaned_stops:
+                    try:
+                        self.broker.cancel_order(order.id)
+                        logger.info(
+                            f"RECONCILE | CANCELLED_ORPHAN_STOP | {order.symbol} | "
+                            f"Order ID: {order.id} | Stop price: ${order.stop_price}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"RECONCILE | CANCEL_FAILED | {order.symbol} | "
+                            f"Order ID: {order.id} | Error: {e}"
+                        )
+
+        except Exception as e:
+            logger.error(f"RECONCILE | Failed to reconcile stop orders: {e}", exc_info=True)
 
     def _calculate_atr(self, data: pd.DataFrame, period: int = 14) -> float:
         """
@@ -424,9 +538,32 @@ class TradingBot:
                 indicators=self.indicators
             )
 
+            # ODE-97: Signal logging - log ALL signals for debugging visibility
+            debug_config = self.config.get('debug', {})
+            log_all_signals = debug_config.get('log_all_signals', False)
+
             if signal and signal.get('action') != 'HOLD':
                 confidence = signal.get('confidence', 0)
                 threshold = self.strategy_manager.confidence_threshold
+                result = 'PASSED' if confidence >= threshold else 'BELOW_THRESHOLD'
+
+                # Log signal (always for non-HOLD, or when debug enabled)
+                if log_all_signals or result == 'PASSED':
+                    logger.info(
+                        f"SIGNAL | {symbol} | {signal['action']} | "
+                        f"Confidence: {confidence:.1f} | "
+                        f"Strategy: {signal.get('strategy', 'Unknown')} | "
+                        f"Threshold: {threshold} | "
+                        f"Result: {result}"
+                    )
+
+                # Log components if debug enabled
+                if debug_config.get('log_signal_components', False):
+                    components = signal.get('components', {})
+                    if components:
+                        comp_str = ' | '.join(f"{k}: {v:.2f}" if isinstance(v, (int, float)) else f"{k}: {v}"
+                                              for k, v in components.items())
+                        logger.info(f"SIGNAL_COMPONENTS | {symbol} | {comp_str}")
 
                 if signal['action'] == 'BUY' and confidence >= threshold:
                     return {
@@ -434,7 +571,8 @@ class TradingBot:
                         'confidence': confidence,
                         'strategy': signal.get('strategy', 'Unknown'),
                         'reasoning': signal.get('reasoning', ''),
-                        'direction': 'LONG'
+                        'direction': 'LONG',
+                        'components': signal.get('components', {})
                     }
                 elif signal['action'] == 'SELL' and confidence >= threshold:
                     # SHORT signal
@@ -443,7 +581,8 @@ class TradingBot:
                         'confidence': confidence,
                         'strategy': signal.get('strategy', 'Unknown'),
                         'reasoning': signal.get('reasoning', ''),
-                        'direction': 'SHORT'
+                        'direction': 'SHORT',
+                        'components': signal.get('components', {})
                     }
 
             return no_signal
@@ -763,14 +902,16 @@ class TradingBot:
             if qty <= 0:
                 return {'filled': False, 'reason': 'Position size too small'}
 
-            # Submit order
+            # Submit bracket order with broker-level stop-loss for crash protection (ODE-117)
+            # The broker stop at 5% acts as backup - software stops handle normal operation
             side = 'buy' if direction == 'LONG' else 'sell'
-            order = self.broker.submit_order(
+            order = self.broker.submit_bracket_order(
                 symbol=symbol,
                 qty=qty,
                 side=side,
-                type='market',
-                time_in_force='day'
+                stop_loss_percent=stop_loss_pct,
+                time_in_force='gtc',  # Stop must persist across sessions
+                price=price  # For stop price calculation
             )
 
             # FIX (Jan 2026): Track position immediately after order submission
@@ -799,6 +940,8 @@ class TradingBot:
                     )
 
                 # Update tracking
+                # ODE-117: Track stop_order_id for bracket order cancellation on exit
+                stop_order_id = getattr(order, 'stop_order_id', None)
                 self.open_positions[symbol] = {
                     'symbol': symbol,
                     'qty': fill_qty,
@@ -808,6 +951,7 @@ class TradingBot:
                     'strategy': strategy,
                     'reasoning': reasoning,
                     'risk_amount': risk_amount,  # For losing streak guard (Jan 4, 2026)
+                    'stop_order_id': stop_order_id,  # ODE-117: Broker-level stop for crash protection
                 }
                 self.highest_prices[symbol] = fill_price
                 self.lowest_prices[symbol] = fill_price
@@ -819,15 +963,15 @@ class TradingBot:
                     self.entry_gate.record_entry(symbol, datetime.now())
 
                 # Log entry trade to database
-                self.trade_logger.log_trade(
-                    symbol=symbol,
-                    action='BUY' if direction == 'LONG' else 'SELL',
-                    quantity=fill_qty,
-                    price=fill_price,
-                    strategy=strategy,
-                    pnl=0.0,  # No P&L on entry
-                    exit_reason=None
-                )
+                self.trade_logger.log_trade({
+                    'symbol': symbol,
+                    'action': 'BUY' if direction == 'LONG' else 'SELL',
+                    'quantity': fill_qty,
+                    'price': fill_price,
+                    'strategy': strategy,
+                    'pnl': 0.0,  # No P&L on entry
+                    'exit_reason': None
+                })
 
                 logger.info(f"ENTRY: {direction} {fill_qty} {symbol} @ ${fill_price:.2f} [{strategy}]")
 
@@ -865,6 +1009,16 @@ class TradingBot:
             entry_price = position['entry_price']
             qty = exit_signal.get('qty', position['qty'])
             exit_reason = exit_signal.get('reason', 'unknown')
+
+            # ODE-117: Cancel broker-level stop order before exiting
+            # This prevents the bracket stop from triggering after we've closed the position
+            stop_order_id = position.get('stop_order_id')
+            if stop_order_id:
+                try:
+                    self.broker.cancel_order(stop_order_id)
+                    logger.debug(f"Cancelled broker stop order {stop_order_id} for {symbol}")
+                except Exception as e:
+                    logger.warning(f"Failed to cancel stop order {stop_order_id} for {symbol}: {e}")
 
             # Submit exit order
             side = 'sell' if direction == 'LONG' else 'buy'
@@ -908,15 +1062,15 @@ class TradingBot:
                     pnl = (entry_price - exit_price) * filled_qty
 
                 # Log trade with filled quantity
-                self.trade_logger.log_trade(
-                    symbol=symbol,
-                    action='SELL' if direction == 'LONG' else 'BUY',
-                    quantity=filled_qty,
-                    price=exit_price,
-                    strategy=position.get('strategy', 'Unknown'),
-                    pnl=pnl,
-                    exit_reason=exit_reason
-                )
+                self.trade_logger.log_trade({
+                    'symbol': symbol,
+                    'action': 'SELL' if direction == 'LONG' else 'BUY',
+                    'quantity': filled_qty,
+                    'price': exit_price,
+                    'strategy': position.get('strategy', 'Unknown'),
+                    'pnl': pnl,
+                    'exit_reason': exit_reason
+                })
 
                 # Record loss in entry gate
                 if pnl < 0 and self.entry_gate:
@@ -1022,27 +1176,230 @@ class TradingBot:
             logger.error(f"Error fetching data for {symbol}: {e}", exc_info=True)
             return None
 
+    def _check_position_size_violations(self) -> list:
+        """
+        Check for and liquidate positions exceeding size limits.
+
+        Checks each position against:
+        - max_position_dollars: Absolute dollar limit (default $10,000)
+        - max_position_size_pct: Percentage of portfolio (from config)
+
+        Returns:
+            List of violation dicts with symbol, value, reason, liquidated
+        """
+        violations = []
+
+        risk_config = self.config.get('risk_management', {})
+        max_dollars = risk_config.get('max_position_dollars', 10000)
+        max_pct = risk_config.get('max_position_size_pct', 10.0) / 100
+
+        for symbol, pos in list(self.open_positions.items()):
+            qty = pos['qty']
+            current_price = pos.get('current_price', pos.get('entry_price', 0))
+            direction = pos.get('direction', 'LONG')
+            value = qty * current_price
+
+            violation = None
+
+            # Check absolute dollar limit
+            if value > max_dollars:
+                violation = {
+                    'symbol': symbol,
+                    'value': value,
+                    'limit': max_dollars,
+                    'reason': 'exceeds_max_position_dollars'
+                }
+            # Check percentage of portfolio limit
+            elif self.portfolio_value > 0 and value > self.portfolio_value * max_pct:
+                violation = {
+                    'symbol': symbol,
+                    'value': value,
+                    'limit': self.portfolio_value * max_pct,
+                    'reason': 'exceeds_max_position_pct'
+                }
+
+            if violation:
+                logger.critical(
+                    f"POSITION_VIOLATION | {symbol} | "
+                    f"Value: ${value:,.2f} | Limit: ${violation['limit']:,.2f} | "
+                    f"Reason: {violation['reason']} | ACTION: LIQUIDATING"
+                )
+
+                # Force liquidate
+                try:
+                    side = 'sell' if direction == 'LONG' else 'buy'
+                    order = self.broker.submit_order(
+                        symbol=symbol,
+                        qty=qty,
+                        side=side,
+                        type='market',
+                        time_in_force='day'
+                    )
+
+                    if order:
+                        violation['liquidated'] = True
+                        violation['order_id'] = order.id
+
+                        # Cleanup position tracking
+                        self._cleanup_position(symbol)
+                        del self.open_positions[symbol]
+
+                        logger.critical(
+                            f"POSITION_VIOLATION | {symbol} | LIQUIDATED | Order: {order.id}"
+                        )
+                    else:
+                        violation['liquidated'] = False
+                        logger.error(f"POSITION_VIOLATION | {symbol} | LIQUIDATION FAILED - no order")
+
+                except Exception as e:
+                    violation['liquidated'] = False
+                    violation['error'] = str(e)
+                    logger.error(f"POSITION_VIOLATION | {symbol} | LIQUIDATION ERROR: {e}", exc_info=True)
+
+                violations.append(violation)
+
+        return violations
+
+    def _emergency_position_limit_check(self) -> bool:
+        """
+        Check if position count exceeds max and liquidate excess (oldest first).
+
+        Triggers when broker shows more positions than max_open_positions.
+        This indicates a bug, race condition, or manual intervention.
+
+        Returns:
+            True if emergency triggered (kill switch set), False otherwise
+        """
+        max_positions = self.config.get('risk_management', {}).get('max_open_positions', 5)
+        current_count = len(self.open_positions)
+
+        if current_count <= max_positions:
+            return False
+
+        excess_count = current_count - max_positions
+
+        logger.critical(
+            f"EMERGENCY: Position count {current_count} exceeds max {max_positions} - "
+            f"LIQUIDATING {excess_count} oldest positions"
+        )
+
+        # Sort by entry_time (oldest first)
+        sorted_positions = sorted(
+            self.open_positions.items(),
+            key=lambda x: x[1].get('entry_time', datetime.now())
+        )
+
+        # Liquidate oldest excess positions
+        liquidated = 0
+        for symbol, pos in sorted_positions[:excess_count]:
+            try:
+                direction = pos.get('direction', 'LONG')
+                qty = pos['qty']
+                entry_price = pos.get('entry_price', 0)
+
+                side = 'sell' if direction == 'LONG' else 'buy'
+                order = self.broker.submit_order(
+                    symbol=symbol,
+                    qty=qty,
+                    side=side,
+                    type='market',
+                    time_in_force='day'
+                )
+
+                if order and getattr(order, 'status', None) in ['filled', 'new', 'accepted']:
+                    exit_price = float(order.filled_avg_price) if hasattr(order, 'filled_avg_price') and order.filled_avg_price else entry_price
+
+                    # Calculate P&L
+                    if direction == 'LONG':
+                        pnl = (exit_price - entry_price) * qty
+                    else:
+                        pnl = (entry_price - exit_price) * qty
+
+                    # Log trade
+                    self.trade_logger.log_trade({
+                        'symbol': symbol,
+                        'action': 'SELL' if direction == 'LONG' else 'BUY',
+                        'quantity': qty,
+                        'price': exit_price,
+                        'strategy': pos.get('strategy', 'Unknown'),
+                        'pnl': pnl,
+                        'exit_reason': 'emergency_position_limit'
+                    })
+
+                    # Update risk guards (same as execute_exit)
+                    if pnl < 0 and self.entry_gate:
+                        self.entry_gate.record_loss(datetime.now())
+
+                    if self.drawdown_guard.enabled:
+                        self.drawdown_guard.record_realized_pnl(pnl)
+
+                    if self.losing_streak_guard.enabled:
+                        self.losing_streak_guard.record_trade(
+                            symbol=symbol,
+                            realized_pnl=pnl,
+                            risk_amount=pos.get('risk_amount', abs(pnl)),
+                            close_time=datetime.now()
+                        )
+
+                    # Cleanup (_cleanup_position already handles exit_manager unregister)
+                    self._cleanup_position(symbol)
+                    del self.open_positions[symbol]
+
+                    logger.critical(
+                        f"EMERGENCY_LIQUIDATE | {symbol} | {direction} {qty} shares | "
+                        f"P&L: ${pnl:+.2f} | Reason: position_limit_exceeded"
+                    )
+                    liquidated += 1
+
+            except Exception as e:
+                logger.error(f"EMERGENCY_LIQUIDATE | {symbol} | FAILED: {e}", exc_info=True)
+
+        # Set kill switch
+        self.kill_switch_triggered = True
+        logger.critical(
+            f"EMERGENCY: Kill switch triggered - liquidated {liquidated}/{excess_count} positions"
+        )
+
+        return True
+
     def run_trading_cycle(self):
         """
         Run one trading cycle.
 
         Called every hour (or on demand):
+        0. Reconcile broker state (detect divergence)
         1. Sync account and update drawdown guard
         2. Handle hard limit liquidation if needed
         3. Check exits for all positions
         4. Check entries for watchlist symbols (if allowed)
         """
         try:
-            # FIX (Jan 2026): Log expected candle hour for verification
+            # FIX (Jan 7, 2026): Use bar from 2 hours ago (fully settled) to match backtest
+            # Running at :02, we use bar N-2 for signals, enter at bar N's open
+            # This matches backtest: signal on bar N-1, entry at bar N+1 open
             eastern = pytz.timezone('America/New_York')
             now = datetime.now(eastern)
-            expected_candle_hour = (now.hour - 1) % 24  # Previous hour's candle
+            expected_candle_hour = (now.hour - 2) % 24  # Settled bar from 2 hours ago
             logger.info(f"=== Trading Cycle Start @ {now.strftime('%H:%M:%S')} EST ===")
             logger.info(f"Expecting candles from {expected_candle_hour}:00 hour")
+
+            # 0. Reconcile broker state BEFORE syncing (detect divergence)
+            self._reconcile_broker_state()
+
+            # 0.25 ODE-117: Cancel orphaned stop orders from previous sessions
+            self._reconcile_stop_orders()
+
+            # 0.5 Run health check (ODE-95)
+            self.run_health_check()
 
             # 1. Sync state
             self.sync_account()
             self.sync_positions()
+
+            # 1.5 Emergency position limit check (ODE-88)
+            # Must run immediately after sync to detect violations before any other logic
+            if self._emergency_position_limit_check():
+                return  # Halt cycle - kill switch triggered
 
             # 2. Update drawdown guard (must be done after sync)
             if self.drawdown_guard.enabled:
@@ -1075,57 +1432,95 @@ class TradingBot:
                     logger.error("DRAWDOWN_GUARD | DAY HALTED - No further trading")
                     return
 
+                # ODE-90: Handle medium limit - partial liquidation (funded account protection)
+                if tier == DrawdownTier.MEDIUM and self.drawdown_guard.partial_liquidation_triggered:
+                    # Only trigger partial liquidation once per day
+                    if not getattr(self, '_partial_liquidation_done_today', False):
+                        logger.warning("DRAWDOWN_GUARD | MEDIUM TIER - PARTIAL LIQUIDATION")
+                        positions_list = list(self.open_positions.values())
+                        if positions_list:
+                            result = self.drawdown_guard.force_partial_liquidate(self.broker, positions_list)
+                            if result['success']:
+                                logger.warning(
+                                    f"DRAWDOWN_GUARD | Partial liquidation: {len(result['reduced'])} positions reduced"
+                                )
+                                # Update position quantities in our tracking
+                                for reduced_pos in result['reduced']:
+                                    symbol = reduced_pos['symbol']
+                                    if symbol in self.open_positions:
+                                        old_qty = self.open_positions[symbol].get('qty', 0)
+                                        new_qty = reduced_pos['remaining_qty']
+                                        self.open_positions[symbol]['qty'] = new_qty
+                                        logger.info(
+                                            f"DRAWDOWN_GUARD | {symbol}: Qty {old_qty} -> {new_qty}"
+                                        )
+                        self._partial_liquidation_done_today = True
+
                 # Handle day halted state
                 if self.drawdown_guard.day_halted:
                     logger.warning("DRAWDOWN_GUARD | Day halted - skipping cycle")
                     return
 
-            # 2. Check exits for all positions
+            # 2. Check position size violations (before exit checks)
+            # FIX (Jan 2026): ODE-89 - Auto-liquidate oversized positions
+            violations = self._check_position_size_violations()
+            if violations:
+                logger.warning(f"POSITION_SIZE_GUARD | Liquidated {len(violations)} oversized positions")
+
+            # 3. Check exits for all positions
+            # FIX (Jan 2026): ODE-86 - Wrap each position in try/except to prevent
+            # one bad position from crashing the entire exit loop. Critical for ensuring
+            # stop losses execute on ALL positions even if one has an error.
             logger.info(f"Checking exits for {len(self.open_positions)} positions")
             for symbol, position in list(self.open_positions.items()):
-                # FIX (Jan 2026): Use 100 bars to ensure sufficient data for ATR and indicators
-                # Previously 50 bars could cause insufficient warmup for some calculations
-                data = self.fetch_data(symbol, bars=100)
-                if data is None:
-                    logger.warning(f"EXIT_CHECK | {symbol} | No data available")
-                    continue
+                try:
+                    # FIX (Jan 2026): Use 100 bars to ensure sufficient data for ATR and indicators
+                    # Previously 50 bars could cause insufficient warmup for some calculations
+                    data = self.fetch_data(symbol, bars=100)
+                    if data is None:
+                        logger.warning(f"EXIT_CHECK | {symbol} | No data available")
+                        continue
 
-                current_price = data['close'].iloc[-1]
-                bar_high = data['high'].iloc[-1]
-                bar_low = data['low'].iloc[-1]
+                    current_price = data['close'].iloc[-1]
+                    bar_high = data['high'].iloc[-1]
+                    bar_low = data['low'].iloc[-1]
 
-                # FIX (Jan 5, 2026): Defensive check for missing entry_price
-                # This prevents KeyError crashes when position dict is malformed
-                # (can happen if sync_positions fails mid-way or data corruption)
-                if 'entry_price' not in position:
-                    logger.error(f"EXIT_CHECK | {symbol} | SKIPPED - missing entry_price in position dict: {position}")
-                    continue
+                    # FIX (Jan 5, 2026): Defensive check for missing entry_price
+                    # This prevents KeyError crashes when position dict is malformed
+                    # (can happen if sync_positions fails mid-way or data corruption)
+                    if 'entry_price' not in position:
+                        logger.error(f"EXIT_CHECK | {symbol} | SKIPPED - missing entry_price in position dict: {position}")
+                        continue
 
-                entry_price = position['entry_price']
-                direction = position.get('direction', 'LONG')
+                    entry_price = position['entry_price']
+                    direction = position.get('direction', 'LONG')
 
-                # Calculate P&L for logging
-                if direction == 'LONG':
-                    pnl_pct = (current_price - entry_price) / entry_price * 100
-                else:
-                    pnl_pct = (entry_price - current_price) / entry_price * 100
+                    # Calculate P&L for logging
+                    if direction == 'LONG':
+                        pnl_pct = (current_price - entry_price) / entry_price * 100
+                    else:
+                        pnl_pct = (entry_price - current_price) / entry_price * 100
 
-                # FIX (Jan 2026): Increment bars_held for ExitManager minimum hold time
-                # Backtest.py:726-727 does this - without it, min_hold_bars never triggers
-                if self.use_tiered_exits and self.exit_manager and symbol in self.exit_manager.positions:
-                    self.exit_manager.increment_bars_held(symbol)
-                    bars_held = self.exit_manager.positions[symbol].bars_held
-                    state = self.exit_manager.positions[symbol]
-                    hard_stop = entry_price * (1 - state.hard_stop_pct) if direction == 'LONG' else entry_price * (1 + state.hard_stop_pct)
-                    logger.info(f"EXIT_CHECK | {symbol} | ${current_price:.2f} ({pnl_pct:+.2f}%) | Stop: ${hard_stop:.2f} | Bars: {bars_held}")
+                    # FIX (Jan 2026): Increment bars_held for ExitManager minimum hold time
+                    # Backtest.py:726-727 does this - without it, min_hold_bars never triggers
+                    if self.use_tiered_exits and self.exit_manager and symbol in self.exit_manager.positions:
+                        self.exit_manager.increment_bars_held(symbol)
+                        bars_held = self.exit_manager.positions[symbol].bars_held
+                        state = self.exit_manager.positions[symbol]
+                        hard_stop = entry_price * (1 - state.hard_stop_pct) if direction == 'LONG' else entry_price * (1 + state.hard_stop_pct)
+                        logger.info(f"EXIT_CHECK | {symbol} | ${current_price:.2f} ({pnl_pct:+.2f}%) | Stop: ${hard_stop:.2f} | Bars: {bars_held}")
 
-                exit_signal = self.check_exit(symbol, position, current_price, bar_high, bar_low, data)
+                    exit_signal = self.check_exit(symbol, position, current_price, bar_high, bar_low, data)
 
-                if exit_signal and exit_signal.get('exit'):
-                    logger.info(f"EXIT_TRIGGER | {symbol} | {exit_signal.get('reason', 'unknown')} @ ${exit_signal.get('price', current_price):.2f}")
-                    self.execute_exit(symbol, exit_signal)
+                    if exit_signal and exit_signal.get('exit'):
+                        logger.info(f"EXIT_TRIGGER | {symbol} | {exit_signal.get('reason', 'unknown')} @ ${exit_signal.get('price', current_price):.2f}")
+                        self.execute_exit(symbol, exit_signal)
 
-            # 3. Check entries for watchlist (only if not at position limit and entries allowed)
+                except Exception as e:
+                    logger.error(f"EXIT_CHECK | {symbol} | FAILED: {e}", exc_info=True)
+                    continue  # Don't let one bad position crash all exits
+
+            # 4. Check entries for watchlist (only if not at position limit and entries allowed)
             max_positions = self.config.get('risk_management', {}).get('max_open_positions', 5)
             if len(self.open_positions) >= max_positions:
                 logger.info(f"At max positions ({max_positions}), skipping entries")
@@ -1135,6 +1530,18 @@ class TradingBot:
             if self.drawdown_guard.enabled and not self.drawdown_guard.entries_allowed:
                 logger.warning(f"DRAWDOWN_GUARD | Entries blocked at tier {self.drawdown_guard.tier.name}")
                 return
+
+            # ODE-97: Signal summary tracking
+            signal_stats = {
+                'total': 0,
+                'buy': 0,
+                'sell': 0,
+                'hold': 0,
+                'above_threshold': 0,
+                'executed': 0,
+                'blocked': 0,
+                'block_reasons': {}
+            }
 
             # Collect ALL qualifying signals first, then pick highest confidence
             # This ensures deterministic selection matching backtest behavior
@@ -1147,6 +1554,12 @@ class TradingBot:
                     continue
 
                 data = self.fetch_data(symbol)
+                if data is None or len(data) < 30:
+                    continue
+
+                # FIX (Jan 6, 2026): Filter out incomplete bars BEFORE any processing
+                # YFinance returns the current forming bar which we must skip
+                data = filter_incomplete_bars(data, bar_duration_minutes=60)
                 if data is None or len(data) < 30:
                     continue
 
@@ -1168,12 +1581,38 @@ class TradingBot:
                 current_price = data['close'].iloc[-1]
                 entry_signal = self.check_entry(symbol, data, current_price)
 
+                # ODE-97: Track signal statistics
+                signal_stats['total'] += 1
+                action = entry_signal.get('action', 'HOLD')
+                if action == 'BUY':
+                    signal_stats['buy'] += 1
+                elif action == 'SELL':
+                    signal_stats['sell'] += 1
+                else:
+                    signal_stats['hold'] += 1
+
                 if entry_signal and entry_signal.get('action') in ['BUY', 'SELL']:
+                    signal_stats['above_threshold'] += 1
                     qualifying_signals.append({
                         'symbol': symbol,
                         'signal': entry_signal,
                         'price': current_price
                     })
+                elif entry_signal.get('reasoning'):
+                    # Track block reasons
+                    reason = entry_signal.get('reasoning', 'unknown')
+                    # Simplify reason for grouping
+                    if 'Entry gate' in reason:
+                        reason_key = 'entry_gate'
+                    elif 'Cooldown' in reason:
+                        reason_key = 'cooldown'
+                    elif 'position' in reason.lower():
+                        reason_key = 'position_limit'
+                    elif 'threshold' in reason.lower():
+                        reason_key = 'below_threshold'
+                    else:
+                        reason_key = 'other'
+                    signal_stats['block_reasons'][reason_key] = signal_stats['block_reasons'].get(reason_key, 0) + 1
 
             # Sort by confidence (highest first) for deterministic selection
             qualifying_signals.sort(key=lambda x: x['signal'].get('confidence', 0), reverse=True)
@@ -1181,6 +1620,8 @@ class TradingBot:
             # Execute trades for top signals up to position limit
             for entry in qualifying_signals:
                 if len(self.open_positions) >= max_positions:
+                    signal_stats['block_reasons']['position_limit'] = signal_stats['block_reasons'].get('position_limit', 0) + 1
+                    signal_stats['blocked'] += 1
                     break
 
                 symbol = entry['symbol']
@@ -1190,7 +1631,7 @@ class TradingBot:
 
                 logger.info(f"Selected {symbol} with confidence {entry_signal.get('confidence', 0):.1f} (best of {len(qualifying_signals)} signals)")
 
-                self.execute_entry(
+                result = self.execute_entry(
                     symbol=symbol,
                     direction=direction,
                     price=current_price,
@@ -1198,10 +1639,209 @@ class TradingBot:
                     reasoning=entry_signal.get('reasoning', '')
                 )
 
+                if result.get('filled'):
+                    signal_stats['executed'] += 1
+                else:
+                    signal_stats['blocked'] += 1
+                    signal_stats['block_reasons']['execution_failed'] = signal_stats['block_reasons'].get('execution_failed', 0) + 1
+
+            # ODE-97: Log signal summary
+            signal_stats['blocked'] = signal_stats['above_threshold'] - signal_stats['executed']
+            logger.info(
+                f"SIGNAL_SUMMARY | Total: {signal_stats['total']} | "
+                f"BUY: {signal_stats['buy']} | SELL: {signal_stats['sell']} | HOLD: {signal_stats['hold']} | "
+                f"Above threshold: {signal_stats['above_threshold']} | "
+                f"Executed: {signal_stats['executed']} | "
+                f"Blocked: {signal_stats['blocked']} (reasons: {signal_stats['block_reasons']})"
+            )
+
             logger.info(f"=== Cycle Complete: {len(self.open_positions)} positions ===")
 
         except Exception as e:
             logger.error(f"Trading cycle error: {e}", exc_info=True)
+
+    def _check_broker_health(self) -> dict:
+        """Check broker connection is active."""
+        try:
+            account = self.broker.get_account()
+            broker_name = getattr(self.broker, 'get_broker_name', lambda: 'Unknown')()
+            return {
+                'status': 'PASS',
+                'message': f'Connected to {broker_name}'
+            }
+        except Exception as e:
+            return {
+                'status': 'FAIL',
+                'message': f'Broker connection failed: {e}'
+            }
+
+    def _check_position_sync(self) -> dict:
+        """Check positions match between bot and broker."""
+        try:
+            broker_positions = self.broker.get_positions()
+            broker_count = len(broker_positions) if broker_positions else 0
+            bot_count = len(self.open_positions)
+
+            if broker_count == bot_count:
+                return {
+                    'status': 'PASS',
+                    'message': f'{bot_count} positions synced'
+                }
+            else:
+                return {
+                    'status': 'FAIL',
+                    'message': f'Position mismatch: bot has {bot_count}, broker has {broker_count}'
+                }
+        except Exception as e:
+            return {
+                'status': 'FAIL',
+                'message': f'Position sync check failed: {e}'
+            }
+
+    def _check_exit_manager_health(self) -> dict:
+        """Check ExitManager has all positions registered correctly."""
+        if not self.use_tiered_exits or not self.exit_manager:
+            return {
+                'status': 'INFO',
+                'message': 'Tiered exits disabled'
+            }
+
+        bot_symbols = set(self.open_positions.keys())
+        exit_mgr_symbols = set(self.exit_manager.positions.keys())
+
+        missing = bot_symbols - exit_mgr_symbols
+        orphaned = exit_mgr_symbols - bot_symbols
+
+        if not missing and not orphaned:
+            return {
+                'status': 'PASS',
+                'message': f'{len(bot_symbols)}/{len(bot_symbols)} positions registered'
+            }
+        else:
+            issues = []
+            if missing:
+                issues.append(f'missing: {list(missing)}')
+            if orphaned:
+                issues.append(f'orphaned: {list(orphaned)}')
+            return {
+                'status': 'FAIL',
+                'message': f'ExitManager mismatch - {", ".join(issues)}'
+            }
+
+    def run_health_check(self) -> dict:
+        """
+        Run comprehensive health check on bot systems.
+
+        Verifies:
+        - ExitManager: positions registered, state persistence, stops valid
+        - Live Bot: broker connected, account synced, positions synced
+
+        Returns:
+            dict with timestamp, overall_status, checks, and summary
+        """
+        results = {
+            'timestamp': datetime.now(pytz.UTC).isoformat(),
+            'overall_status': 'HEALTHY',
+            'checks': {},
+            'summary': {
+                'total_checks': 0,
+                'passed': 0,
+                'failed': 0,
+                'info': 0
+            }
+        }
+
+        # Check broker connection
+        results['checks']['broker_connected'] = self._check_broker_health()
+
+        # Check account sync
+        if self.cash > 0 and self.portfolio_value > 0:
+            results['checks']['account_synced'] = {
+                'status': 'PASS',
+                'message': f'Cash: ${self.cash:,.2f}, Portfolio: ${self.portfolio_value:,.2f}'
+            }
+        else:
+            results['checks']['account_synced'] = {
+                'status': 'FAIL',
+                'message': f'Account not synced: cash=${self.cash}, portfolio=${self.portfolio_value}'
+            }
+
+        # Check position sync
+        results['checks']['positions_synced'] = self._check_position_sync()
+
+        # Check ExitManager registration
+        results['checks']['positions_registered'] = self._check_exit_manager_health()
+
+        # Check strategy manager
+        if self.strategy_manager and len(self.strategy_manager.strategies) > 0:
+            strategy_names = [s.__class__.__name__ for s in self.strategy_manager.strategies]
+            results['checks']['strategy_manager_ready'] = {
+                'status': 'PASS',
+                'message': f'{len(self.strategy_manager.strategies)} strategies: {strategy_names}'
+            }
+        else:
+            results['checks']['strategy_manager_ready'] = {
+                'status': 'FAIL',
+                'message': 'No strategies loaded'
+            }
+
+        # Kill switch status (INFO only)
+        results['checks']['kill_switch_status'] = {
+            'status': 'INFO',
+            'message': 'TRIGGERED' if self.kill_switch_triggered else 'Not triggered'
+        }
+
+        # Drawdown guard status (INFO only)
+        if self.drawdown_guard.enabled:
+            status = self.drawdown_guard.get_status()
+            results['checks']['drawdown_guard_status'] = {
+                'status': 'INFO',
+                'message': f"Tier: {status.get('tier', 'NORMAL')}, Entries: {'allowed' if status.get('entries_allowed', True) else 'BLOCKED'}"
+            }
+        else:
+            results['checks']['drawdown_guard_status'] = {
+                'status': 'INFO',
+                'message': 'Disabled'
+            }
+
+        # Calculate summary
+        for check_name, check_result in results['checks'].items():
+            results['summary']['total_checks'] += 1
+            status = check_result.get('status', 'FAIL')
+            if status == 'PASS':
+                results['summary']['passed'] += 1
+            elif status == 'INFO':
+                results['summary']['info'] += 1
+            else:
+                results['summary']['failed'] += 1
+
+        # Determine overall status
+        if results['summary']['failed'] >= 3:
+            results['overall_status'] = 'UNHEALTHY'
+        elif results['summary']['failed'] >= 1:
+            results['overall_status'] = 'DEGRADED'
+
+        # Log summary
+        summary = results['summary']
+        status = results['overall_status']
+        positions_count = len(self.open_positions)
+        exit_mgr_count = len(self.exit_manager.positions) if self.exit_manager else 0
+        kill_switch = 'ON' if self.kill_switch_triggered else 'OFF'
+
+        logger.info(
+            f"HEALTH_CHECK | {status} | "
+            f"{summary['passed']}/{summary['total_checks']} PASS | "
+            f"{summary['failed']} FAIL | {summary['info']} INFO | "
+            f"Positions: {positions_count} | ExitMgr: {exit_mgr_count} | "
+            f"KillSwitch: {kill_switch}"
+        )
+
+        # Log individual failures at WARNING level
+        for check_name, check_result in results['checks'].items():
+            if check_result.get('status') == 'FAIL':
+                logger.warning(f"HEALTH_CHECK | {check_name} FAIL: {check_result.get('message', 'Unknown')}")
+
+        return results
 
     def start(self):
         """Start the trading bot."""
@@ -1227,12 +1867,18 @@ def get_seconds_until_next_hour(buffer_minutes: int = 2) -> int:
     """
     Calculate seconds until X minutes past the next hour.
 
-    FIX (Jan 2026): Smart hourly scheduling - align bot cycles to candle boundaries.
-    For 1-hour bars, candles close at :00 (e.g., 9 AM candle closes at 10:00).
-    We add a buffer (default 2 min) to ensure the candle is fully available.
+    FIX (Jan 7, 2026): Run early at bar open to match backtest entry timing.
+
+    Previous behavior (31 min delay) caused live entries to be ~30 min late vs backtest,
+    resulting in worse fills on momentum trades.
+
+    New behavior:
+    - Run at :02 past the hour (just after bar opens)
+    - Use the bar from 2 hours ago (fully settled, guaranteed available)
+    - Enter at market price (~bar open) matching backtest's next-bar-open entry
 
     Args:
-        buffer_minutes: Minutes after the hour to run (default 2)
+        buffer_minutes: Minutes after the hour to run (default 2 for early entry)
 
     Returns:
         Seconds until next run time (e.g., 10:02, 11:02, etc.)
@@ -1261,6 +1907,48 @@ def get_seconds_until_next_hour(buffer_minutes: int = 2) -> int:
     return int(seconds_until)
 
 
+def filter_incomplete_bars(data: pd.DataFrame, bar_duration_minutes: int = 60) -> pd.DataFrame:
+    """
+    Filter out incomplete (still forming) bars from the data.
+
+    FIX (Jan 6, 2026): YFinance often returns the current forming bar.
+    We must drop it to ensure we only trade on completed candles.
+
+    Args:
+        data: DataFrame with 'timestamp' column
+        bar_duration_minutes: Duration of each bar in minutes (default 60)
+
+    Returns:
+        DataFrame with incomplete bars removed
+    """
+    if data is None or len(data) == 0:
+        return data
+
+    if 'timestamp' not in data.columns:
+        return data
+
+    eastern = pytz.timezone('America/New_York')
+    now = datetime.now(eastern)
+
+    # Check if the last bar is incomplete
+    latest_ts = data['timestamp'].iloc[-1]
+
+    # Ensure timezone-aware
+    if latest_ts.tzinfo is None:
+        latest_ts = eastern.localize(latest_ts)
+    elif str(latest_ts.tzinfo) != str(eastern):
+        latest_ts = latest_ts.astimezone(eastern)
+
+    bar_completion_time = latest_ts + timedelta(minutes=bar_duration_minutes)
+
+    if now < bar_completion_time:
+        # Last bar is incomplete - drop it
+        logger.debug(f"FILTER_INCOMPLETE | Dropping incomplete bar at {latest_ts.strftime('%H:%M')}")
+        return data.iloc[:-1].reset_index(drop=True)
+
+    return data
+
+
 def validate_candle_timestamp(data: pd.DataFrame, expected_hour: int = None,
                                bar_duration_minutes: int = 60) -> bool:
     """
@@ -1269,10 +1957,12 @@ def validate_candle_timestamp(data: pd.DataFrame, expected_hour: int = None,
     FIX (Jan 2026): Ensure we're trading on completed candles only.
     A bar is incomplete if current_time < bar_start + bar_duration.
 
-    For 1-hour bars:
-    - 9:30 bar completes at 10:30 (first bar of day, market opens at 9:30)
-    - 10:00 bar completes at 11:00
-    - etc.
+    FIX (Jan 6, 2026): Handle yfinance :30-aligned bars.
+    YFinance returns hourly bars aligned to market open (9:30), so bars are:
+    9:30, 10:30, 11:30, 12:30, 13:30, 14:30, 15:30
+    NOT 9:00, 10:00, 11:00, etc.
+
+    When the latest bar is incomplete, we drop it and use the previous completed bar.
 
     Args:
         data: DataFrame with 'timestamp' column
@@ -1290,37 +1980,72 @@ def validate_candle_timestamp(data: pd.DataFrame, expected_hour: int = None,
 
     eastern = pytz.timezone('America/New_York')
     now = datetime.now(eastern)
-    latest_ts = data['timestamp'].iloc[-1]
 
-    # Ensure timezone-aware
-    if latest_ts.tzinfo is None:
-        latest_ts = eastern.localize(latest_ts)
-    else:
-        latest_ts = latest_ts.astimezone(eastern)
+    # FIX (Jan 6, 2026): Find the last COMPLETED bar, skipping incomplete ones
+    # YFinance often returns the current forming bar which we must skip
+    bar_index = -1  # Start with last bar
+    latest_ts = None
+    max_lookback = min(3, len(data))  # Check up to 3 bars back
 
-    # FIX (Jan 2026): Check if bar is COMPLETE
-    # A bar starting at X:XX is not complete until X:XX + bar_duration
-    bar_completion_time = latest_ts + timedelta(minutes=bar_duration_minutes)
+    for i in range(max_lookback):
+        idx = -(i + 1)
+        if abs(idx) > len(data):
+            break
 
-    if now < bar_completion_time:
-        # Bar is still forming - this is incomplete data!
-        minutes_until_complete = (bar_completion_time - now).total_seconds() / 60
-        logger.warning(
-            f"INCOMPLETE_BAR | Bar {latest_ts.strftime('%H:%M')} not complete until "
-            f"{bar_completion_time.strftime('%H:%M')} ({minutes_until_complete:.0f}m remaining) - SKIPPING"
-        )
+        candidate_ts = data['timestamp'].iloc[idx]
+
+        # Ensure timezone-aware
+        if candidate_ts.tzinfo is None:
+            candidate_ts = eastern.localize(candidate_ts)
+        else:
+            candidate_ts = candidate_ts.astimezone(eastern)
+
+        # Check if this bar is complete
+        bar_completion_time = candidate_ts + timedelta(minutes=bar_duration_minutes)
+
+        if now >= bar_completion_time:
+            # Found a completed bar!
+            latest_ts = candidate_ts
+            bar_index = idx
+            if i > 0:
+                logger.info(f"CANDLE_FIX | Skipped {i} incomplete bar(s), using {latest_ts.strftime('%H:%M')} bar")
+            break
+        else:
+            # Bar is still forming
+            minutes_until_complete = (bar_completion_time - now).total_seconds() / 60
+            logger.debug(
+                f"INCOMPLETE_BAR | Bar {candidate_ts.strftime('%H:%M')} not complete until "
+                f"{bar_completion_time.strftime('%H:%M')} ({minutes_until_complete:.0f}m remaining)"
+            )
+
+    if latest_ts is None:
+        # No completed bars found
+        logger.warning("CANDLE_VALIDATION | No completed bars found in recent data - SKIPPING")
         return False
 
-    # For 1-hour bars running at HH:02, we expect the (HH-1):00 candle
-    # But handle 9:30 market open - first bar is 9:30, not 9:00
+    # FIX (Jan 6, 2026): Handle :30-aligned bars from yfinance
+    # YFinance returns bars at 9:30, 10:30, 11:30, etc. (aligned to market open)
+    # When we expect hour X, accept both X:00 and X:30 bars
+    # Also accept (X-1):30 bars since a 10:30 bar covers 10:30-11:30 and should be
+    # used when we expect hour 10 (running at 11:02)
     if expected_hour is not None:
         bar_hour = latest_ts.hour
         bar_minute = latest_ts.minute
 
-        # Special case: 9:30 bar is valid when expecting 9:00 hour
-        # (market opens at 9:30, not 9:00)
-        is_market_open_bar = (bar_hour == 9 and bar_minute == 30)
-        expected_matches = (bar_hour == expected_hour) or (expected_hour == 9 and is_market_open_bar)
+        # Accept :30-aligned bars from yfinance
+        # A 10:30 bar covers 10:30-11:30, so when expected_hour=10 (running at 11:02),
+        # we should accept the 10:30 bar
+        is_half_hour_bar = (bar_minute == 30)
+
+        # Match conditions:
+        # 1. Exact hour match (bar_hour == expected_hour) for :00 bars
+        # 2. Half-hour bar from expected hour (bar_hour == expected_hour and minute == 30)
+        # 3. Half-hour bar from previous hour that covers expected hour
+        #    (e.g., 9:30 bar when expecting hour 9, 10:30 when expecting hour 10)
+        expected_matches = (
+            (bar_hour == expected_hour) or  # 10:00 or 10:30 bar when expecting 10
+            (bar_hour == expected_hour - 1 and is_half_hour_bar)  # 9:30 bar when expecting 10
+        )
 
         if not expected_matches:
             logger.warning(f"CANDLE_VALIDATION | Expected {expected_hour}:00 bar, got {latest_ts.strftime('%H:%M')}")
@@ -1352,7 +2077,7 @@ def main():
     parser.add_argument('--symbols', type=str, default=None,
                         help='Comma-separated list of symbols from scanner (overrides config)')
     parser.add_argument('--candle-delay', type=int, default=2,
-                        help='Minutes after hour to run cycle (default: 2)')
+                        help='Minutes after hour to run cycle (default: 2 for early bar open entry)')
     args = parser.parse_args()
 
     # Parse symbols if provided

@@ -7,6 +7,7 @@ interface UsePollingOptions<T> {
   interval?: number;
   enabled?: boolean;
   onError?: (error: Error) => void;
+  deps?: unknown[]; // Additional dependencies that trigger refetch
 }
 
 interface UsePollingResult<T> {
@@ -21,6 +22,7 @@ export function usePolling<T>({
   interval = 5000,
   enabled = true,
   onError,
+  deps = [],
 }: UsePollingOptions<T>): UsePollingResult<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<Error | null>(null);
@@ -39,7 +41,8 @@ export function usePolling<T>({
     } finally {
       setIsLoading(false);
     }
-  }, [fetcher, onError]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onError, ...deps]);
 
   useEffect(() => {
     if (!enabled) {

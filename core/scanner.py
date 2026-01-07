@@ -111,6 +111,7 @@ class VolatilityScanner:
 
             try:
                 # Filter to data available before target date (NO LOOK-AHEAD)
+                # With hourly bars, <= midnight excludes all intraday data
                 if 'timestamp' in df.columns:
                     df_available = df[df['timestamp'] <= target_date].copy()
                 else:

@@ -163,6 +163,19 @@ export interface AccountData {
   daily_pnl_percent: number;
 }
 
+export interface EquityHistoryPoint {
+  timestamp: string;
+  equity: number;
+}
+
+export interface EquityHistoryData {
+  data: EquityHistoryPoint[];
+  period: string;
+  base_value: number;
+}
+
+export type EquityPeriod = "7D" | "30D" | "90D" | "1Y" | "ALL";
+
 export interface Position {
   symbol: string;
   qty: number;
@@ -228,6 +241,14 @@ export async function getAccount(): Promise<AccountData> {
   const response = await fetch(`${API_BASE_URL}/api/account`);
   if (!response.ok) {
     throw new Error(`Failed to fetch account: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function getEquityHistory(period: EquityPeriod = "30D"): Promise<EquityHistoryData> {
+  const response = await fetch(`${API_BASE_URL}/api/equity-history?period=${period}`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch equity history: ${response.status}`);
   }
   return response.json();
 }

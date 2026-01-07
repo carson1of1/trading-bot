@@ -30,6 +30,7 @@ trading:
   watchlist_file: "universe.yaml"
 risk_management:
   max_open_positions: 5
+  max_position_dollars: 50000  # High limit to prevent position size guard triggering in tests
 exit_manager:
   enabled: false
 logging:
@@ -280,6 +281,7 @@ trading:
   watchlist_file: "universe.yaml"
 risk_management:
   max_open_positions: 2
+  max_position_dollars: 50000  # High limit to prevent position size guard triggering
 entry_gate:
   confidence_threshold: 60
 logging:
@@ -616,8 +618,8 @@ proven_symbols:
             bot = TradingBot(config_path=str(config_path))
             bot.portfolio_value = 100000.0
 
-            # Mock broker to raise exception on submit_order
-            bot.broker.submit_order.side_effect = Exception("API connection failed")
+            # Mock broker to raise exception on submit_bracket_order
+            bot.broker.submit_bracket_order.side_effect = Exception("API connection failed")
 
             # execute_entry should catch exception and return filled=False
             result = bot.execute_entry('AAPL', 'LONG', 150.0, 'Momentum', 'Test')
