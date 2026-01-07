@@ -349,6 +349,15 @@ class Backtest1Hour:
         """
         Generate trading signals using strategies.
 
+        FIX (Jan 7, 2026): Use bar N-1 for signal generation to match live bot timing.
+        Live bot runs at :02 past the hour using the settled bar from 2 hours ago.
+        This creates a consistent 2-bar signal→entry lag in both live and backtest.
+
+        Signal timing:
+        - Signal generated using bar i-1's data (settled bar)
+        - Signal placed at bar i
+        - Entry executed at bar i+1's open
+
         If scanner is enabled, only generates signals for days when the symbol
         was in the scanned list.
 
@@ -365,13 +374,15 @@ class Backtest1Hour:
         data['strategy'] = ''
         data['reasoning'] = ''
 
-        # Warmup period for hourly bars
-        MIN_WARMUP = min(20, max(10, int(len(data) * 0.2)))
+        # Warmup period for hourly bars (need extra bar for N-1 lookback)
+        MIN_WARMUP = min(21, max(11, int(len(data) * 0.2) + 1))
 
         for i in range(MIN_WARMUP, len(data)):
-            historical_data = data.iloc[:i].copy()
-            current_price = data.iloc[i]['close']
-            timestamp = data.iloc[i].get('timestamp', None)
+            # FIX (Jan 7, 2026): Use bar i-1 (settled) for signals to match live timing
+            # Live runs at :02 using bar from 2 hours ago, enters at bar open
+            historical_data = data.iloc[:i-1].copy()
+            current_price = data.iloc[i-1]['close']  # Settled bar's close
+            timestamp = data.iloc[i].get('timestamp', None)  # Signal placed at bar i
 
             if pd.isna(current_price):
                 continue
