@@ -1354,3 +1354,43 @@ class TestEmergencyPositionLimitCheck:
         # Verify broker calls - OLD1 is LONG (sell), OLD2 is SHORT (buy)
         calls = mock_broker.submit_order.call_args_list
         assert len(calls) == 2
+
+    @patch('bot.TradingBot._cleanup_position')
+    def test_correct_sides_for_long_and_short(self, mock_cleanup):
+        """LONG positions sell to close, SHORT positions buy to close."""
+        bot = TradingBot.__new__(TradingBot)
+        bot.config = {'risk_management': {'max_open_positions': 1}}
+        bot.kill_switch_triggered = False
+        bot.use_tiered_exits = False
+        bot.exit_manager = None
+
+        mock_broker = MagicMock()
+        mock_order = MagicMock()
+        mock_order.filled_avg_price = 100.0
+        mock_broker.submit_order.return_value = mock_order
+        bot.broker = mock_broker
+        bot.trade_logger = MagicMock()
+
+        base_time = datetime(2026, 1, 6, 10, 0, 0)
+        bot.open_positions = {
+            'LONG_POS': {'qty': 10, 'direction': 'LONG', 'entry_price': 100.0,
+                         'entry_time': base_time, 'strategy': 'Test'},
+            'SHORT_POS': {'qty': 20, 'direction': 'SHORT', 'entry_price': 200.0,
+                          'entry_time': base_time + timedelta(hours=1), 'strategy': 'Test'},
+            'KEEP': {'qty': 5, 'direction': 'LONG', 'entry_price': 50.0,
+                     'entry_time': base_time + timedelta(hours=2), 'strategy': 'Test'},
+        }
+
+        bot._emergency_position_limit_check()
+
+        calls = mock_broker.submit_order.call_args_list
+
+        # First call: LONG_POS (oldest) - should sell
+        assert calls[0][1]['symbol'] == 'LONG_POS'
+        assert calls[0][1]['side'] == 'sell'
+        assert calls[0][1]['qty'] == 10
+
+        # Second call: SHORT_POS (2nd oldest) - should buy
+        assert calls[1][1]['symbol'] == 'SHORT_POS'
+        assert calls[1][1]['side'] == 'buy'
+        assert calls[1][1]['qty'] == 20
