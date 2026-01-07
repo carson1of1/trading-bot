@@ -1433,3 +1433,49 @@ class TestEmergencyPositionLimitCheck:
         assert 'FAIL' in bot.open_positions  # Failed to liquidate
         assert 'SUCCESS' not in bot.open_positions  # Successfully liquidated
         assert 'KEEP' in bot.open_positions  # Not targeted
+
+    @patch('bot.TradingBot._emergency_position_limit_check')
+    @patch('bot.TradingBot.sync_positions')
+    @patch('bot.TradingBot.sync_account')
+    @patch('bot.TradingBot._reconcile_broker_state')
+    @patch('bot.TradingBot.run_health_check')
+    def test_called_in_trading_cycle_after_sync(self, mock_health, mock_reconcile,
+                                                  mock_sync_account, mock_sync_pos,
+                                                  mock_emergency):
+        """Emergency check is called after sync_positions in trading cycle."""
+        mock_emergency.return_value = True  # Trigger emergency
+
+        bot = TradingBot.__new__(TradingBot)
+        bot.config = {'risk_management': {}}
+        bot.drawdown_guard = MagicMock()
+        bot.drawdown_guard.enabled = False
+        bot.open_positions = {}
+
+        bot.run_trading_cycle()
+
+        # Verify call order
+        mock_sync_pos.assert_called_once()
+        mock_emergency.assert_called_once()
+
+    @patch('bot.TradingBot._emergency_position_limit_check')
+    @patch('bot.TradingBot.sync_positions')
+    @patch('bot.TradingBot.sync_account')
+    @patch('bot.TradingBot._reconcile_broker_state')
+    @patch('bot.TradingBot.run_health_check')
+    def test_cycle_returns_early_when_emergency_triggered(self, mock_health, mock_reconcile,
+                                                           mock_sync_account, mock_sync_pos,
+                                                           mock_emergency):
+        """When emergency triggers, cycle returns early without checking exits/entries."""
+        mock_emergency.return_value = True
+
+        bot = TradingBot.__new__(TradingBot)
+        bot.config = {'risk_management': {}}
+        bot.drawdown_guard = MagicMock()
+        bot.drawdown_guard.enabled = False
+        bot.open_positions = {'AAPL': {}}
+        bot.fetch_data = MagicMock()
+
+        bot.run_trading_cycle()
+
+        # fetch_data should NOT be called (cycle returned early)
+        bot.fetch_data.assert_not_called()

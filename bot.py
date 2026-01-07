@@ -1318,6 +1318,11 @@ class TradingBot:
             self.sync_account()
             self.sync_positions()
 
+            # 1.5 Emergency position limit check (ODE-88)
+            # Must run immediately after sync to detect violations before any other logic
+            if self._emergency_position_limit_check():
+                return  # Halt cycle - kill switch triggered
+
             # 2. Update drawdown guard (must be done after sync)
             if self.drawdown_guard.enabled:
                 account = self.broker.get_account()
