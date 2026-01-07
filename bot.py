@@ -1246,7 +1246,7 @@ class TradingBot:
                     time_in_force='day'
                 )
 
-                if order:
+                if order and getattr(order, 'status', None) in ['filled', 'new', 'accepted']:
                     exit_price = float(order.filled_avg_price) if hasattr(order, 'filled_avg_price') and order.filled_avg_price else entry_price
 
                     # Calculate P&L
@@ -1266,9 +1266,22 @@ class TradingBot:
                         exit_reason='emergency_position_limit'
                     )
 
-                    # Cleanup
-                    if self.use_tiered_exits and self.exit_manager:
-                        self.exit_manager.unregister_position(symbol)
+                    # Update risk guards (same as execute_exit)
+                    if pnl < 0 and self.entry_gate:
+                        self.entry_gate.record_loss(datetime.now())
+
+                    if self.drawdown_guard.enabled:
+                        self.drawdown_guard.record_realized_pnl(pnl)
+
+                    if self.losing_streak_guard.enabled:
+                        self.losing_streak_guard.record_trade(
+                            symbol=symbol,
+                            realized_pnl=pnl,
+                            risk_amount=pos.get('risk_amount', abs(pnl)),
+                            close_time=datetime.now()
+                        )
+
+                    # Cleanup (_cleanup_position already handles exit_manager unregister)
                     self._cleanup_position(symbol)
                     del self.open_positions[symbol]
 

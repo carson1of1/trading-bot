@@ -1320,13 +1320,18 @@ class TestEmergencyPositionLimitCheck:
         mock_broker = MagicMock()
         mock_order = MagicMock()
         mock_order.filled_avg_price = 150.0
+        mock_order.status = 'filled'
         mock_order.id = 'order123'
         mock_broker.submit_order.return_value = mock_order
         bot.broker = mock_broker
 
-        # Create mock trade logger
-        mock_trade_logger = MagicMock()
-        bot.trade_logger = mock_trade_logger
+        # Create mock trade logger and guards
+        bot.trade_logger = MagicMock()
+        bot.entry_gate = MagicMock()
+        bot.drawdown_guard = MagicMock()
+        bot.drawdown_guard.enabled = False
+        bot.losing_streak_guard = MagicMock()
+        bot.losing_streak_guard.enabled = False
 
         # 4 positions, max 2 = 2 excess (liquidate oldest 2)
         base_time = datetime(2026, 1, 6, 10, 0, 0)
@@ -1367,9 +1372,15 @@ class TestEmergencyPositionLimitCheck:
         mock_broker = MagicMock()
         mock_order = MagicMock()
         mock_order.filled_avg_price = 100.0
+        mock_order.status = 'filled'
         mock_broker.submit_order.return_value = mock_order
         bot.broker = mock_broker
         bot.trade_logger = MagicMock()
+        bot.entry_gate = MagicMock()
+        bot.drawdown_guard = MagicMock()
+        bot.drawdown_guard.enabled = False
+        bot.losing_streak_guard = MagicMock()
+        bot.losing_streak_guard.enabled = False
 
         base_time = datetime(2026, 1, 6, 10, 0, 0)
         bot.open_positions = {
@@ -1408,12 +1419,18 @@ class TestEmergencyPositionLimitCheck:
         mock_broker = MagicMock()
         mock_order = MagicMock()
         mock_order.filled_avg_price = 100.0
+        mock_order.status = 'filled'
         mock_broker.submit_order.side_effect = [
             Exception("Network error"),  # First fails
             mock_order,  # Second succeeds
         ]
         bot.broker = mock_broker
         bot.trade_logger = MagicMock()
+        bot.entry_gate = MagicMock()
+        bot.drawdown_guard = MagicMock()
+        bot.drawdown_guard.enabled = False
+        bot.losing_streak_guard = MagicMock()
+        bot.losing_streak_guard.enabled = False
 
         base_time = datetime(2026, 1, 6, 10, 0, 0)
         bot.open_positions = {
