@@ -74,6 +74,9 @@ class TestPositionSizeViolationDetection:
             from bot import TradingBot
             bot = TradingBot()
             bot.portfolio_value = 100000
+            # Override config for test: set dollar limit to $10,000
+            bot.config['risk_management']['max_position_dollars'] = 10000
+            bot.config['risk_management']['max_position_size_pct'] = 100  # Disable pct check
             bot.open_positions = {
                 'AAPL': {
                     'symbol': 'AAPL',
@@ -107,6 +110,9 @@ class TestPositionSizeViolationDetection:
             from bot import TradingBot
             bot = TradingBot()
             bot.portfolio_value = 50000  # Small portfolio
+            # Override config for test: set pct limit to 10%
+            bot.config['risk_management']['max_position_dollars'] = 999999  # Disable dollar check
+            bot.config['risk_management']['max_position_size_pct'] = 10  # 10% limit
             bot.open_positions = {
                 'AAPL': {
                     'symbol': 'AAPL',
@@ -172,11 +178,14 @@ class TestPositionSizeLiquidation:
             from bot import TradingBot
             bot = TradingBot()
             bot.portfolio_value = 100000
+            # Override config for test: set dollar limit to $10,000
+            bot.config['risk_management']['max_position_dollars'] = 10000
+            bot.config['risk_management']['max_position_size_pct'] = 100  # Disable pct check
             bot.open_positions = {
                 'AAPL': {
                     'symbol': 'AAPL',
                     'qty': 100,
-                    'current_price': 150.0,
+                    'current_price': 150.0,  # Value: $15,000 > $10,000
                     'entry_price': 145.0,
                     'direction': 'LONG'
                 }
@@ -208,6 +217,9 @@ class TestPositionSizeLiquidation:
             from bot import TradingBot
             bot = TradingBot()
             bot.portfolio_value = 100000
+            # Override config for test: set dollar limit to $10,000
+            bot.config['risk_management']['max_position_dollars'] = 10000
+            bot.config['risk_management']['max_position_size_pct'] = 100  # Disable pct check
             bot.open_positions = {
                 'TSLA': {
                     'symbol': 'TSLA',
@@ -244,18 +256,21 @@ class TestPositionSizeLiquidation:
             from bot import TradingBot
             bot = TradingBot()
             bot.portfolio_value = 100000
+            # Override config for test: set dollar limit to $10,000
+            bot.config['risk_management']['max_position_dollars'] = 10000
+            bot.config['risk_management']['max_position_size_pct'] = 100  # Disable pct check
             bot.open_positions = {
                 'AAPL': {
                     'symbol': 'AAPL',
                     'qty': 100,
-                    'current_price': 150.0,  # Value: $15,000
+                    'current_price': 150.0,  # Value: $15,000 > $10,000
                     'entry_price': 145.0,
                     'direction': 'LONG'
                 },
                 'TSLA': {
                     'symbol': 'TSLA',
                     'qty': 50,
-                    'current_price': 250.0,  # Value: $12,500
+                    'current_price': 250.0,  # Value: $12,500 > $10,000
                     'entry_price': 260.0,
                     'direction': 'SHORT'
                 }
@@ -286,6 +301,9 @@ class TestPositionCleanupAfterLiquidation:
             from bot import TradingBot
             bot = TradingBot()
             bot.portfolio_value = 100000
+            # Override config for test: set dollar limit to $10,000
+            bot.config['risk_management']['max_position_dollars'] = 10000
+            bot.config['risk_management']['max_position_size_pct'] = 100  # Disable pct check
             bot.highest_prices = {'AAPL': 150.0}
             bot.lowest_prices = {'AAPL': 145.0}
             bot.trailing_stops = {'AAPL': {'activated': False, 'price': 0.0}}
@@ -293,7 +311,7 @@ class TestPositionCleanupAfterLiquidation:
                 'AAPL': {
                     'symbol': 'AAPL',
                     'qty': 100,
-                    'current_price': 150.0,
+                    'current_price': 150.0,  # Value: $15,000 > $10,000
                     'entry_price': 145.0,
                     'direction': 'LONG'
                 }

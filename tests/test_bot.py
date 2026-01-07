@@ -1285,3 +1285,214 @@ proven_symbols:
             error_calls = [call for call in mock_logger.error.call_args_list
                           if 'AAPL' in str(call) and 'FAILED' in str(call)]
             assert len(error_calls) > 0, "Should log error for failed position exit check"
+
+
+class TestEmergencyPositionLimitCheck:
+    """Tests for _emergency_position_limit_check() method (ODE-88)."""
+
+    def test_no_violation_returns_false(self):
+        """When position count <= max, returns False and takes no action."""
+        bot = TradingBot.__new__(TradingBot)
+        bot.config = {'risk_management': {'max_open_positions': 5}}
+        bot.open_positions = {
+            'AAPL': {'qty': 10, 'direction': 'LONG', 'entry_time': datetime.now()},
+            'MSFT': {'qty': 10, 'direction': 'LONG', 'entry_time': datetime.now()},
+            'GOOG': {'qty': 10, 'direction': 'LONG', 'entry_time': datetime.now()},
+        }
+        bot.kill_switch_triggered = False
+
+        result = bot._emergency_position_limit_check()
+
+        assert result is False
+        assert bot.kill_switch_triggered is False
+        assert len(bot.open_positions) == 3  # No positions liquidated
+
+    @patch('bot.TradingBot._cleanup_position')
+    def test_violation_liquidates_oldest_positions(self, mock_cleanup):
+        """When position count > max, liquidates oldest excess positions."""
+        bot = TradingBot.__new__(TradingBot)
+        bot.config = {'risk_management': {'max_open_positions': 2}}
+        bot.kill_switch_triggered = False
+        bot.use_tiered_exits = False
+        bot.exit_manager = None
+
+        # Create mock broker
+        mock_broker = MagicMock()
+        mock_order = MagicMock()
+        mock_order.filled_avg_price = 150.0
+        mock_order.status = 'filled'
+        mock_order.id = 'order123'
+        mock_broker.submit_order.return_value = mock_order
+        bot.broker = mock_broker
+
+        # Create mock trade logger and guards
+        bot.trade_logger = MagicMock()
+        bot.entry_gate = MagicMock()
+        bot.drawdown_guard = MagicMock()
+        bot.drawdown_guard.enabled = False
+        bot.losing_streak_guard = MagicMock()
+        bot.losing_streak_guard.enabled = False
+
+        # 4 positions, max 2 = 2 excess (liquidate oldest 2)
+        base_time = datetime(2026, 1, 6, 10, 0, 0)
+        bot.open_positions = {
+            'OLD1': {'qty': 10, 'direction': 'LONG', 'entry_price': 100.0,
+                     'entry_time': base_time, 'strategy': 'Test'},  # Oldest - liquidate
+            'OLD2': {'qty': 20, 'direction': 'SHORT', 'entry_price': 200.0,
+                     'entry_time': base_time + timedelta(hours=1), 'strategy': 'Test'},  # 2nd oldest - liquidate
+            'NEW1': {'qty': 15, 'direction': 'LONG', 'entry_price': 150.0,
+                     'entry_time': base_time + timedelta(hours=2), 'strategy': 'Test'},  # Keep
+            'NEW2': {'qty': 25, 'direction': 'LONG', 'entry_price': 250.0,
+                     'entry_time': base_time + timedelta(hours=3), 'strategy': 'Test'},  # Keep
+        }
+
+        result = bot._emergency_position_limit_check()
+
+        assert result is True
+        assert bot.kill_switch_triggered is True
+        assert len(bot.open_positions) == 2
+        assert 'OLD1' not in bot.open_positions
+        assert 'OLD2' not in bot.open_positions
+        assert 'NEW1' in bot.open_positions
+        assert 'NEW2' in bot.open_positions
+
+        # Verify broker calls - OLD1 is LONG (sell), OLD2 is SHORT (buy)
+        calls = mock_broker.submit_order.call_args_list
+        assert len(calls) == 2
+
+    @patch('bot.TradingBot._cleanup_position')
+    def test_correct_sides_for_long_and_short(self, mock_cleanup):
+        """LONG positions sell to close, SHORT positions buy to close."""
+        bot = TradingBot.__new__(TradingBot)
+        bot.config = {'risk_management': {'max_open_positions': 1}}
+        bot.kill_switch_triggered = False
+        bot.use_tiered_exits = False
+        bot.exit_manager = None
+
+        mock_broker = MagicMock()
+        mock_order = MagicMock()
+        mock_order.filled_avg_price = 100.0
+        mock_order.status = 'filled'
+        mock_broker.submit_order.return_value = mock_order
+        bot.broker = mock_broker
+        bot.trade_logger = MagicMock()
+        bot.entry_gate = MagicMock()
+        bot.drawdown_guard = MagicMock()
+        bot.drawdown_guard.enabled = False
+        bot.losing_streak_guard = MagicMock()
+        bot.losing_streak_guard.enabled = False
+
+        base_time = datetime(2026, 1, 6, 10, 0, 0)
+        bot.open_positions = {
+            'LONG_POS': {'qty': 10, 'direction': 'LONG', 'entry_price': 100.0,
+                         'entry_time': base_time, 'strategy': 'Test'},
+            'SHORT_POS': {'qty': 20, 'direction': 'SHORT', 'entry_price': 200.0,
+                          'entry_time': base_time + timedelta(hours=1), 'strategy': 'Test'},
+            'KEEP': {'qty': 5, 'direction': 'LONG', 'entry_price': 50.0,
+                     'entry_time': base_time + timedelta(hours=2), 'strategy': 'Test'},
+        }
+
+        bot._emergency_position_limit_check()
+
+        calls = mock_broker.submit_order.call_args_list
+
+        # First call: LONG_POS (oldest) - should sell
+        assert calls[0][1]['symbol'] == 'LONG_POS'
+        assert calls[0][1]['side'] == 'sell'
+        assert calls[0][1]['qty'] == 10
+
+        # Second call: SHORT_POS (2nd oldest) - should buy
+        assert calls[1][1]['symbol'] == 'SHORT_POS'
+        assert calls[1][1]['side'] == 'buy'
+        assert calls[1][1]['qty'] == 20
+
+    @patch('bot.TradingBot._cleanup_position')
+    def test_partial_failure_continues_and_sets_kill_switch(self, mock_cleanup):
+        """If one liquidation fails, others continue and kill switch still set."""
+        bot = TradingBot.__new__(TradingBot)
+        bot.config = {'risk_management': {'max_open_positions': 1}}
+        bot.kill_switch_triggered = False
+        bot.use_tiered_exits = False
+        bot.exit_manager = None
+
+        # First call fails, second succeeds
+        mock_broker = MagicMock()
+        mock_order = MagicMock()
+        mock_order.filled_avg_price = 100.0
+        mock_order.status = 'filled'
+        mock_broker.submit_order.side_effect = [
+            Exception("Network error"),  # First fails
+            mock_order,  # Second succeeds
+        ]
+        bot.broker = mock_broker
+        bot.trade_logger = MagicMock()
+        bot.entry_gate = MagicMock()
+        bot.drawdown_guard = MagicMock()
+        bot.drawdown_guard.enabled = False
+        bot.losing_streak_guard = MagicMock()
+        bot.losing_streak_guard.enabled = False
+
+        base_time = datetime(2026, 1, 6, 10, 0, 0)
+        bot.open_positions = {
+            'FAIL': {'qty': 10, 'direction': 'LONG', 'entry_price': 100.0,
+                     'entry_time': base_time, 'strategy': 'Test'},
+            'SUCCESS': {'qty': 20, 'direction': 'LONG', 'entry_price': 200.0,
+                        'entry_time': base_time + timedelta(hours=1), 'strategy': 'Test'},
+            'KEEP': {'qty': 5, 'direction': 'LONG', 'entry_price': 50.0,
+                     'entry_time': base_time + timedelta(hours=2), 'strategy': 'Test'},
+        }
+
+        result = bot._emergency_position_limit_check()
+
+        assert result is True
+        assert bot.kill_switch_triggered is True
+        # FAIL stays (couldn't liquidate), SUCCESS removed, KEEP stays
+        assert 'FAIL' in bot.open_positions  # Failed to liquidate
+        assert 'SUCCESS' not in bot.open_positions  # Successfully liquidated
+        assert 'KEEP' in bot.open_positions  # Not targeted
+
+    @patch('bot.TradingBot._emergency_position_limit_check')
+    @patch('bot.TradingBot.sync_positions')
+    @patch('bot.TradingBot.sync_account')
+    @patch('bot.TradingBot._reconcile_broker_state')
+    @patch('bot.TradingBot.run_health_check')
+    def test_called_in_trading_cycle_after_sync(self, mock_health, mock_reconcile,
+                                                  mock_sync_account, mock_sync_pos,
+                                                  mock_emergency):
+        """Emergency check is called after sync_positions in trading cycle."""
+        mock_emergency.return_value = True  # Trigger emergency
+
+        bot = TradingBot.__new__(TradingBot)
+        bot.config = {'risk_management': {}}
+        bot.drawdown_guard = MagicMock()
+        bot.drawdown_guard.enabled = False
+        bot.open_positions = {}
+
+        bot.run_trading_cycle()
+
+        # Verify call order
+        mock_sync_pos.assert_called_once()
+        mock_emergency.assert_called_once()
+
+    @patch('bot.TradingBot._emergency_position_limit_check')
+    @patch('bot.TradingBot.sync_positions')
+    @patch('bot.TradingBot.sync_account')
+    @patch('bot.TradingBot._reconcile_broker_state')
+    @patch('bot.TradingBot.run_health_check')
+    def test_cycle_returns_early_when_emergency_triggered(self, mock_health, mock_reconcile,
+                                                           mock_sync_account, mock_sync_pos,
+                                                           mock_emergency):
+        """When emergency triggers, cycle returns early without checking exits/entries."""
+        mock_emergency.return_value = True
+
+        bot = TradingBot.__new__(TradingBot)
+        bot.config = {'risk_management': {}}
+        bot.drawdown_guard = MagicMock()
+        bot.drawdown_guard.enabled = False
+        bot.open_positions = {'AAPL': {}}
+        bot.fetch_data = MagicMock()
+
+        bot.run_trading_cycle()
+
+        # fetch_data should NOT be called (cycle returned early)
+        bot.fetch_data.assert_not_called()

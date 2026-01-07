@@ -1200,6 +1200,108 @@ class TradingBot:
 
         return violations
 
+    def _emergency_position_limit_check(self) -> bool:
+        """
+        Check if position count exceeds max and liquidate excess (oldest first).
+
+        Triggers when broker shows more positions than max_open_positions.
+        This indicates a bug, race condition, or manual intervention.
+
+        Returns:
+            True if emergency triggered (kill switch set), False otherwise
+        """
+        max_positions = self.config.get('risk_management', {}).get('max_open_positions', 5)
+        current_count = len(self.open_positions)
+
+        if current_count <= max_positions:
+            return False
+
+        excess_count = current_count - max_positions
+
+        logger.critical(
+            f"EMERGENCY: Position count {current_count} exceeds max {max_positions} - "
+            f"LIQUIDATING {excess_count} oldest positions"
+        )
+
+        # Sort by entry_time (oldest first)
+        sorted_positions = sorted(
+            self.open_positions.items(),
+            key=lambda x: x[1].get('entry_time', datetime.now())
+        )
+
+        # Liquidate oldest excess positions
+        liquidated = 0
+        for symbol, pos in sorted_positions[:excess_count]:
+            try:
+                direction = pos.get('direction', 'LONG')
+                qty = pos['qty']
+                entry_price = pos.get('entry_price', 0)
+
+                side = 'sell' if direction == 'LONG' else 'buy'
+                order = self.broker.submit_order(
+                    symbol=symbol,
+                    qty=qty,
+                    side=side,
+                    type='market',
+                    time_in_force='day'
+                )
+
+                if order and getattr(order, 'status', None) in ['filled', 'new', 'accepted']:
+                    exit_price = float(order.filled_avg_price) if hasattr(order, 'filled_avg_price') and order.filled_avg_price else entry_price
+
+                    # Calculate P&L
+                    if direction == 'LONG':
+                        pnl = (exit_price - entry_price) * qty
+                    else:
+                        pnl = (entry_price - exit_price) * qty
+
+                    # Log trade
+                    self.trade_logger.log_trade(
+                        symbol=symbol,
+                        action='SELL' if direction == 'LONG' else 'BUY',
+                        quantity=qty,
+                        price=exit_price,
+                        strategy=pos.get('strategy', 'Unknown'),
+                        pnl=pnl,
+                        exit_reason='emergency_position_limit'
+                    )
+
+                    # Update risk guards (same as execute_exit)
+                    if pnl < 0 and self.entry_gate:
+                        self.entry_gate.record_loss(datetime.now())
+
+                    if self.drawdown_guard.enabled:
+                        self.drawdown_guard.record_realized_pnl(pnl)
+
+                    if self.losing_streak_guard.enabled:
+                        self.losing_streak_guard.record_trade(
+                            symbol=symbol,
+                            realized_pnl=pnl,
+                            risk_amount=pos.get('risk_amount', abs(pnl)),
+                            close_time=datetime.now()
+                        )
+
+                    # Cleanup (_cleanup_position already handles exit_manager unregister)
+                    self._cleanup_position(symbol)
+                    del self.open_positions[symbol]
+
+                    logger.critical(
+                        f"EMERGENCY_LIQUIDATE | {symbol} | {direction} {qty} shares | "
+                        f"P&L: ${pnl:+.2f} | Reason: position_limit_exceeded"
+                    )
+                    liquidated += 1
+
+            except Exception as e:
+                logger.error(f"EMERGENCY_LIQUIDATE | {symbol} | FAILED: {e}", exc_info=True)
+
+        # Set kill switch
+        self.kill_switch_triggered = True
+        logger.critical(
+            f"EMERGENCY: Kill switch triggered - liquidated {liquidated}/{excess_count} positions"
+        )
+
+        return True
+
     def run_trading_cycle(self):
         """
         Run one trading cycle.
@@ -1228,6 +1330,11 @@ class TradingBot:
             # 1. Sync state
             self.sync_account()
             self.sync_positions()
+
+            # 1.5 Emergency position limit check (ODE-88)
+            # Must run immediately after sync to detect violations before any other logic
+            if self._emergency_position_limit_check():
+                return  # Halt cycle - kill switch triggered
 
             # 2. Update drawdown guard (must be done after sync)
             if self.drawdown_guard.enabled:
