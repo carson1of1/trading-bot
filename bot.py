@@ -1200,6 +1200,25 @@ class TradingBot:
 
         return violations
 
+    def _emergency_position_limit_check(self) -> bool:
+        """
+        Check if position count exceeds max and liquidate excess (oldest first).
+
+        Triggers when broker shows more positions than max_open_positions.
+        This indicates a bug, race condition, or manual intervention.
+
+        Returns:
+            True if emergency triggered (kill switch set), False otherwise
+        """
+        max_positions = self.config.get('risk_management', {}).get('max_open_positions', 5)
+        current_count = len(self.open_positions)
+
+        if current_count <= max_positions:
+            return False
+
+        # TODO: Implement liquidation in next task
+        return True
+
     def run_trading_cycle(self):
         """
         Run one trading cycle.
