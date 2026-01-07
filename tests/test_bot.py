@@ -1394,3 +1394,42 @@ class TestEmergencyPositionLimitCheck:
         assert calls[1][1]['symbol'] == 'SHORT_POS'
         assert calls[1][1]['side'] == 'buy'
         assert calls[1][1]['qty'] == 20
+
+    @patch('bot.TradingBot._cleanup_position')
+    def test_partial_failure_continues_and_sets_kill_switch(self, mock_cleanup):
+        """If one liquidation fails, others continue and kill switch still set."""
+        bot = TradingBot.__new__(TradingBot)
+        bot.config = {'risk_management': {'max_open_positions': 1}}
+        bot.kill_switch_triggered = False
+        bot.use_tiered_exits = False
+        bot.exit_manager = None
+
+        # First call fails, second succeeds
+        mock_broker = MagicMock()
+        mock_order = MagicMock()
+        mock_order.filled_avg_price = 100.0
+        mock_broker.submit_order.side_effect = [
+            Exception("Network error"),  # First fails
+            mock_order,  # Second succeeds
+        ]
+        bot.broker = mock_broker
+        bot.trade_logger = MagicMock()
+
+        base_time = datetime(2026, 1, 6, 10, 0, 0)
+        bot.open_positions = {
+            'FAIL': {'qty': 10, 'direction': 'LONG', 'entry_price': 100.0,
+                     'entry_time': base_time, 'strategy': 'Test'},
+            'SUCCESS': {'qty': 20, 'direction': 'LONG', 'entry_price': 200.0,
+                        'entry_time': base_time + timedelta(hours=1), 'strategy': 'Test'},
+            'KEEP': {'qty': 5, 'direction': 'LONG', 'entry_price': 50.0,
+                     'entry_time': base_time + timedelta(hours=2), 'strategy': 'Test'},
+        }
+
+        result = bot._emergency_position_limit_check()
+
+        assert result is True
+        assert bot.kill_switch_triggered is True
+        # FAIL stays (couldn't liquidate), SUCCESS removed, KEEP stays
+        assert 'FAIL' in bot.open_positions  # Failed to liquidate
+        assert 'SUCCESS' not in bot.open_positions  # Successfully liquidated
+        assert 'KEEP' in bot.open_positions  # Not targeted
