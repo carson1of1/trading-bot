@@ -399,6 +399,51 @@ class TradingBot:
                         f"Diff: {price_diff_pct*100:.2f}% | Action: Significant slippage or averaging occurred"
                     )
 
+    def _reconcile_stop_orders(self):
+        """
+        Cancel orphaned broker-level stop orders from previous sessions.
+
+        ODE-117: Bracket orders create stop orders at the broker level. If the bot
+        crashes or restarts, these stops may remain active for positions that:
+        - Were closed manually
+        - Were closed by the stop itself during downtime
+        - Are no longer tracked by the bot
+
+        This method cancels any stop orders for symbols without active positions.
+        """
+        try:
+            # Get broker positions (symbols we actually hold)
+            broker_positions = {p.symbol for p in self.broker.get_positions()}
+
+            # Get all open orders
+            open_orders = self.broker.list_orders(status='open')
+
+            # Find stop orders for symbols we don't hold
+            orphaned_stops = []
+            for order in open_orders:
+                if order.type in ['stop', 'stop_limit']:
+                    if order.symbol not in broker_positions:
+                        orphaned_stops.append(order)
+
+            if orphaned_stops:
+                logger.info(f"RECONCILE | Found {len(orphaned_stops)} orphaned stop orders")
+
+                for order in orphaned_stops:
+                    try:
+                        self.broker.cancel_order(order.id)
+                        logger.info(
+                            f"RECONCILE | CANCELLED_ORPHAN_STOP | {order.symbol} | "
+                            f"Order ID: {order.id} | Stop price: ${order.stop_price}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"RECONCILE | CANCEL_FAILED | {order.symbol} | "
+                            f"Order ID: {order.id} | Error: {e}"
+                        )
+
+        except Exception as e:
+            logger.error(f"RECONCILE | Failed to reconcile stop orders: {e}", exc_info=True)
+
     def _calculate_atr(self, data: pd.DataFrame, period: int = 14) -> float:
         """
         Calculate ATR (Average True Range) from historical data.
@@ -857,14 +902,16 @@ class TradingBot:
             if qty <= 0:
                 return {'filled': False, 'reason': 'Position size too small'}
 
-            # Submit order
+            # Submit bracket order with broker-level stop-loss for crash protection (ODE-117)
+            # The broker stop at 5% acts as backup - software stops handle normal operation
             side = 'buy' if direction == 'LONG' else 'sell'
-            order = self.broker.submit_order(
+            order = self.broker.submit_bracket_order(
                 symbol=symbol,
                 qty=qty,
                 side=side,
-                type='market',
-                time_in_force='day'
+                stop_loss_percent=stop_loss_pct,
+                time_in_force='gtc',  # Stop must persist across sessions
+                price=price  # For stop price calculation
             )
 
             # FIX (Jan 2026): Track position immediately after order submission
@@ -893,6 +940,8 @@ class TradingBot:
                     )
 
                 # Update tracking
+                # ODE-117: Track stop_order_id for bracket order cancellation on exit
+                stop_order_id = getattr(order, 'stop_order_id', None)
                 self.open_positions[symbol] = {
                     'symbol': symbol,
                     'qty': fill_qty,
@@ -902,6 +951,7 @@ class TradingBot:
                     'strategy': strategy,
                     'reasoning': reasoning,
                     'risk_amount': risk_amount,  # For losing streak guard (Jan 4, 2026)
+                    'stop_order_id': stop_order_id,  # ODE-117: Broker-level stop for crash protection
                 }
                 self.highest_prices[symbol] = fill_price
                 self.lowest_prices[symbol] = fill_price
@@ -959,6 +1009,16 @@ class TradingBot:
             entry_price = position['entry_price']
             qty = exit_signal.get('qty', position['qty'])
             exit_reason = exit_signal.get('reason', 'unknown')
+
+            # ODE-117: Cancel broker-level stop order before exiting
+            # This prevents the bracket stop from triggering after we've closed the position
+            stop_order_id = position.get('stop_order_id')
+            if stop_order_id:
+                try:
+                    self.broker.cancel_order(stop_order_id)
+                    logger.debug(f"Cancelled broker stop order {stop_order_id} for {symbol}")
+                except Exception as e:
+                    logger.warning(f"Failed to cancel stop order {stop_order_id} for {symbol}: {e}")
 
             # Submit exit order
             side = 'sell' if direction == 'LONG' else 'buy'
@@ -1325,6 +1385,9 @@ class TradingBot:
 
             # 0. Reconcile broker state BEFORE syncing (detect divergence)
             self._reconcile_broker_state()
+
+            # 0.25 ODE-117: Cancel orphaned stop orders from previous sessions
+            self._reconcile_stop_orders()
 
             # 0.5 Run health check (ODE-95)
             self.run_health_check()
