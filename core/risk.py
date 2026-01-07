@@ -377,7 +377,12 @@ class RiskManager:
             position_size_by_risk = int(max_dollar_risk / risk_per_share)
 
             # Calculate maximum position size by portfolio percentage
-            max_position_value = portfolio_value * self.max_position_size
+            # BUG FIX (Jan 7, 2026): Apply 95% buffer to prevent position size violations
+            # Problem: Position sized at entry price, but price movement pushes value over limit
+            # Example: 139 shares @ $108.81 = $15,124 (OK), but price rises to $111.15 = $15,449 (VIOLATION)
+            # Solution: Size to 95% of max so normal price movement doesn't trigger guard
+            POSITION_SIZE_BUFFER = 0.95  # Size to 95% of max allowed
+            max_position_value = portfolio_value * self.max_position_size * POSITION_SIZE_BUFFER
             position_size_by_value = int(max_position_value / entry_price)
 
             # Take the smaller of the two
@@ -388,7 +393,8 @@ class RiskManager:
             # BUG FIX (Dec 10, 2025): Load max_position_dollars from config instead of hardcoding
             # This allows runtime configuration changes without code modification
             # Default to $10K if not specified in settings
-            MAX_POSITION_VALUE_DOLLARS = self.settings.get('max_position_dollars', 10000)
+            # BUG FIX (Jan 7, 2026): Apply same 95% buffer for consistency
+            MAX_POSITION_VALUE_DOLLARS = self.settings.get('max_position_dollars', 10000) * POSITION_SIZE_BUFFER
             max_shares_by_dollars = int(MAX_POSITION_VALUE_DOLLARS / entry_price)
 
             if position_size > max_shares_by_dollars:
