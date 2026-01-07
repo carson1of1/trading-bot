@@ -574,7 +574,8 @@ proven_symbols:
         mock_order.id = 'order123'
         mock_order.filled_avg_price = 150.0
         mock_order.filled_qty = 100
-        bot.broker.submit_order.return_value = mock_order
+        mock_order.stop_order_id = 'stop123'
+        bot.broker.submit_bracket_order.return_value = mock_order
 
         result = bot.execute_entry('AAPL', 'LONG', 150.0, 'Momentum', 'Strong uptrend')
 
@@ -592,7 +593,8 @@ proven_symbols:
         mock_order.id = 'order123'
         mock_order.filled_avg_price = 150.0
         mock_order.filled_qty = 100
-        bot.broker.submit_order.return_value = mock_order
+        mock_order.stop_order_id = 'stop123'
+        bot.broker.submit_bracket_order.return_value = mock_order
 
         bot.execute_entry('AAPL', 'LONG', 150.0, 'Momentum', 'Strong uptrend')
 

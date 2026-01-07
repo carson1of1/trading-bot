@@ -297,6 +297,36 @@ class BrokerInterface(ABC):
         """
         pass
 
+    @abstractmethod
+    def submit_bracket_order(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,
+        stop_loss_percent: float = 0.05,
+        time_in_force: str = 'gtc',
+        **kwargs
+    ) -> Order:
+        """Submit market entry with attached stop-loss order for crash protection.
+
+        Creates a bracket order with:
+        - Market entry order (executes immediately)
+        - Stop-loss order at stop_loss_percent below/above entry (for long/short)
+        - Take-profit order set far away (won't trigger, just for bracket structure)
+
+        Args:
+            symbol: Stock ticker symbol
+            qty: Number of shares
+            side: 'buy' for long entry, 'sell' for short entry
+            stop_loss_percent: Percentage for stop-loss (default 5%)
+            time_in_force: Order duration ('gtc' recommended for stop persistence)
+            **kwargs: Additional params, especially 'price' for stop calculation
+
+        Returns:
+            Order with stop_order_id attribute for tracking the stop leg
+        """
+        pass
+
 
 class AlpacaBroker(BrokerInterface):
     """Real broker implementation using Alpaca API"""
@@ -737,6 +767,92 @@ class AlpacaBroker(BrokerInterface):
                 base_value=0.0
             )
 
+    def submit_bracket_order(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,
+        stop_loss_percent: float = 0.05,
+        time_in_force: str = 'gtc',
+        **kwargs
+    ) -> Order:
+        """Submit bracket order to Alpaca with stop-loss for crash protection.
+
+        Args:
+            symbol: Stock ticker
+            qty: Number of shares
+            side: 'buy' or 'sell'
+            stop_loss_percent: Stop-loss percentage (default 5%)
+            time_in_force: Order duration (default 'gtc')
+            **kwargs: Must include 'price' for stop calculation
+
+        Returns:
+            Order with stop_order_id attribute
+        """
+        price = kwargs.get('price')
+        if price is None:
+            raise BrokerAPIError("price is required for bracket orders")
+
+        # Calculate stop and take-profit prices
+        if side == 'buy':
+            # LONG: stop below entry, take-profit above
+            stop_price = round(price * (1 - stop_loss_percent), 2)
+            take_profit_price = round(price * 2, 2)  # Set high, won't trigger
+        else:
+            # SHORT: stop above entry, take-profit below
+            stop_price = round(price * (1 + stop_loss_percent), 2)
+            take_profit_price = round(price * 0.5, 2)  # Set low, won't trigger
+
+        self._check_rate_limit()
+
+        try:
+            self.logger.info(
+                f"Submitting bracket order: {side.upper()} {qty} {symbol} "
+                f"(stop={stop_price}, tp={take_profit_price})"
+            )
+
+            alpaca_order = self.api.submit_order(
+                symbol=symbol,
+                qty=int(qty),
+                side=side,
+                type='market',
+                time_in_force=time_in_force,
+                order_class='bracket',
+                stop_loss={'stop_price': stop_price},
+                take_profit={'limit_price': take_profit_price}
+            )
+
+            self.logger.info(f"Bracket order submitted: {alpaca_order.id}")
+
+            # Extract stop order ID from legs
+            stop_order_id = None
+            if hasattr(alpaca_order, 'legs') and alpaca_order.legs:
+                for leg in alpaca_order.legs:
+                    if hasattr(leg, 'type') and leg.type == 'stop':
+                        stop_order_id = leg.id
+                        break
+
+            order = Order(
+                id=alpaca_order.id,
+                symbol=alpaca_order.symbol,
+                qty=float(alpaca_order.qty),
+                side=alpaca_order.side,
+                type=alpaca_order.type,
+                status=alpaca_order.status,
+                limit_price=float(alpaca_order.limit_price) if alpaca_order.limit_price else None,
+                stop_price=float(alpaca_order.stop_price) if alpaca_order.stop_price else None,
+                submitted_at=alpaca_order.submitted_at
+            )
+
+            # Attach stop order ID for tracking
+            order.stop_order_id = stop_order_id
+
+            return order
+
+        except Exception as e:
+            self.logger.error(f"Failed to submit bracket order: {e}", exc_info=True)
+            raise BrokerAPIError(f"Bracket order failed for {symbol}: {e}", original_exception=e)
+
 
 class FakeBroker(BrokerInterface):
     """Simulated broker for BACKTEST and DRY_RUN modes"""
@@ -768,6 +884,9 @@ class FakeBroker(BrokerInterface):
         self.orders: Dict[str, Order] = {}
         self.order_counter = 0
 
+        # Stop orders for bracket order simulation: {symbol: {order_id, stop_price, qty, side}}
+        self.stop_orders: Dict[str, Dict[str, Any]] = {}
+
         # Execution log
         self.execution_log: List[Dict[str, Any]] = []
 
@@ -776,6 +895,7 @@ class FakeBroker(BrokerInterface):
     def update_price(self, symbol: str, price: float):
         """
         Update current price for a symbol (used for P&L calculations).
+        Also checks if any stop orders should be triggered.
 
         Args:
             symbol: Stock ticker
@@ -784,10 +904,52 @@ class FakeBroker(BrokerInterface):
         if price > 0:
             if symbol in self.positions:
                 self.current_prices[symbol] = price
+
+                # Check if stop order should be triggered
+                if symbol in self.stop_orders:
+                    stop = self.stop_orders[symbol]
+                    triggered = False
+
+                    if stop['side'] == 'sell' and price <= stop['stop_price']:
+                        # LONG position stop triggered (price dropped to stop)
+                        triggered = True
+                    elif stop['side'] == 'buy' and price >= stop['stop_price']:
+                        # SHORT position stop triggered (price rose to stop)
+                        triggered = True
+
+                    if triggered:
+                        self.logger.warning(
+                            f"STOP TRIGGERED | {symbol} | Price ${price:.2f} hit stop ${stop['stop_price']:.2f}"
+                        )
+                        self._execute_stop_order(symbol, price)
             else:
                 self.logger.debug(
                     f"Price update for {symbol} (${price:.2f}) ignored - no position"
                 )
+
+    def _execute_stop_order(self, symbol: str, trigger_price: float):
+        """Execute a triggered stop order.
+
+        Args:
+            symbol: Stock ticker
+            trigger_price: Price that triggered the stop
+        """
+        if symbol not in self.stop_orders:
+            return
+
+        stop = self.stop_orders[symbol]
+
+        # Execute the stop order (this will close position and clear stop_orders via _execute_order)
+        self.submit_order(
+            symbol=symbol,
+            qty=stop['qty'],
+            side=stop['side'],
+            type='market',
+            price=trigger_price
+        )
+
+        # Note: stop_orders[symbol] is already removed by _execute_order when position closes
+        self.logger.info(f"Stop order executed for {symbol}")
 
     def _generate_order_id(self) -> str:
         """Generate unique order ID"""
@@ -1027,6 +1189,8 @@ class FakeBroker(BrokerInterface):
                 if pos['qty'] <= 0 or math.isclose(pos['qty'], 0, abs_tol=1e-9):
                     del self.positions[order.symbol]
                     self.current_prices.pop(order.symbol, None)
+                    # Clear associated stop order when position fully closed
+                    self.stop_orders.pop(order.symbol, None)
                     self.logger.info(f"FakeBroker: Covered SHORT {order.symbol} x{cover_qty} @ ${execution_price:.2f}")
                 else:
                     self.logger.info(f"FakeBroker: Partially covered SHORT {order.symbol} x{cover_qty} @ ${execution_price:.2f}")
@@ -1107,6 +1271,8 @@ class FakeBroker(BrokerInterface):
                 if pos['qty'] <= 0 or math.isclose(pos['qty'], 0, abs_tol=1e-9):
                     del self.positions[order.symbol]
                     self.current_prices.pop(order.symbol, None)
+                    # Clear associated stop order when position fully closed
+                    self.stop_orders.pop(order.symbol, None)
 
         # Mark order as filled
         order.status = 'filled'
@@ -1128,7 +1294,18 @@ class FakeBroker(BrokerInterface):
         self.logger.info(f"FakeBroker: Executed {order.side.upper()} {order.qty} {order.symbol} @ ${execution_price:.2f}")
 
     def cancel_order(self, order_id: str) -> bool:
-        """Cancel simulated order"""
+        """Cancel simulated order (including stop orders)"""
+        # Check if this is a stop order and remove from stop_orders tracking
+        for symbol, stop_data in list(self.stop_orders.items()):
+            if stop_data['order_id'] == order_id:
+                del self.stop_orders[symbol]
+                self.logger.info(f"FakeBroker: Cancelled stop order {order_id} for {symbol}")
+                # Also update the order status in orders dict
+                if order_id in self.orders:
+                    self.orders[order_id].status = 'cancelled'
+                return True
+
+        # Regular order cancellation
         if order_id in self.orders:
             if self.orders[order_id].status == 'new':
                 self.orders[order_id].status = 'cancelled'
@@ -1147,11 +1324,16 @@ class FakeBroker(BrokerInterface):
         return count
 
     def close_position(self, symbol: str) -> bool:
-        """Close simulated position (LONG or SHORT)"""
+        """Close simulated position (LONG or SHORT) and cancel associated stop order"""
         if symbol in self.positions:
             pos = self.positions[symbol]
             side = pos.get('side', 'long')
             close_price = self.current_prices.get(symbol, pos['avg_entry_price'])
+
+            # Cancel any associated stop order first
+            if symbol in self.stop_orders:
+                stop_order_id = self.stop_orders[symbol]['order_id']
+                self.cancel_order(stop_order_id)
 
             # Use correct side to close position
             if side == 'long':
@@ -1231,6 +1413,100 @@ class FakeBroker(BrokerInterface):
             base_value=self.initial_cash
         )
 
+    def submit_bracket_order(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,
+        stop_loss_percent: float = 0.05,
+        time_in_force: str = 'gtc',
+        **kwargs
+    ) -> Order:
+        """Submit bracket order with simulated stop-loss tracking.
+
+        Args:
+            symbol: Stock ticker
+            qty: Number of shares
+            side: 'buy' or 'sell'
+            stop_loss_percent: Stop-loss percentage (default 5%)
+            time_in_force: Ignored in simulation
+            **kwargs: Must include 'price' for stop calculation
+
+        Returns:
+            Order with stop_order_id attribute
+        """
+        price = kwargs.get('price')
+        if price is None:
+            self.logger.error("FakeBroker: price required for bracket order")
+            order = Order(
+                id=self._generate_order_id(),
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                type='market',
+                status='rejected',
+                submitted_at=datetime.now(pytz.UTC)
+            )
+            order.stop_order_id = None
+            return order
+
+        # Execute the entry order
+        entry_order = self.submit_order(
+            symbol=symbol,
+            qty=qty,
+            side=side,
+            type='market',
+            price=price
+        )
+
+        # If entry failed, don't create stop order
+        if entry_order.status != 'filled':
+            entry_order.stop_order_id = None
+            return entry_order
+
+        # Calculate stop price based on direction
+        # Use original price (not slipped price) for consistent stop placement
+        if side == 'buy':
+            # LONG: stop below entry
+            stop_price = price * (1 - stop_loss_percent)
+            stop_side = 'sell'
+        else:
+            # SHORT: stop above entry
+            stop_price = price * (1 + stop_loss_percent)
+            stop_side = 'buy'
+
+        # Create and track the stop order
+        stop_order_id = self._generate_order_id()
+        self.stop_orders[symbol] = {
+            'order_id': stop_order_id,
+            'stop_price': stop_price,
+            'qty': entry_order.filled_qty,
+            'side': stop_side
+        }
+
+        # Also track as a pending stop order in orders dict
+        stop_order = Order(
+            id=stop_order_id,
+            symbol=symbol,
+            qty=entry_order.filled_qty,
+            side=stop_side,
+            type='stop',
+            status='new',
+            stop_price=stop_price,
+            submitted_at=datetime.now(pytz.UTC)
+        )
+        self.orders[stop_order_id] = stop_order
+
+        # Attach stop order ID to entry order for tracking
+        entry_order.stop_order_id = stop_order_id
+
+        self.logger.info(
+            f"FakeBroker: Bracket order created - Entry {side.upper()} {qty} {symbol}, "
+            f"Stop {stop_side.upper()} @ ${stop_price:.2f}"
+        )
+
+        return entry_order
+
     def get_execution_log(self) -> List[Dict[str, Any]]:
         """Get all executions for analysis"""
         return self.execution_log
@@ -1239,12 +1515,13 @@ class FakeBroker(BrokerInterface):
         """
         Reset FakeBroker to initial state.
 
-        Clears all positions, orders, and resets cash to initial value.
+        Clears all positions, orders, stop orders, and resets cash to initial value.
         """
         self.cash = self.initial_cash
         self.positions.clear()
         self.current_prices.clear()
         self.orders.clear()
+        self.stop_orders.clear()
         self.order_counter = 0
         self.execution_log.clear()
         self.logger.info(f"FakeBroker: Reset to initial state (cash=${self.initial_cash:,.2f})")
