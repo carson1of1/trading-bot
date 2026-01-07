@@ -11,14 +11,14 @@ trading:
   lookback_period: 200
   warmup_bars: 200
 risk_management:
-  max_position_size_pct: 10
-  max_portfolio_risk_pct: 50.0
+  max_position_size_pct: 15
+  max_portfolio_risk_pct: 30.0
   stop_loss_pct: 5.0
   take_profit_pct: 5.0
   max_daily_loss_pct: 5.0
   emergency_stop_pct: 8.0
-  max_open_positions: 1
-  max_position_dollars: 10000  # Maximum single position value in dollars
+  max_open_positions: 3
+  max_position_dollars: 999999  # Disabled - use percentage-based sizing only (scales with portfolio)
 daily_drawdown_guard:
   enabled: true
   warning_pct: 2.5          # -2.5%: Reduce position sizes
@@ -66,14 +66,14 @@ data_quality:
   volume_filter_enabled: true
 strategies:
   momentum:
-    enabled: true
-    weight: 0.35
+    enabled: false  # Disabled: catches end of moves, only $2 avg P&L
+    weight: 0.0
   mean_reversion:
     enabled: true
     weight: 0.25
   breakout:
     enabled: true
-    weight: 0.2
+    weight: 0.4  # Increased: this is the main edge
   ml_ensemble:
     enabled: false
     weight: 0.0

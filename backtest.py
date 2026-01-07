@@ -1361,6 +1361,9 @@ class Backtest1Hour:
                 all_data, start_date, end_date
             )
 
+        # FIX (Jan 2026): Use interleaved simulation to enforce max_open_positions across all symbols
+        # Previously used simulate_trades() per symbol which didn't enforce cross-symbol position limits
+        signals_data = {}
         for symbol in symbols:
             logger.info(f"Processing {symbol}...")
 
@@ -1376,12 +1379,45 @@ class Backtest1Hour:
 
             # Generate signals
             data = self.generate_signals(symbol, data)
+            signals_data[symbol] = data
 
-            # Simulate trades
-            trades = self.simulate_trades(symbol, data)
-            all_trades.extend(trades)
+        # Simulate trades with position limit enforcement across all symbols
+        if signals_data:
+            logger.info(f"Running interleaved simulation with max_open_positions={self.max_open_positions}")
+            all_trades = self.simulate_trades_interleaved(signals_data)
 
-            logger.info(f"{symbol}: {len(trades)} trades, P&L: ${sum(t['pnl'] for t in trades):,.2f}")
+            # Log per-symbol summary
+            trades_by_symbol = {}
+            for t in all_trades:
+                sym = t['symbol']
+                if sym not in trades_by_symbol:
+                    trades_by_symbol[sym] = []
+                trades_by_symbol[sym].append(t)
+
+            for sym, sym_trades in trades_by_symbol.items():
+                logger.info(f"{sym}: {len(sym_trades)} trades, P&L: ${sum(t['pnl'] for t in sym_trades):,.2f}")
+
+            # Update instance state from trades (simulate_trades_interleaved doesn't update these)
+            self.total_pnl = sum(t['pnl'] for t in all_trades)
+            self.cash = self.initial_capital + self.total_pnl
+            self.portfolio_value = self.cash
+
+            # Calculate max drawdown from cumulative P&L
+            if all_trades:
+                sorted_trades = sorted(all_trades, key=lambda t: t.get('exit_date', t.get('entry_date')))
+                running_pnl = 0
+                peak_pnl = 0
+                max_dd = 0
+                for t in sorted_trades:
+                    running_pnl += t['pnl']
+                    if running_pnl > peak_pnl:
+                        peak_pnl = running_pnl
+                    dd = peak_pnl - running_pnl
+                    if peak_pnl > 0:
+                        dd_pct = dd / (self.initial_capital + peak_pnl)
+                        if dd_pct > max_dd:
+                            max_dd = dd_pct
+                self.max_drawdown = max_dd
 
         # Calculate metrics
         metrics = self.calculate_metrics(all_trades)
