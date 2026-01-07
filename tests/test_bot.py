@@ -1306,3 +1306,51 @@ class TestEmergencyPositionLimitCheck:
         assert result is False
         assert bot.kill_switch_triggered is False
         assert len(bot.open_positions) == 3  # No positions liquidated
+
+    @patch('bot.TradingBot._cleanup_position')
+    def test_violation_liquidates_oldest_positions(self, mock_cleanup):
+        """When position count > max, liquidates oldest excess positions."""
+        bot = TradingBot.__new__(TradingBot)
+        bot.config = {'risk_management': {'max_open_positions': 2}}
+        bot.kill_switch_triggered = False
+        bot.use_tiered_exits = False
+        bot.exit_manager = None
+
+        # Create mock broker
+        mock_broker = MagicMock()
+        mock_order = MagicMock()
+        mock_order.filled_avg_price = 150.0
+        mock_order.id = 'order123'
+        mock_broker.submit_order.return_value = mock_order
+        bot.broker = mock_broker
+
+        # Create mock trade logger
+        mock_trade_logger = MagicMock()
+        bot.trade_logger = mock_trade_logger
+
+        # 4 positions, max 2 = 2 excess (liquidate oldest 2)
+        base_time = datetime(2026, 1, 6, 10, 0, 0)
+        bot.open_positions = {
+            'OLD1': {'qty': 10, 'direction': 'LONG', 'entry_price': 100.0,
+                     'entry_time': base_time, 'strategy': 'Test'},  # Oldest - liquidate
+            'OLD2': {'qty': 20, 'direction': 'SHORT', 'entry_price': 200.0,
+                     'entry_time': base_time + timedelta(hours=1), 'strategy': 'Test'},  # 2nd oldest - liquidate
+            'NEW1': {'qty': 15, 'direction': 'LONG', 'entry_price': 150.0,
+                     'entry_time': base_time + timedelta(hours=2), 'strategy': 'Test'},  # Keep
+            'NEW2': {'qty': 25, 'direction': 'LONG', 'entry_price': 250.0,
+                     'entry_time': base_time + timedelta(hours=3), 'strategy': 'Test'},  # Keep
+        }
+
+        result = bot._emergency_position_limit_check()
+
+        assert result is True
+        assert bot.kill_switch_triggered is True
+        assert len(bot.open_positions) == 2
+        assert 'OLD1' not in bot.open_positions
+        assert 'OLD2' not in bot.open_positions
+        assert 'NEW1' in bot.open_positions
+        assert 'NEW2' in bot.open_positions
+
+        # Verify broker calls - OLD1 is LONG (sell), OLD2 is SHORT (buy)
+        calls = mock_broker.submit_order.call_args_list
+        assert len(calls) == 2

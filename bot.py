@@ -1216,7 +1216,77 @@ class TradingBot:
         if current_count <= max_positions:
             return False
 
-        # TODO: Implement liquidation in next task
+        excess_count = current_count - max_positions
+
+        logger.critical(
+            f"EMERGENCY: Position count {current_count} exceeds max {max_positions} - "
+            f"LIQUIDATING {excess_count} oldest positions"
+        )
+
+        # Sort by entry_time (oldest first)
+        sorted_positions = sorted(
+            self.open_positions.items(),
+            key=lambda x: x[1].get('entry_time', datetime.now())
+        )
+
+        # Liquidate oldest excess positions
+        liquidated = 0
+        for symbol, pos in sorted_positions[:excess_count]:
+            try:
+                direction = pos.get('direction', 'LONG')
+                qty = pos['qty']
+                entry_price = pos.get('entry_price', 0)
+
+                side = 'sell' if direction == 'LONG' else 'buy'
+                order = self.broker.submit_order(
+                    symbol=symbol,
+                    qty=qty,
+                    side=side,
+                    type='market',
+                    time_in_force='day'
+                )
+
+                if order:
+                    exit_price = float(order.filled_avg_price) if hasattr(order, 'filled_avg_price') and order.filled_avg_price else entry_price
+
+                    # Calculate P&L
+                    if direction == 'LONG':
+                        pnl = (exit_price - entry_price) * qty
+                    else:
+                        pnl = (entry_price - exit_price) * qty
+
+                    # Log trade
+                    self.trade_logger.log_trade(
+                        symbol=symbol,
+                        action='SELL' if direction == 'LONG' else 'BUY',
+                        quantity=qty,
+                        price=exit_price,
+                        strategy=pos.get('strategy', 'Unknown'),
+                        pnl=pnl,
+                        exit_reason='emergency_position_limit'
+                    )
+
+                    # Cleanup
+                    if self.use_tiered_exits and self.exit_manager:
+                        self.exit_manager.unregister_position(symbol)
+                    self._cleanup_position(symbol)
+                    del self.open_positions[symbol]
+
+                    logger.critical(
+                        f"EMERGENCY_LIQUIDATE | {symbol} | {direction} {qty} shares | "
+                        f"P&L: ${pnl:+.2f} | Reason: position_limit_exceeded"
+                    )
+                    liquidated += 1
+
+            except Exception as e:
+                logger.error(f"EMERGENCY_LIQUIDATE | {symbol} | FAILED: {e}", exc_info=True)
+
+        # Set kill switch
+        self.kill_switch_triggered = True
+        logger.critical(
+            f"EMERGENCY: Kill switch triggered - liquidated {liquidated}/{excess_count} positions"
+        )
+
         return True
 
     def run_trading_cycle(self):
