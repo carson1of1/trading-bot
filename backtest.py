@@ -228,9 +228,6 @@ class Backtest1Hour:
         if hasattr(self, 'drawdown_guard'):
             self.drawdown_guard = DailyDrawdownGuard(self.config)
 
-        # Track partial liquidation state per day
-        self._partial_liquidation_done_today = False
-
         # Reset entry gate
         if self.entry_gate:
             self.entry_gate.reset()
@@ -1013,7 +1010,6 @@ class Backtest1Hour:
 
         # Daily tracking for drawdown guard (ODE-118)
         current_day = None
-        partial_liquidation_done_today = False
 
         for event in all_events:
             symbol = event['symbol']
@@ -1049,7 +1045,6 @@ class Backtest1Hour:
             # Reset guard on new day
             if bar_date is not None and bar_date != current_day:
                 current_day = bar_date
-                partial_liquidation_done_today = False
                 # Calculate portfolio value for reset
                 position_value = 0
                 for sym, pos in open_positions.items():
@@ -1130,55 +1125,8 @@ class Backtest1Hour:
                 # Skip to next event after full liquidation
                 continue
 
-            # MEDIUM: Partial liquidation (50% of each position)
-            if guard_tier == DrawdownTier.MEDIUM and not partial_liquidation_done_today and open_positions:
-                partial_liquidation_done_today = True
-                logger.warning(f"DRAWDOWN_GUARD | MEDIUM | Partial liquidation: closing 50% of {len(open_positions)} positions")
-                for liq_symbol, pos in list(open_positions.items()):
-                    if pos is None:
-                        continue
-                    direction = pos['direction']
-                    entry_price = pos['entry_price']
-                    total_shares = pos['shares']
-                    shares_to_close = total_shares // 2  # Close half (rounded down)
-
-                    if shares_to_close <= 0:
-                        continue
-
-                    liq_price = latest_prices.get(liq_symbol, entry_price)
-
-                    if direction == 'LONG':
-                        exit_price = liq_price * (1 - self.EXIT_SLIPPAGE)
-                        pnl = (exit_price - entry_price) * shares_to_close
-                    else:
-                        exit_price = liq_price * (1 + self.EXIT_SLIPPAGE)
-                        pnl = (entry_price - exit_price) * shares_to_close
-
-                    pnl_pct = (pnl / (entry_price * shares_to_close)) * 100 if entry_price > 0 else 0
-
-                    all_trades.append({
-                        'symbol': liq_symbol,
-                        'direction': direction,
-                        'entry_date': pos['entry_time'],
-                        'exit_date': timestamp,
-                        'entry_price': entry_price,
-                        'exit_price': exit_price,
-                        'shares': shares_to_close,
-                        'pnl': pnl,
-                        'pnl_pct': pnl_pct,
-                        'exit_reason': 'partial_liquidation',
-                        'strategy': pos.get('strategy', 'Unknown'),
-                        'reasoning': pos.get('reasoning', ''),
-                        'bars_held': bar_index - pos['entry_bar'],
-                        'mfe': 0, 'mae': 0, 'mfe_pct': 0, 'mae_pct': 0
-                    })
-
-                    self.cash += pnl
-                    # Reduce position size
-                    pos['shares'] = total_shares - shares_to_close
-                    if pos['shares'] <= 0:
-                        del open_positions[liq_symbol]
-                        position_state[liq_symbol] = None
+            # SOFT_LIMIT: Entries blocked (handled by entries_allowed check below)
+            # Note: No partial liquidation at soft limit - matches live bot behavior
 
             # ============ EXIT LOGIC ============
             if position_state[symbol] is not None:
