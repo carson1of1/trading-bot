@@ -61,7 +61,7 @@ proven_symbols:
         mock_order.id = 'order123'
         mock_order.filled_avg_price = 150.0
         mock_order.filled_qty = 75  # Only 75 of requested filled
-        bot.broker.submit_order.return_value = mock_order
+        bot.broker.submit_bracket_order.return_value = mock_order
 
         # Mock risk_manager to return 100 shares
         bot.risk_manager.calculate_position_size = MagicMock(return_value=100)
@@ -83,7 +83,7 @@ proven_symbols:
         mock_order.id = 'order123'
         mock_order.filled_avg_price = 150.0
         mock_order.filled_qty = 100  # Full fill
-        bot.broker.submit_order.return_value = mock_order
+        bot.broker.submit_bracket_order.return_value = mock_order
 
         bot.risk_manager.calculate_position_size = MagicMock(return_value=100)
 

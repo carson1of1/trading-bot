@@ -67,7 +67,7 @@ class TestExecuteEntryTracking:
             filled_qty=100,
             filled_avg_price=150.0
         )
-        mock_broker.submit_order.return_value = order
+        mock_broker.submit_bracket_order.return_value = order
 
         result = bot.execute_entry(
             symbol='AAPL',
@@ -95,7 +95,7 @@ class TestExecuteEntryTracking:
             filled_qty=0,
             filled_avg_price=None
         )
-        mock_broker.submit_order.return_value = order
+        mock_broker.submit_bracket_order.return_value = order
 
         result = bot.execute_entry(
             symbol='AAPL',
@@ -125,7 +125,7 @@ class TestExecuteEntryTracking:
             filled_qty=0,
             filled_avg_price=None
         )
-        mock_broker.submit_order.return_value = order
+        mock_broker.submit_bracket_order.return_value = order
 
         result = bot.execute_entry(
             symbol='AAPL',
@@ -153,7 +153,7 @@ class TestExecuteEntryTracking:
             filled_qty=0,
             filled_avg_price=None
         )
-        mock_broker.submit_order.return_value = order
+        mock_broker.submit_bracket_order.return_value = order
 
         result = bot.execute_entry(
             symbol='AAPL',
@@ -184,7 +184,7 @@ class TestExecuteEntryTracking:
                 filled_qty=0,
                 filled_avg_price=None
             )
-            mock_broker.submit_order.return_value = order
+            mock_broker.submit_bracket_order.return_value = order
 
             result = bot.execute_entry(
                 symbol='AAPL',
@@ -201,7 +201,7 @@ class TestExecuteEntryTracking:
         """Position NOT tracked when broker returns None."""
         bot, mock_broker = mock_bot
 
-        mock_broker.submit_order.return_value = None
+        mock_broker.submit_bracket_order.return_value = None
 
         result = bot.execute_entry(
             symbol='AAPL',
@@ -232,7 +232,7 @@ class TestExecuteEntryTracking:
             filled_qty=0,
             filled_avg_price=None
         )
-        mock_broker.submit_order.return_value = order
+        mock_broker.submit_bracket_order.return_value = order
 
         bot.execute_entry(
             symbol='AAPL',
@@ -284,7 +284,7 @@ class TestMaxOpenPositionsEnforcement:
                     filled_qty=0,
                     filled_avg_price=None
                 )
-                mock_broker.submit_order.return_value = order
+                mock_broker.submit_bracket_order.return_value = order
 
                 # Call real execute_entry
                 return TradingBot.execute_entry(bot, symbol, direction, price, strategy, reasoning)
@@ -364,7 +364,7 @@ class TestShortPositionTracking:
             filled_qty=0,
             filled_avg_price=None
         )
-        mock_broker.submit_order.return_value = order
+        mock_broker.submit_bracket_order.return_value = order
 
         result = bot.execute_entry(
             symbol='AAPL',

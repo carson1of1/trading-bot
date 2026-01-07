@@ -308,7 +308,8 @@ class TestCalculatePositionSize:
             entry_price=100,
             stop_loss_price=98
         )
-        assert size == 50  # $5000 / $100 = 50 shares
+        # $5000 * 0.95 buffer / $100 = 47.5 -> 47 shares
+        assert size == 47
 
     def test_returns_zero_for_nan_inputs(self):
         """Should return 0 for NaN inputs"""
