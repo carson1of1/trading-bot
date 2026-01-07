@@ -183,6 +183,9 @@ class Backtest1Hour:
         self.trailing_trail_pct = trailing_config.get('trail_pct', 0.5) / 100
         self.trailing_move_to_breakeven = trailing_config.get('move_to_breakeven', True)
 
+        # Backtest date range (set by run(), None for direct simulate_trades calls)
+        self._backtest_start_date = None
+
         # State tracking
         self._reset_state()
 
