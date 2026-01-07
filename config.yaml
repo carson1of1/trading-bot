@@ -15,16 +15,16 @@ risk_management:
   max_portfolio_risk_pct: 30.0
   stop_loss_pct: 5.0
   take_profit_pct: 5.0
-  max_daily_loss_pct: 5.0
+  max_daily_loss_pct: 4.0
   emergency_stop_pct: 8.0
   max_open_positions: 3
   max_position_dollars: 999999  # Disabled - use percentage-based sizing only (scales with portfolio)
 daily_drawdown_guard:
   enabled: true
-  warning_pct: 2.5          # -2.5%: Reduce position sizes
-  soft_limit_pct: 3.0       # -3.0%: Block new entries (ODE-90)
-  medium_limit_pct: 4.0     # -4.0%: Partial liquidation (ODE-90)
-  hard_limit_pct: 5.0       # -5.0%: Full liquidation + halt (ODE-90)
+  warning_pct: 2.0          # -2.0%: Reduce position sizes
+  soft_limit_pct: 2.5       # -2.5%: Block new entries
+  medium_limit_pct: 3.0     # -3.0%: Partial liquidation
+  hard_limit_pct: 4.0       # -4.0%: Full liquidation + halt (funded challenge buffer)
   partial_liquidation_pct: 50  # Close 50% at medium tier (ODE-90)
   warning_size_multiplier: 0.5
   tighten_stops_at_soft: true
