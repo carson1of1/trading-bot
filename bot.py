@@ -1385,6 +1385,12 @@ class TradingBot:
                 if data is None or len(data) < 30:
                     continue
 
+                # FIX (Jan 6, 2026): Filter out incomplete bars BEFORE any processing
+                # YFinance returns the current forming bar which we must skip
+                data = filter_incomplete_bars(data, bar_duration_minutes=60)
+                if data is None or len(data) < 30:
+                    continue
+
                 # FIX (Jan 2026): Log the first symbol's candle timestamp at INFO level
                 # This verifies we're getting the correct completed candle
                 if not first_candle_logged and 'timestamp' in data.columns:
@@ -1723,6 +1729,48 @@ def get_seconds_until_next_hour(buffer_minutes: int = 2) -> int:
     return int(seconds_until)
 
 
+def filter_incomplete_bars(data: pd.DataFrame, bar_duration_minutes: int = 60) -> pd.DataFrame:
+    """
+    Filter out incomplete (still forming) bars from the data.
+
+    FIX (Jan 6, 2026): YFinance often returns the current forming bar.
+    We must drop it to ensure we only trade on completed candles.
+
+    Args:
+        data: DataFrame with 'timestamp' column
+        bar_duration_minutes: Duration of each bar in minutes (default 60)
+
+    Returns:
+        DataFrame with incomplete bars removed
+    """
+    if data is None or len(data) == 0:
+        return data
+
+    if 'timestamp' not in data.columns:
+        return data
+
+    eastern = pytz.timezone('America/New_York')
+    now = datetime.now(eastern)
+
+    # Check if the last bar is incomplete
+    latest_ts = data['timestamp'].iloc[-1]
+
+    # Ensure timezone-aware
+    if latest_ts.tzinfo is None:
+        latest_ts = eastern.localize(latest_ts)
+    elif str(latest_ts.tzinfo) != str(eastern):
+        latest_ts = latest_ts.astimezone(eastern)
+
+    bar_completion_time = latest_ts + timedelta(minutes=bar_duration_minutes)
+
+    if now < bar_completion_time:
+        # Last bar is incomplete - drop it
+        logger.debug(f"FILTER_INCOMPLETE | Dropping incomplete bar at {latest_ts.strftime('%H:%M')}")
+        return data.iloc[:-1].reset_index(drop=True)
+
+    return data
+
+
 def validate_candle_timestamp(data: pd.DataFrame, expected_hour: int = None,
                                bar_duration_minutes: int = 60) -> bool:
     """
@@ -1731,10 +1779,12 @@ def validate_candle_timestamp(data: pd.DataFrame, expected_hour: int = None,
     FIX (Jan 2026): Ensure we're trading on completed candles only.
     A bar is incomplete if current_time < bar_start + bar_duration.
 
-    For 1-hour bars:
-    - 9:30 bar completes at 10:30 (first bar of day, market opens at 9:30)
-    - 10:00 bar completes at 11:00
-    - etc.
+    FIX (Jan 6, 2026): Handle yfinance :30-aligned bars.
+    YFinance returns hourly bars aligned to market open (9:30), so bars are:
+    9:30, 10:30, 11:30, 12:30, 13:30, 14:30, 15:30
+    NOT 9:00, 10:00, 11:00, etc.
+
+    When the latest bar is incomplete, we drop it and use the previous completed bar.
 
     Args:
         data: DataFrame with 'timestamp' column
@@ -1752,37 +1802,72 @@ def validate_candle_timestamp(data: pd.DataFrame, expected_hour: int = None,
 
     eastern = pytz.timezone('America/New_York')
     now = datetime.now(eastern)
-    latest_ts = data['timestamp'].iloc[-1]
 
-    # Ensure timezone-aware
-    if latest_ts.tzinfo is None:
-        latest_ts = eastern.localize(latest_ts)
-    else:
-        latest_ts = latest_ts.astimezone(eastern)
+    # FIX (Jan 6, 2026): Find the last COMPLETED bar, skipping incomplete ones
+    # YFinance often returns the current forming bar which we must skip
+    bar_index = -1  # Start with last bar
+    latest_ts = None
+    max_lookback = min(3, len(data))  # Check up to 3 bars back
 
-    # FIX (Jan 2026): Check if bar is COMPLETE
-    # A bar starting at X:XX is not complete until X:XX + bar_duration
-    bar_completion_time = latest_ts + timedelta(minutes=bar_duration_minutes)
+    for i in range(max_lookback):
+        idx = -(i + 1)
+        if abs(idx) > len(data):
+            break
 
-    if now < bar_completion_time:
-        # Bar is still forming - this is incomplete data!
-        minutes_until_complete = (bar_completion_time - now).total_seconds() / 60
-        logger.warning(
-            f"INCOMPLETE_BAR | Bar {latest_ts.strftime('%H:%M')} not complete until "
-            f"{bar_completion_time.strftime('%H:%M')} ({minutes_until_complete:.0f}m remaining) - SKIPPING"
-        )
+        candidate_ts = data['timestamp'].iloc[idx]
+
+        # Ensure timezone-aware
+        if candidate_ts.tzinfo is None:
+            candidate_ts = eastern.localize(candidate_ts)
+        else:
+            candidate_ts = candidate_ts.astimezone(eastern)
+
+        # Check if this bar is complete
+        bar_completion_time = candidate_ts + timedelta(minutes=bar_duration_minutes)
+
+        if now >= bar_completion_time:
+            # Found a completed bar!
+            latest_ts = candidate_ts
+            bar_index = idx
+            if i > 0:
+                logger.info(f"CANDLE_FIX | Skipped {i} incomplete bar(s), using {latest_ts.strftime('%H:%M')} bar")
+            break
+        else:
+            # Bar is still forming
+            minutes_until_complete = (bar_completion_time - now).total_seconds() / 60
+            logger.debug(
+                f"INCOMPLETE_BAR | Bar {candidate_ts.strftime('%H:%M')} not complete until "
+                f"{bar_completion_time.strftime('%H:%M')} ({minutes_until_complete:.0f}m remaining)"
+            )
+
+    if latest_ts is None:
+        # No completed bars found
+        logger.warning("CANDLE_VALIDATION | No completed bars found in recent data - SKIPPING")
         return False
 
-    # For 1-hour bars running at HH:02, we expect the (HH-1):00 candle
-    # But handle 9:30 market open - first bar is 9:30, not 9:00
+    # FIX (Jan 6, 2026): Handle :30-aligned bars from yfinance
+    # YFinance returns bars at 9:30, 10:30, 11:30, etc. (aligned to market open)
+    # When we expect hour X, accept both X:00 and X:30 bars
+    # Also accept (X-1):30 bars since a 10:30 bar covers 10:30-11:30 and should be
+    # used when we expect hour 10 (running at 11:02)
     if expected_hour is not None:
         bar_hour = latest_ts.hour
         bar_minute = latest_ts.minute
 
-        # Special case: 9:30 bar is valid when expecting 9:00 hour
-        # (market opens at 9:30, not 9:00)
-        is_market_open_bar = (bar_hour == 9 and bar_minute == 30)
-        expected_matches = (bar_hour == expected_hour) or (expected_hour == 9 and is_market_open_bar)
+        # Accept :30-aligned bars from yfinance
+        # A 10:30 bar covers 10:30-11:30, so when expected_hour=10 (running at 11:02),
+        # we should accept the 10:30 bar
+        is_half_hour_bar = (bar_minute == 30)
+
+        # Match conditions:
+        # 1. Exact hour match (bar_hour == expected_hour) for :00 bars
+        # 2. Half-hour bar from expected hour (bar_hour == expected_hour and minute == 30)
+        # 3. Half-hour bar from previous hour that covers expected hour
+        #    (e.g., 9:30 bar when expecting hour 9, 10:30 when expecting hour 10)
+        expected_matches = (
+            (bar_hour == expected_hour) or  # 10:00 or 10:30 bar when expecting 10
+            (bar_hour == expected_hour - 1 and is_half_hour_bar)  # 9:30 bar when expecting 10
+        )
 
         if not expected_matches:
             logger.warning(f"CANDLE_VALIDATION | Expected {expected_hour}:00 bar, got {latest_ts.strftime('%H:%M')}")
