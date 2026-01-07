@@ -1192,6 +1192,24 @@ class Backtest1Hour:
                     else:
                         exit_price = current_price * (1 + self.EXIT_SLIPPAGE)
 
+                # EOD close - no overnight holding
+                if not exit_triggered and self.eod_close_enabled:
+                    bar_hour = None
+                    if isinstance(timestamp, (datetime, pd.Timestamp)):
+                        bar_hour = timestamp.hour
+                    elif isinstance(timestamp, str):
+                        try:
+                            bar_hour = pd.to_datetime(timestamp).hour
+                        except:
+                            pass
+                    if bar_hour is not None and bar_hour >= self.eod_close_bar_hour:
+                        exit_triggered = True
+                        exit_reason = 'eod_close'
+                        if direction == 'LONG':
+                            exit_price = current_price * (1 - self.EXIT_SLIPPAGE)
+                        else:
+                            exit_price = current_price * (1 + self.EXIT_SLIPPAGE)
+
                 if exit_triggered:
                     # Calculate P&L
                     if direction == 'LONG':
@@ -1259,6 +1277,19 @@ class Backtest1Hour:
                             'drawdown_pct': self.drawdown_guard.drawdown_pct * 100
                         })
                     continue
+
+                # Block entries at EOD - no new positions that would be immediately closed
+                if self.eod_close_enabled:
+                    entry_bar_hour = None
+                    if isinstance(timestamp, (datetime, pd.Timestamp)):
+                        entry_bar_hour = timestamp.hour
+                    elif isinstance(timestamp, str):
+                        try:
+                            entry_bar_hour = pd.to_datetime(timestamp).hour
+                        except:
+                            pass
+                    if entry_bar_hour is not None and entry_bar_hour >= self.eod_close_bar_hour:
+                        continue  # Skip entry at EOD
 
                 # Check position limit
                 if len(open_positions) >= self.max_open_positions:
