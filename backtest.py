@@ -42,6 +42,7 @@ from core import (
     VolatilityScanner,
     YFinanceDataFetcher,
 )
+from core.risk import DailyDrawdownGuard, DrawdownTier
 from strategies import StrategyManager
 
 logging.basicConfig(
@@ -168,9 +169,12 @@ class Backtest1Hour:
         # Max hold hours from config
         self.max_hold_hours = exit_config.get('max_hold_hours', self.DEFAULT_MAX_HOLD_BARS)
 
-        # Daily loss kill switch
+        # Daily loss kill switch (legacy - now using tiered DailyDrawdownGuard)
         self.max_daily_loss_pct = risk_config.get('max_daily_loss_pct', 3.0) / 100
         self.daily_loss_kill_switch_enabled = True
+
+        # Tiered drawdown guard (ODE-118)
+        self.drawdown_guard = DailyDrawdownGuard(self.config)
 
         # EOD close simulation
         self.eod_close_bar_hour = 15  # Close on bars starting at 3 PM or later
@@ -219,6 +223,13 @@ class Backtest1Hour:
         self.daily_starting_capital = self.initial_capital
         self.current_trading_day = None
         self.kill_switch_triggered = False
+
+        # Reset drawdown guard for new backtest (ODE-118)
+        if hasattr(self, 'drawdown_guard'):
+            self.drawdown_guard = DailyDrawdownGuard(self.config)
+
+        # Track partial liquidation state per day
+        self._partial_liquidation_done_today = False
 
         # Reset entry gate
         if self.entry_gate:
@@ -989,6 +1000,10 @@ class Backtest1Hour:
         last_recorded_ts = None  # For equity curve recording
         latest_prices = {}  # symbol -> latest price for portfolio valuation
 
+        # Daily tracking for drawdown guard (ODE-118)
+        current_day = None
+        partial_liquidation_done_today = False
+
         for event in all_events:
             symbol = event['symbol']
             row = event['row']
@@ -1008,6 +1023,151 @@ class Backtest1Hour:
                 position_state[symbol] = None
             if symbol not in last_trade_bar:
                 last_trade_bar[symbol] = -999
+
+            # ============ DRAWDOWN GUARD (ODE-118) ============
+            # Extract date from timestamp
+            bar_date = None
+            if isinstance(timestamp, (datetime, pd.Timestamp)):
+                bar_date = timestamp.date() if hasattr(timestamp, 'date') else None
+            elif isinstance(timestamp, str):
+                try:
+                    bar_date = pd.to_datetime(timestamp).date()
+                except:
+                    pass
+
+            # Reset guard on new day
+            if bar_date is not None and bar_date != current_day:
+                current_day = bar_date
+                partial_liquidation_done_today = False
+                # Calculate portfolio value for reset
+                position_value = 0
+                for sym, pos in open_positions.items():
+                    if pos is not None:
+                        pos_price = latest_prices.get(sym, pos['entry_price'])
+                        if pos['direction'] == 'LONG':
+                            unrealized_pnl = (pos_price - pos['entry_price']) * pos['shares']
+                        else:
+                            unrealized_pnl = (pos['entry_price'] - pos_price) * pos['shares']
+                        position_value += unrealized_pnl
+                day_start_equity = self.cash + position_value
+                self.drawdown_guard.reset_day(day_start_equity, bar_date)
+
+            # Update drawdown guard with current equity
+            # Calculate current portfolio value
+            position_value = 0
+            for sym, pos in open_positions.items():
+                if pos is not None:
+                    pos_price = latest_prices.get(sym, pos['entry_price'])
+                    if pos['direction'] == 'LONG':
+                        unrealized_pnl = (pos_price - pos['entry_price']) * pos['shares']
+                    else:
+                        unrealized_pnl = (pos['entry_price'] - pos_price) * pos['shares']
+                    position_value += unrealized_pnl
+            portfolio_value = self.cash + position_value
+            self.portfolio_value = portfolio_value
+
+            # Create a simple object for guard.update_equity
+            class EquityHolder:
+                def __init__(self, equity):
+                    self.equity = equity
+            self.drawdown_guard.update_equity(EquityHolder(portfolio_value), current_date=bar_date)
+
+            # ============ LIQUIDATION CHECKS (ODE-118) ============
+            guard_tier = self.drawdown_guard.tier
+
+            # HARD_LIMIT: Full liquidation
+            if guard_tier == DrawdownTier.HARD_LIMIT and open_positions:
+                logger.warning(f"DRAWDOWN_GUARD | HARD_LIMIT | Liquidating all {len(open_positions)} positions")
+                for liq_symbol, pos in list(open_positions.items()):
+                    if pos is None:
+                        continue
+                    direction = pos['direction']
+                    entry_price = pos['entry_price']
+                    shares = pos['shares']
+                    liq_price = latest_prices.get(liq_symbol, entry_price)
+
+                    if direction == 'LONG':
+                        exit_price = liq_price * (1 - self.EXIT_SLIPPAGE)
+                        pnl = (exit_price - entry_price) * shares
+                    else:
+                        exit_price = liq_price * (1 + self.EXIT_SLIPPAGE)
+                        pnl = (entry_price - exit_price) * shares
+
+                    pnl_pct = (pnl / (entry_price * shares)) * 100 if entry_price > 0 else 0
+
+                    all_trades.append({
+                        'symbol': liq_symbol,
+                        'direction': direction,
+                        'entry_date': pos['entry_time'],
+                        'exit_date': timestamp,
+                        'entry_price': entry_price,
+                        'exit_price': exit_price,
+                        'shares': shares,
+                        'pnl': pnl,
+                        'pnl_pct': pnl_pct,
+                        'exit_reason': 'hard_limit_liquidation',
+                        'strategy': pos.get('strategy', 'Unknown'),
+                        'reasoning': pos.get('reasoning', ''),
+                        'bars_held': bar_index - pos['entry_bar'],
+                        'mfe': 0, 'mae': 0, 'mfe_pct': 0, 'mae_pct': 0
+                    })
+
+                    self.cash += pnl
+                    del open_positions[liq_symbol]
+                    position_state[liq_symbol] = None
+
+                # Skip to next event after full liquidation
+                continue
+
+            # MEDIUM: Partial liquidation (50% of each position)
+            if guard_tier == DrawdownTier.MEDIUM and not partial_liquidation_done_today and open_positions:
+                partial_liquidation_done_today = True
+                logger.warning(f"DRAWDOWN_GUARD | MEDIUM | Partial liquidation: closing 50% of {len(open_positions)} positions")
+                for liq_symbol, pos in list(open_positions.items()):
+                    if pos is None:
+                        continue
+                    direction = pos['direction']
+                    entry_price = pos['entry_price']
+                    total_shares = pos['shares']
+                    shares_to_close = total_shares // 2  # Close half (rounded down)
+
+                    if shares_to_close <= 0:
+                        continue
+
+                    liq_price = latest_prices.get(liq_symbol, entry_price)
+
+                    if direction == 'LONG':
+                        exit_price = liq_price * (1 - self.EXIT_SLIPPAGE)
+                        pnl = (exit_price - entry_price) * shares_to_close
+                    else:
+                        exit_price = liq_price * (1 + self.EXIT_SLIPPAGE)
+                        pnl = (entry_price - exit_price) * shares_to_close
+
+                    pnl_pct = (pnl / (entry_price * shares_to_close)) * 100 if entry_price > 0 else 0
+
+                    all_trades.append({
+                        'symbol': liq_symbol,
+                        'direction': direction,
+                        'entry_date': pos['entry_time'],
+                        'exit_date': timestamp,
+                        'entry_price': entry_price,
+                        'exit_price': exit_price,
+                        'shares': shares_to_close,
+                        'pnl': pnl,
+                        'pnl_pct': pnl_pct,
+                        'exit_reason': 'partial_liquidation',
+                        'strategy': pos.get('strategy', 'Unknown'),
+                        'reasoning': pos.get('reasoning', ''),
+                        'bars_held': bar_index - pos['entry_bar'],
+                        'mfe': 0, 'mae': 0, 'mfe_pct': 0, 'mae_pct': 0
+                    })
+
+                    self.cash += pnl
+                    # Reduce position size
+                    pos['shares'] = total_shares - shares_to_close
+                    if pos['shares'] <= 0:
+                        del open_positions[liq_symbol]
+                        position_state[liq_symbol] = None
 
             # ============ EXIT LOGIC ============
             if position_state[symbol] is not None:
@@ -1127,6 +1287,20 @@ class Backtest1Hour:
                 if bars_since_last < self.COOLDOWN_BARS:
                     continue
 
+                # Check drawdown guard entries_allowed (ODE-118)
+                if not self.drawdown_guard.entries_allowed:
+                    self._diag_entry_blocks[symbol]['drawdown_guard'] += 1
+                    if self.kill_switch_trace:
+                        self._kill_switch_trace_log.append({
+                            'event': 'ENTRY_BLOCKED',
+                            'symbol': symbol,
+                            'timestamp': timestamp,
+                            'signal': signal,
+                            'block_reason': f'drawdown_guard tier={self.drawdown_guard.tier.name}',
+                            'drawdown_pct': self.drawdown_guard.drawdown_pct * 100
+                        })
+                    continue
+
                 # Check position limit
                 if len(open_positions) >= self.max_open_positions:
                     # Track blocked entries
@@ -1167,6 +1341,12 @@ class Backtest1Hour:
                 shares = self.risk_manager.calculate_position_size(
                     self.portfolio_value, entry_price, stop_loss
                 )
+
+                # Apply drawdown guard position size multiplier (ODE-118)
+                # WARNING tier reduces size to 50%
+                size_multiplier = self.drawdown_guard.position_size_multiplier
+                if size_multiplier < 1.0:
+                    shares = int(shares * size_multiplier)
 
                 if shares <= 0:
                     continue
