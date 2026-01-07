@@ -141,7 +141,14 @@ class TestBotStartWithScannerAPI:
         from fastapi.testclient import TestClient
         return TestClient(app)
 
-    def test_start_bot_runs_scanner_first(self, client):
+    @pytest.fixture
+    def mock_pid_file(self, tmp_path):
+        """Patch BOT_PID_FILE to use temp file, preventing test pollution."""
+        test_pid_file = tmp_path / "test_bot.pid"
+        with patch('api.main.BOT_PID_FILE', test_pid_file):
+            yield test_pid_file
+
+    def test_start_bot_runs_scanner_first(self, client, mock_pid_file):
         """POST /api/bot/start should run scanner before starting bot."""
         with patch('api.main.VolatilityScanner') as MockScanner, \
              patch('api.main.is_market_open', return_value=True), \
@@ -225,7 +232,7 @@ class TestBotStartWithScannerAPI:
             assert data["detail"]["reason"] == "scanner_error"
             assert "YFinance" in data["detail"]["message"]
 
-    def test_start_bot_returns_watchlist_on_success(self, client):
+    def test_start_bot_returns_watchlist_on_success(self, client, mock_pid_file):
         """Response should include list of scanned symbols and timestamp."""
         with patch('api.main.VolatilityScanner') as MockScanner, \
              patch('api.main.is_market_open', return_value=True), \
@@ -264,7 +271,14 @@ class TestFullScannerBotIntegration:
         from fastapi.testclient import TestClient
         return TestClient(app)
 
-    def test_full_flow_start_to_running(self, client):
+    @pytest.fixture
+    def mock_pid_file(self, tmp_path):
+        """Patch BOT_PID_FILE to use temp file, preventing test pollution."""
+        test_pid_file = tmp_path / "test_bot.pid"
+        with patch('api.main.BOT_PID_FILE', test_pid_file):
+            yield test_pid_file
+
+    def test_full_flow_start_to_running(self, client, mock_pid_file):
         """Test complete flow: start bot -> scanner runs -> bot starts with symbols."""
         # _is_bot_running returns False for start check, then True for status check
         is_running_mock = MagicMock(side_effect=[False, True])
