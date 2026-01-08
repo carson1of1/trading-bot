@@ -418,3 +418,117 @@ class TestCheckPositionsAccounted:
         result = checklist.check_positions_accounted()
 
         assert result.passed is False
+
+
+class TestRunAllChecks:
+    """Test run_all_checks aggregation."""
+
+    def test_all_checks_pass(self, tmp_path):
+        """Returns True when all checks pass."""
+        from core.preflight import PreflightChecklist
+
+        # Setup mocks for all checks to pass
+        mock_broker = MagicMock()
+        mock_account = MagicMock()
+        mock_account.portfolio_value = "25000.00"
+        mock_account.last_equity = "25000.00"
+        mock_broker.get_account.return_value = mock_account
+        mock_broker.get_positions.return_value = []
+
+        universe_file = tmp_path / "universe.yaml"
+        universe_file.write_text(yaml.dump({
+            'scanner_universe': {'tech': ['AAPL', 'MSFT']}
+        }))
+
+        config = {'trading': {'watchlist_file': str(universe_file)}}
+
+        with patch.dict(os.environ, {
+            'ALPACA_API_KEY': 'test_key',
+            'ALPACA_SECRET_KEY': 'test_secret'
+        }), patch('core.market_hours.MarketHours') as MockMH:
+            mock_mh = MagicMock()
+            mock_mh.is_market_open.return_value = True
+            MockMH.return_value = mock_mh
+
+            checklist = PreflightChecklist(config, mock_broker)
+            checklist.bot_dir = tmp_path
+            checklist.watchlist = ['AAPL', 'MSFT']
+
+            # Use a non-existent PID file
+            pid_file = tmp_path / "bot.pid"
+
+            all_passed, results = checklist.run_all_checks(pid_file=pid_file)
+
+            assert all_passed is True
+            assert len(results) == 7
+            assert all(r.passed for r in results)
+
+    def test_one_check_fails(self, tmp_path):
+        """Returns False when any check fails."""
+        from core.preflight import PreflightChecklist
+
+        mock_broker = MagicMock()
+        mock_account = MagicMock()
+        mock_account.portfolio_value = "25000.00"
+        mock_account.last_equity = "25000.00"
+        mock_broker.get_account.return_value = mock_account
+        mock_broker.get_positions.return_value = []
+
+        universe_file = tmp_path / "universe.yaml"
+        universe_file.write_text(yaml.dump({
+            'scanner_universe': {'tech': ['AAPL']}
+        }))
+
+        config = {'trading': {'watchlist_file': str(universe_file)}}
+
+        # Missing API key - this will cause one check to fail
+        with patch.dict(os.environ, {'ALPACA_SECRET_KEY': 'test_secret'}, clear=True), \
+             patch('core.market_hours.MarketHours') as MockMH:
+            os.environ.pop('ALPACA_API_KEY', None)
+            mock_mh = MagicMock()
+            mock_mh.is_market_open.return_value = True
+            MockMH.return_value = mock_mh
+
+            checklist = PreflightChecklist(config, mock_broker)
+            checklist.bot_dir = tmp_path
+            checklist.watchlist = ['AAPL']
+
+            pid_file = tmp_path / "bot.pid"
+            all_passed, results = checklist.run_all_checks(pid_file=pid_file)
+
+            assert all_passed is False
+            failed = [r for r in results if not r.passed]
+            assert len(failed) >= 1
+
+    def test_runs_all_checks_even_if_one_fails(self, tmp_path):
+        """Runs all checks even when early ones fail (no short-circuit)."""
+        from core.preflight import PreflightChecklist
+
+        mock_broker = MagicMock()
+        mock_broker.get_account.side_effect = Exception("API down")
+        mock_broker.get_positions.side_effect = Exception("API down")
+
+        universe_file = tmp_path / "universe.yaml"
+        universe_file.write_text(yaml.dump({
+            'scanner_universe': {'tech': ['AAPL']}
+        }))
+
+        config = {'trading': {'watchlist_file': str(universe_file)}}
+
+        with patch.dict(os.environ, {}, clear=True), \
+             patch('core.market_hours.MarketHours') as MockMH:
+            mock_mh = MagicMock()
+            mock_mh.is_market_open.return_value = False
+            mock_mh.time_until_market_open.return_value = 120
+            MockMH.return_value = mock_mh
+
+            checklist = PreflightChecklist(config, mock_broker)
+            checklist.bot_dir = tmp_path
+            checklist.watchlist = ['AAPL']
+
+            pid_file = tmp_path / "bot.pid"
+            all_passed, results = checklist.run_all_checks(pid_file=pid_file)
+
+            # Should have run all 7 checks even though many failed
+            assert len(results) == 7
+            assert all_passed is False

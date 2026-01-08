@@ -267,10 +267,39 @@ class PreflightChecklist:
         """
         Run all preflight checks.
 
+        Args:
+            pid_file: Optional path to PID file (for testing)
+
         Returns:
             Tuple of (all_passed, list of CheckResults)
         """
         results = []
-        # TODO: Add checks
-        all_passed = all(r.passed for r in results) if results else True
+
+        # Run each check and log result
+        checks = [
+            ("API keys", self.check_api_keys),
+            ("Account balance", self.check_account_balance),
+            ("Market status", self.check_market_status),
+            ("Daily loss reset", self.check_daily_loss_reset),
+            ("Positions accounted", self.check_positions_accounted),
+            ("Universe loaded", self.check_universe_loaded),
+            ("No duplicate process", lambda: self.check_no_duplicate_process(pid_file)),
+        ]
+
+        for check_name, check_fn in checks:
+            result = check_fn()
+            results.append(result)
+
+            # Log each check result
+            status = "✓" if result.passed else "✗"
+            logger.info(f"[PREFLIGHT] {status} {result.message}")
+
+        all_passed = all(r.passed for r in results)
+
+        if all_passed:
+            logger.info(f"[PREFLIGHT] PASSED - {len(results)} of {len(results)} checks passed")
+        else:
+            failed_count = len([r for r in results if not r.passed])
+            logger.error(f"[PREFLIGHT] FAILED - {failed_count} of {len(results)} checks failed")
+
         return all_passed, results
