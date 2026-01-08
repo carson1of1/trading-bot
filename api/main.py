@@ -136,6 +136,10 @@ class BacktestRequest(BaseModel):
     longs_only: bool = Field(default=False, description="Only take LONG positions")
     shorts_only: bool = Field(default=False, description="Only take SHORT positions")
     initial_capital: float = Field(default=10000.0, ge=1000, le=10000000, description="Starting capital")
+    # Trailing stop parameters (defaults match live trading config.yaml)
+    trailing_stop_enabled: bool = Field(default=True, description="Enable trailing stop loss")
+    trailing_activation_pct: float = Field(default=0.15, ge=0.1, le=10.0, description="% profit to activate trailing stop")
+    trailing_trail_pct: float = Field(default=0.15, ge=0.1, le=10.0, description="% to trail below peak")
 
 
 class TradeResult(BaseModel):
@@ -1297,6 +1301,13 @@ async def run_backtest(request: BacktestRequest):
                 success=False,
                 error="No symbols found in scanner_universe"
             )
+
+        # Override trailing stop settings from request
+        if "trailing_stop" not in config:
+            config["trailing_stop"] = {}
+        config["trailing_stop"]["enabled"] = request.trailing_stop_enabled
+        config["trailing_stop"]["activation_pct"] = request.trailing_activation_pct / 100.0  # Convert % to decimal
+        config["trailing_stop"]["trail_pct"] = request.trailing_trail_pct / 100.0  # Convert % to decimal
 
         # Create and run backtest
         backtester = Backtest1Hour(

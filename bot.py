@@ -1374,12 +1374,10 @@ class TradingBot:
         4. Check entries for watchlist symbols (if allowed)
         """
         try:
-            # FIX (Jan 7, 2026): Use bar from 2 hours ago (fully settled) to match backtest
-            # Running at :02, we use bar N-2 for signals, enter at bar N's open
-            # This matches backtest: signal on bar N-1, entry at bar N+1 open
+            # Use previous hour's candle for signals
             eastern = pytz.timezone('America/New_York')
             now = datetime.now(eastern)
-            expected_candle_hour = (now.hour - 2) % 24  # Settled bar from 2 hours ago
+            expected_candle_hour = (now.hour - 1) % 24  # Previous hour's candle
             logger.info(f"=== Trading Cycle Start @ {now.strftime('%H:%M:%S')} EST ===")
             logger.info(f"Expecting candles from {expected_candle_hour}:00 hour")
 
@@ -1863,25 +1861,25 @@ class TradingBot:
         logger.info("Trading Bot stopped")
 
 
-def get_seconds_until_next_hour(buffer_minutes: int = 2) -> int:
+def get_seconds_until_next_hour(buffer_minutes: int = 31) -> int:
     """
     Calculate seconds until X minutes past the next hour.
 
-    FIX (Jan 7, 2026): Run early at bar open to match backtest entry timing.
+    YFinance hourly bars are aligned to market open at 9:30 AM EST.
+    Bars are timestamped at 9:30, 10:30, 11:30, etc. and complete 60 minutes later.
 
-    Previous behavior (31 min delay) caused live entries to be ~30 min late vs backtest,
-    resulting in worse fills on momentum trades.
+    Example timeline:
+    - 9:30 bar starts at 9:30, completes at 10:30
+    - 10:30 bar starts at 10:30, completes at 11:30
 
-    New behavior:
-    - Run at :02 past the hour (just after bar opens)
-    - Use the bar from 2 hours ago (fully settled, guaranteed available)
-    - Enter at market price (~bar open) matching backtest's next-bar-open entry
+    The bot must run AFTER bars complete to get valid data:
+    - Run at :31 to catch the :30 bar (e.g., run at 10:31 for the 9:30 bar)
 
     Args:
-        buffer_minutes: Minutes after the hour to run (default 2 for early entry)
+        buffer_minutes: Minutes after the hour to run (default 31 for :30 bar alignment)
 
     Returns:
-        Seconds until next run time (e.g., 10:02, 11:02, etc.)
+        Seconds until next run time (e.g., 10:31, 11:31, etc.)
     """
     eastern = pytz.timezone('America/New_York')
     now = datetime.now(eastern)
@@ -2076,8 +2074,8 @@ def main():
                         help='Path to configuration file')
     parser.add_argument('--symbols', type=str, default=None,
                         help='Comma-separated list of symbols from scanner (overrides config)')
-    parser.add_argument('--candle-delay', type=int, default=2,
-                        help='Minutes after hour to run cycle (default: 2 for early bar open entry)')
+    parser.add_argument('--candle-delay', type=int, default=31,
+                        help='Minutes after hour to run cycle (default: 31 for :30 bar alignment)')
     args = parser.parse_args()
 
     # Parse symbols if provided

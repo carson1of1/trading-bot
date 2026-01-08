@@ -12,6 +12,10 @@ export interface BacktestRequest {
   longs_only?: boolean;
   shorts_only?: boolean;
   initial_capital?: number;
+  // Trailing stop parameters
+  trailing_stop_enabled?: boolean;
+  trailing_activation_pct?: number;  // % profit to activate (e.g., 1.5 = 1.5%)
+  trailing_trail_pct?: number;       // % to trail below peak (e.g., 1.0 = 1.0%)
 }
 
 // Response types

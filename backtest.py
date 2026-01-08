@@ -1182,6 +1182,57 @@ class Backtest1Hour:
                 if effective_low < pos.get('lowest_price', entry_price):
                     pos['lowest_price'] = effective_low
 
+                # ============ TRAILING STOP LOGIC ============
+                if self.trailing_stop_enabled and not exit_triggered:
+                    highest_price = pos.get('highest_price', entry_price)
+                    lowest_price = pos.get('lowest_price', entry_price)
+                    trailing_activated = pos.get('trailing_activated', False)
+                    trailing_stop_price = pos.get('trailing_stop_price', 0.0)
+
+                    if direction == 'LONG':
+                        current_profit_pct = (highest_price - entry_price) / entry_price if entry_price > 0 else 0
+
+                        if not trailing_activated and current_profit_pct >= self.trailing_activation_pct:
+                            trailing_activated = True
+                            if self.trailing_move_to_breakeven:
+                                trailing_stop_price = entry_price
+                            else:
+                                trailing_stop_price = highest_price * (1 - self.trailing_trail_pct)
+
+                        if trailing_activated:
+                            new_trail_price = highest_price * (1 - self.trailing_trail_pct)
+                            if new_trail_price > trailing_stop_price:
+                                trailing_stop_price = new_trail_price
+
+                            if bar_low <= trailing_stop_price:
+                                exit_triggered = True
+                                exit_price = trailing_stop_price * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
+                                exit_reason = 'trailing_stop'
+
+                    elif direction == 'SHORT':
+                        current_profit_pct = (entry_price - lowest_price) / entry_price if entry_price > 0 else 0
+
+                        if not trailing_activated and current_profit_pct >= self.trailing_activation_pct:
+                            trailing_activated = True
+                            if self.trailing_move_to_breakeven:
+                                trailing_stop_price = entry_price
+                            else:
+                                trailing_stop_price = lowest_price * (1 + self.trailing_trail_pct)
+
+                        if trailing_activated:
+                            new_trail_price = lowest_price * (1 + self.trailing_trail_pct)
+                            if new_trail_price < trailing_stop_price or trailing_stop_price == 0:
+                                trailing_stop_price = new_trail_price
+
+                            if bar_high >= trailing_stop_price:
+                                exit_triggered = True
+                                exit_price = trailing_stop_price * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
+                                exit_reason = 'trailing_stop'
+
+                    # Store trailing state back in position
+                    pos['trailing_activated'] = trailing_activated
+                    pos['trailing_stop_price'] = trailing_stop_price
+
                 # Check max hold
                 bars_held = bar_index - entry_bar
                 if not exit_triggered and bars_held >= self.max_hold_hours:
@@ -1357,7 +1408,9 @@ class Backtest1Hour:
                     'highest_price': entry_price,
                     'lowest_price': entry_price,
                     'strategy': row.get('strategy', 'Unknown'),
-                    'reasoning': row.get('reasoning', '')
+                    'reasoning': row.get('reasoning', ''),
+                    'trailing_activated': False,
+                    'trailing_stop_price': 0.0
                 }
                 open_positions[symbol] = position_state[symbol]
                 last_trade_bar[symbol] = bar_index

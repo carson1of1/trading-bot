@@ -17,12 +17,18 @@ import { runBacktest, BacktestResponse, PeriodBreakdown } from "@/lib/api";
 const TOP_N_OPTIONS = [5, 10, 15, 20, 25];
 const DAYS_OPTIONS = [7, 14, 30, 60, 90, 180, 365];
 const CAPITAL_OPTIONS = [5000, 10000, 25000, 50000, 100000];
+const TRAILING_ACTIVATION_OPTIONS = [0.1, 0.15, 0.25, 0.5, 1.0];
+const TRAILING_TRAIL_OPTIONS = [0.1, 0.15, 0.25, 0.5];
 
 export default function BacktestPage() {
   const [topN, setTopN] = useState(10);
   const [days, setDays] = useState(30);
   const [initialCapital, setInitialCapital] = useState(10000);
   const [sideFilter, setSideFilter] = useState<"both" | "longs" | "shorts">("both");
+  // Trailing stop state (defaults match live trading config.yaml)
+  const [trailingEnabled, setTrailingEnabled] = useState(true);
+  const [trailingActivation, setTrailingActivation] = useState(0.15);
+  const [trailingTrail, setTrailingTrail] = useState(0.15);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<BacktestResponse | null>(null);
@@ -46,6 +52,9 @@ export default function BacktestPage() {
         longs_only: sideFilter === "longs",
         shorts_only: sideFilter === "shorts",
         initial_capital: initialCapital,
+        trailing_stop_enabled: trailingEnabled,
+        trailing_activation_pct: trailingActivation,
+        trailing_trail_pct: trailingTrail,
       });
       setResults(response);
       // Default to monthly view for 90+ day backtests
@@ -203,6 +212,71 @@ export default function BacktestPage() {
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* Trailing Stop Settings */}
+          <div className="mb-6 p-4 bg-surface-1 rounded-lg">
+            <div className="flex items-center justify-between mb-4">
+              <label className="text-sm text-text-secondary">Trailing Stop</label>
+              <button
+                onClick={() => setTrailingEnabled(!trailingEnabled)}
+                className={`relative w-10 h-5 rounded-full transition-colors ${
+                  trailingEnabled ? "bg-emerald" : "bg-surface-2"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${
+                    trailingEnabled ? "left-5" : "left-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+
+            {trailingEnabled && (
+              <>
+                <div className="mb-4">
+                  <label className="block text-xs text-text-muted mb-2">
+                    Activation (% profit)
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {TRAILING_ACTIVATION_OPTIONS.map((pct) => (
+                      <button
+                        key={pct}
+                        onClick={() => setTrailingActivation(pct)}
+                        className={`px-2 py-1 text-xs font-medium rounded-md transition-all ${
+                          trailingActivation === pct
+                            ? "bg-emerald text-black"
+                            : "bg-surface-2 text-text-secondary hover:text-white"
+                        }`}
+                      >
+                        {pct}%
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs text-text-muted mb-2">
+                    Trail Distance (%)
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {TRAILING_TRAIL_OPTIONS.map((pct) => (
+                      <button
+                        key={pct}
+                        onClick={() => setTrailingTrail(pct)}
+                        className={`px-2 py-1 text-xs font-medium rounded-md transition-all ${
+                          trailingTrail === pct
+                            ? "bg-emerald text-black"
+                            : "bg-surface-2 text-text-secondary hover:text-white"
+                        }`}
+                      >
+                        {pct}%
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
           </div>
 
           {/* Error Message */}
