@@ -34,6 +34,7 @@ from core.broker import create_broker, BrokerInterface, BrokerAPIError
 from core.config import get_global_config
 from core.market_hours import is_market_open, get_market_status_message
 from core.scanner import VolatilityScanner
+from core.hot_stocks import HotStocksFeed
 from core.data import YFinanceDataFetcher
 from core.logger import TradeLogger
 import subprocess
@@ -419,6 +420,38 @@ class RiskMetrics(BaseModel):
     largest_position_percent: float
     current_drawdown: float
     position_sizes: List[dict]
+
+
+class RecoveryStatsResponse(BaseModel):
+    """Recovery statistics for a position."""
+    # Core probabilities
+    recovery_probability: float
+    take_profit_probability: float
+    stop_loss_probability: float
+
+    # Drawdown stats
+    avg_max_drawdown: float
+    avg_bars_to_recovery: float
+
+    # Gap context
+    is_gap_entry: bool
+    gap_percentage: Optional[float] = None
+    gap_win_rate: Optional[float] = None
+
+    # Current position context
+    current_drawdown_pct: float
+    distance_to_stop_pct: float
+    distance_to_tp_pct: float
+
+    # Expected values
+    ev_cut_now: float
+    ev_hold_to_breakeven: float
+    ev_hold_for_tp: float
+
+    # Recommendation
+    recommendation: str
+    recommendation_reason: str
+    risk_warning: Optional[str] = None
 
 
 # Initialize FastAPI app
@@ -969,6 +1002,90 @@ async def get_positions():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/positions/{symbol}/recovery-stats", response_model=RecoveryStatsResponse)
+async def get_recovery_stats(symbol: str, take_profit_pct: float = 5.0):
+    """
+    Get recovery statistics for a specific position.
+
+    Calculates the probability of a trade recovering from its current drawdown,
+    expected values for different actions, and provides a recommendation.
+
+    Args:
+        symbol: The stock symbol
+        take_profit_pct: Take profit target as % from entry (default: 5.0)
+    """
+    try:
+        from core.recovery_stats import calculate_recovery_stats
+
+        broker = get_broker()
+        config = load_config()
+
+        # Get position
+        positions = broker.get_positions()
+        position = next((p for p in positions if p.symbol == symbol), None)
+
+        if not position:
+            raise HTTPException(status_code=404, detail=f"Position {symbol} not found")
+
+        # Get risk metrics for context
+        account = broker.get_account()
+        daily_loss_pct = abs(account.daily_pnl_percent * 100) if account.daily_pnl < 0 else 0
+
+        # Get config values
+        risk_config = config.get('risk', {})
+        exit_config = config.get('exit_rules', {})
+        daily_loss_limit = risk_config.get('daily_drawdown_limit', 4.0)
+        stop_loss_pct = exit_config.get('hard_stop_loss', 0.05) * 100
+
+        # Calculate position size as % of portfolio
+        position_size_pct = (position.market_value / account.portfolio_value * 100) if account.portfolio_value > 0 else 10
+
+        # Calculate stop price
+        stop_price = position.avg_entry_price * (1 - stop_loss_pct / 100)
+
+        # Run in thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+
+        def _calculate():
+            return calculate_recovery_stats(
+                symbol=symbol,
+                entry_price=position.avg_entry_price,
+                current_price=position.current_price,
+                stop_price=stop_price,
+                take_profit_pct=take_profit_pct,
+                daily_loss_pct=daily_loss_pct,
+                daily_loss_limit_pct=daily_loss_limit,
+                position_size_pct=position_size_pct
+            )
+
+        stats = await loop.run_in_executor(_executor, _calculate)
+
+        return RecoveryStatsResponse(
+            recovery_probability=round(stats.recovery_probability, 1),
+            take_profit_probability=round(stats.take_profit_probability, 1),
+            stop_loss_probability=round(stats.stop_loss_probability, 1),
+            avg_max_drawdown=round(stats.avg_max_drawdown, 1),
+            avg_bars_to_recovery=round(stats.avg_bars_to_recovery, 0),
+            is_gap_entry=stats.is_gap_entry,
+            gap_percentage=round(stats.gap_percentage, 1) if stats.gap_percentage else None,
+            gap_win_rate=round(stats.gap_win_rate, 1) if stats.gap_win_rate else None,
+            current_drawdown_pct=round(stats.current_drawdown_pct, 2),
+            distance_to_stop_pct=round(stats.distance_to_stop_pct, 2),
+            distance_to_tp_pct=round(stats.distance_to_tp_pct, 2),
+            ev_cut_now=round(stats.ev_cut_now, 2),
+            ev_hold_to_breakeven=round(stats.ev_hold_to_breakeven, 2),
+            ev_hold_for_tp=round(stats.ev_hold_for_tp, 2),
+            recommendation=stats.recommendation,
+            recommendation_reason=stats.recommendation_reason,
+            risk_warning=stats.risk_warning
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/bot/status", response_model=BotStatusResponse)
 async def get_bot_status():
     """Get current bot status."""
@@ -1077,6 +1194,16 @@ async def start_bot():
         scanner_config = config.get('volatility_scanner', {})
         scanner = VolatilityScanner(scanner_config)
 
+        # Fetch hot stocks and add to pool
+        hot_stocks_config = config.get('hot_stocks', {})
+        if hot_stocks_config.get('enabled', False):
+            hot_feed = HotStocksFeed(hot_stocks_config)
+            hot_symbols = hot_feed.fetch()
+            if hot_symbols:
+                # Add hot stocks to scanner pool (they'll be fetched with the rest)
+                scanner_symbols = list(set(scanner_symbols) | set(hot_symbols))
+                print(f"[API] Added {len(hot_symbols)} hot stocks to scanner pool")
+
         # Fetch data and scan
         fetcher = YFinanceDataFetcher()
         end_date = datetime.now()
@@ -1084,7 +1211,7 @@ async def start_bot():
         # Use get_historical_data with limit=200 (same as scanner/scan endpoint)
         # This ensures enough bars for ATR calculation (scanner needs ~98 bars minimum)
         historical_data = {}
-        for symbol in scanner_symbols[:100]:  # Limit to avoid timeout
+        for symbol in scanner_symbols[:150]:  # Increased limit to include hot stocks
             try:
                 data = fetcher.get_historical_data(
                     symbol,
@@ -1216,18 +1343,28 @@ def _run_scanner_sync(top_n: int) -> ScannerResponse:
     FIX (Jan 7, 2026): Use parallel batch fetching for 5-10x speedup.
     """
     from core.scanner import VolatilityScanner
+    from core.hot_stocks import HotStocksFeed
     from core.data import YFinanceDataFetcher
 
     config = load_config()
     universe = load_universe()
     symbols = collect_scanner_symbols(universe)
 
+    # Add hot stocks to scanner pool
+    hot_stocks_config = config.get('hot_stocks', {})
+    if hot_stocks_config.get('enabled', False):
+        hot_feed = HotStocksFeed(hot_stocks_config)
+        hot_symbols = hot_feed.fetch()
+        if hot_symbols:
+            symbols = list(set(symbols) | set(hot_symbols))
+            print(f"[API] Scanner: added {len(hot_symbols)} hot stocks to pool")
+
     # FIX (Jan 7, 2026): Use parallel batch fetching instead of sequential loop
     # Old: 100 symbols x 0.3s = 30+ seconds
     # New: 100 symbols / 10 workers = ~3-5 seconds
     fetcher = YFinanceDataFetcher()
     historical_data = fetcher.get_historical_data_batch(
-        symbols[:100],  # Scan top 100 volatile symbols
+        symbols[:150],  # Increased to include hot stocks
         timeframe="1Hour",
         limit=200,
         max_workers=10
