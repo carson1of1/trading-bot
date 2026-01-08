@@ -2191,6 +2191,25 @@ def main():
             _write_pid_file()  # Write PID so API/watchdog can track us
             logger.info(f"Bot started with candle-delay={args.candle_delay} minutes")
 
+            # FIX (Jan 8, 2026): Wait for candle boundary before first cycle
+            # Previously bot would trade immediately on startup regardless of time
+            # Now it waits until the proper candle close time (e.g., :31 past hour)
+            now = datetime.now(eastern)
+            current_minute = now.minute
+
+            # Check if we're NOT at the candle boundary (within 2 min tolerance)
+            target_minute = args.candle_delay
+            if abs(current_minute - target_minute) > 2 and abs(current_minute - target_minute) < 58:
+                wait_seconds = get_seconds_until_next_hour(buffer_minutes=args.candle_delay)
+                next_run = now + timedelta(seconds=wait_seconds)
+                logger.info(
+                    f"STARTUP_WAIT | Not at candle boundary (current: :{current_minute:02d}, target: :{target_minute:02d}) | "
+                    f"Waiting {wait_seconds//60}m {wait_seconds%60}s until {next_run.strftime('%H:%M')} EST"
+                )
+                time.sleep(wait_seconds)
+            else:
+                logger.info(f"STARTUP | At candle boundary (:{current_minute:02d}), running first cycle immediately")
+
             # FIX (Jan 2026): Smart hourly scheduling - align to candle boundaries
             # Instead of sleeping 3600s from start, wait until :02 past next hour
             while bot.running:

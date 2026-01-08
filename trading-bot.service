@@ -1,0 +1,29 @@
+[Unit]
+Description=Trading Bot - Hourly Bar Trading Engine
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=carsonodell
+Group=carsonodell
+WorkingDirectory=/home/carsonodell/trading-bot
+EnvironmentFile=/home/carsonodell/trading-bot/.env
+ExecStart=/usr/bin/python3 -u bot.py
+Restart=on-failure
+RestartSec=30
+
+# Logging - stdout/stderr go to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading-bot
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/carsonodell/trading-bot/logs /home/carsonodell/trading-bot/data
+
+[Install]
+WantedBy=multi-user.target

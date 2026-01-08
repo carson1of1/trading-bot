@@ -6,7 +6,6 @@ Provides REST API endpoints for running backtests with scanner-selected symbols.
 
 import sys
 import os
-import signal
 import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -39,72 +38,79 @@ from core.data import YFinanceDataFetcher
 from core.logger import TradeLogger
 import subprocess
 
-# PID file for tracking bot process
-BOT_PID_FILE = Path(__file__).parent.parent / "logs" / "bot.pid"
-
-
-def _read_bot_pid() -> Optional[int]:
-    """Read bot PID from file."""
-    try:
-        if BOT_PID_FILE.exists():
-            pid = int(BOT_PID_FILE.read_text().strip())
-            return pid
-    except (ValueError, IOError):
-        pass
-    return None
-
-
-def _write_bot_pid(pid: int):
-    """Write bot PID to file."""
-    BOT_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    BOT_PID_FILE.write_text(str(pid))
-
-
-def _clear_bot_pid():
-    """Clear bot PID file."""
-    try:
-        if BOT_PID_FILE.exists():
-            BOT_PID_FILE.unlink()
-    except IOError:
-        pass
+# Systemd service management (user-level service, no sudo required)
+SYSTEMD_SERVICE_NAME = "trading-bot"
+# Environment needed for systemctl --user to work from any process
+_SYSTEMD_USER_ENV = {
+    **os.environ,
+    "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"
+}
 
 
 def _is_bot_running() -> bool:
-    """Check if bot process is actually running."""
-    pid = _read_bot_pid()
-    if pid is None:
-        return False
+    """Check if bot is running via systemd user service."""
     try:
-        # Check if process exists (signal 0 doesn't kill, just checks)
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
-        # Process doesn't exist, clean up stale PID file
-        _clear_bot_pid()
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", SYSTEMD_SERVICE_NAME],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=_SYSTEMD_USER_ENV
+        )
+        return result.stdout.strip() == "active"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
 
 
-def _kill_bot_process() -> bool:
-    """Kill the bot process if running."""
-    pid = _read_bot_pid()
-    if pid is None:
-        return False
+def _start_bot_service() -> bool:
+    """Start the bot via systemd user service."""
     try:
-        os.kill(pid, signal.SIGTERM)
-        # Give it a moment to terminate gracefully
-        import time
-        time.sleep(0.5)
-        # Check if still running, force kill if needed
-        try:
-            os.kill(pid, 0)
-            os.kill(pid, signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            pass
-        _clear_bot_pid()
-        return True
-    except (OSError, ProcessLookupError):
-        _clear_bot_pid()
+        result = subprocess.run(
+            ["systemctl", "--user", "start", SYSTEMD_SERVICE_NAME],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_SYSTEMD_USER_ENV
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
+
+
+def _stop_bot_service() -> bool:
+    """Stop the bot via systemd user service."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "stop", SYSTEMD_SERVICE_NAME],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_SYSTEMD_USER_ENV
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def _get_bot_status() -> dict:
+    """Get detailed bot status from systemd."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "show", SYSTEMD_SERVICE_NAME,
+             "--property=ActiveState,SubState,MainPID"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=_SYSTEMD_USER_ENV
+        )
+        status = {}
+        for line in result.stdout.strip().split('\n'):
+            if '=' in line:
+                key, value = line.split('=', 1)
+                status[key] = value
+        return status
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return {"ActiveState": "unknown"}
 
 # Broker singleton for API
 _broker: Optional[BrokerInterface] = None
@@ -1256,28 +1262,33 @@ async def start_bot():
             }
         )
 
-    # Step 3: Start bot with scanned symbols
+    # Step 3: Start bot via systemd (bot runs its own scanner)
     try:
-        symbols_arg = ",".join(watchlist)
-        process = subprocess.Popen(
-            ["python3", "bot.py", "--symbols", symbols_arg],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
+        if not _start_bot_service():
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "reason": "bot_start_error",
+                    "message": "Failed to start bot service. Check systemctl --user status trading-bot"
+                }
+            )
 
-        # FIX (Jan 2026): Save PID to prevent duplicate bots
-        _write_bot_pid(process.pid)
+        # Get PID from systemd for status tracking
+        status = _get_bot_status()
+        pid = status.get("MainPID", "unknown")
 
         _bot_state["status"] = "running"
-        _bot_state["watchlist"] = watchlist
-        update_bot_state(status="running", last_action=f"Started with scanner: {', '.join(watchlist)} (PID: {process.pid})")
+        _bot_state["watchlist"] = watchlist  # Preview from API scanner
+        update_bot_state(status="running", last_action=f"Started via systemd (PID: {pid})")
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail={
                 "reason": "bot_start_error",
-                "message": f"Failed to start bot process: {str(e)}"
+                "message": f"Failed to start bot service: {str(e)}"
             }
         )
 
@@ -1285,30 +1296,31 @@ async def start_bot():
         status="started",
         watchlist=watchlist,
         scanner_ran_at=datetime.now().isoformat(),
-        message=f"Bot started with {len(watchlist)} scanned stocks: {', '.join(watchlist)}"
+        message=f"Bot started via systemd. Scanner preview: {', '.join(watchlist)}"
     )
 
 
 @app.post("/api/bot/stop")
 async def stop_bot():
-    """Stop the trading bot."""
+    """Stop the trading bot via systemd."""
     global _bot_state
 
-    # FIX (Jan 2026): Actually kill the bot process instead of just updating state
-    pid = _read_bot_pid()
+    # Get current status before stopping
+    status = _get_bot_status()
+    pid = status.get("MainPID", "unknown")
     was_running = _is_bot_running()
 
     if was_running:
-        killed = _kill_bot_process()
-        if killed:
+        stopped = _stop_bot_service()
+        if stopped:
             _bot_state["status"] = "stopped"
-            _bot_state["last_action"] = f"Bot stopped (killed PID {pid})"
+            _bot_state["last_action"] = f"Bot stopped via systemd (PID {pid})"
             _bot_state["last_action_time"] = datetime.now().isoformat()
-            return {"success": True, "status": "stopped", "killed_pid": pid}
+            return {"success": True, "status": "stopped", "stopped_pid": pid}
         else:
             raise HTTPException(
                 status_code=500,
-                detail={"reason": "kill_failed", "message": f"Failed to kill bot process (PID {pid})"}
+                detail={"reason": "stop_failed", "message": "Failed to stop bot service via systemd"}
             )
     else:
         # No process running, just update state
