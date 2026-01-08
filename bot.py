@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import logging
+import sys
 import time
 import yaml
 from datetime import datetime, timedelta
@@ -225,6 +226,33 @@ class TradingBot:
         # Timing
         self.last_bar_time = None
         self.last_cycle_time = None
+
+    def run_preflight(self) -> bool:
+        """
+        Run preflight checks before enabling trading.
+
+        Returns:
+            True if all checks pass, False otherwise.
+        """
+        from core.preflight import PreflightChecklist
+
+        logger.info("Running preflight checks...")
+
+        checklist = PreflightChecklist(self.config, self.broker)
+        checklist.bot_dir = self.bot_dir
+        checklist.watchlist = self.watchlist
+
+        all_passed, results = checklist.run_all_checks()
+
+        if not all_passed:
+            failed = [r for r in results if not r.passed]
+            logger.error(f"PREFLIGHT FAILED: {len(failed)} check(s) failed")
+            for r in failed:
+                logger.error(f"  - {r.name}: {r.message}")
+            return False
+
+        logger.info("PREFLIGHT PASSED: All checks passed, trading enabled")
+        return True
 
     def sync_account(self):
         """Sync account state from broker."""
@@ -2077,6 +2105,8 @@ def main():
                         help='Comma-separated list of symbols from scanner (overrides config)')
     parser.add_argument('--candle-delay', type=int, default=31,
                         help='Minutes after hour to run cycle (default: 31 for :30 bar alignment)')
+    parser.add_argument('--skip-preflight', action='store_true',
+                        help='Skip preflight checks (for manual/debug runs)')
     args = parser.parse_args()
 
     # Parse symbols if provided
@@ -2086,6 +2116,15 @@ def main():
         print(f"[SCANNER] Using {len(scanner_symbols)} symbols from scanner: {scanner_symbols}")
 
     bot = TradingBot(config_path=args.config, scanner_symbols=scanner_symbols)
+
+    # Run preflight checks (unless skipped)
+    if not args.skip_preflight:
+        if not bot.run_preflight():
+            logger.error("Exiting due to preflight failure")
+            sys.exit(1)
+    else:
+        logger.warning("Preflight checks SKIPPED (--skip-preflight flag)")
+
     eastern = pytz.timezone('America/New_York')
 
     # FIX (Jan 7, 2026): Crash protection - track consecutive failures to prevent infinite loops

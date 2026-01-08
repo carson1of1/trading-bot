@@ -532,3 +532,13 @@ class TestRunAllChecks:
             # Should have run all 7 checks even though many failed
             assert len(results) == 7
             assert all_passed is False
+
+
+class TestBotIntegration:
+    """Test integration with bot.py."""
+
+    def test_run_preflight_method_exists(self):
+        """TradingBot has run_preflight method."""
+        # Import to verify method exists (don't actually run)
+        from bot import TradingBot
+        assert hasattr(TradingBot, 'run_preflight')
