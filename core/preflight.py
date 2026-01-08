@@ -38,6 +38,30 @@ class PreflightChecklist:
         self.config = config
         self.broker = broker
 
+    def check_api_keys(self) -> CheckResult:
+        """Check that Alpaca API keys are loaded."""
+        api_key = os.environ.get('ALPACA_API_KEY', '')
+        secret_key = os.environ.get('ALPACA_SECRET_KEY', '')
+
+        missing = []
+        if not api_key:
+            missing.append('ALPACA_API_KEY')
+        if not secret_key:
+            missing.append('ALPACA_SECRET_KEY')
+
+        if missing:
+            return CheckResult(
+                name="api_keys",
+                passed=False,
+                message=f"Missing environment variables: {', '.join(missing)}"
+            )
+
+        return CheckResult(
+            name="api_keys",
+            passed=True,
+            message="API keys loaded"
+        )
+
     def run_all_checks(self) -> Tuple[bool, List[CheckResult]]:
         """
         Run all preflight checks.
