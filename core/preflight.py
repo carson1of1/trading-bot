@@ -96,7 +96,174 @@ class PreflightChecklist:
                 message="No duplicate process (stale PID file removed)"
             )
 
-    def run_all_checks(self) -> Tuple[bool, List[CheckResult]]:
+    def check_universe_loaded(self) -> CheckResult:
+        """Check that symbol universe file is loaded and non-empty."""
+        try:
+            watchlist_file = self.config.get('trading', {}).get('watchlist_file', 'universe.yaml')
+
+            # Handle absolute vs relative paths
+            if not Path(watchlist_file).is_absolute():
+                bot_dir = getattr(self, 'bot_dir', Path(__file__).parent.parent)
+                watchlist_file = bot_dir / watchlist_file
+
+            with open(watchlist_file, 'r') as f:
+                universe = yaml.safe_load(f)
+
+            # Count symbols from scanner_universe
+            scanner_universe = universe.get('scanner_universe', {})
+            symbols = []
+            for category, syms in scanner_universe.items():
+                if isinstance(syms, list):
+                    symbols.extend(syms)
+
+            # Deduplicate
+            symbols = list(set(symbols))
+
+            if not symbols:
+                return CheckResult(
+                    name="universe_loaded",
+                    passed=False,
+                    message="Universe file is empty (no symbols)"
+                )
+
+            return CheckResult(
+                name="universe_loaded",
+                passed=True,
+                message=f"Universe loaded: {len(symbols)} symbols"
+            )
+
+        except FileNotFoundError:
+            return CheckResult(
+                name="universe_loaded",
+                passed=False,
+                message=f"Universe file not found: {watchlist_file}"
+            )
+        except Exception as e:
+            return CheckResult(
+                name="universe_loaded",
+                passed=False,
+                message=f"Error loading universe: {e}"
+            )
+
+    def check_account_balance(self) -> CheckResult:
+        """Check that account balance can be fetched and is positive."""
+        try:
+            account = self.broker.get_account()
+            portfolio_value = float(account.portfolio_value)
+
+            if portfolio_value <= 0:
+                return CheckResult(
+                    name="account_balance",
+                    passed=False,
+                    message=f"Account balance is zero or negative: ${portfolio_value:,.2f}"
+                )
+
+            return CheckResult(
+                name="account_balance",
+                passed=True,
+                message=f"Account balance: ${portfolio_value:,.2f}"
+            )
+
+        except Exception as e:
+            return CheckResult(
+                name="account_balance",
+                passed=False,
+                message=f"Failed to fetch account: {e}"
+            )
+
+    def check_market_status(self) -> CheckResult:
+        """Check that market is open or opens within 10 minutes."""
+        from core.market_hours import MarketHours
+
+        market_hours = MarketHours()
+
+        if market_hours.is_market_open():
+            return CheckResult(
+                name="market_status",
+                passed=True,
+                message="Market is open"
+            )
+
+        minutes_until_open = market_hours.time_until_market_open()
+
+        if 0 < minutes_until_open <= 10:
+            return CheckResult(
+                name="market_status",
+                passed=True,
+                message=f"Market opens in {minutes_until_open} minutes"
+            )
+
+        return CheckResult(
+            name="market_status",
+            passed=False,
+            message=f"Market closed ({minutes_until_open} min until open)"
+        )
+
+    def check_daily_loss_reset(self) -> CheckResult:
+        """Check that daily loss tracking can be initialized."""
+        try:
+            account = self.broker.get_account()
+            last_equity = float(account.last_equity)
+
+            return CheckResult(
+                name="daily_loss_reset",
+                passed=True,
+                message=f"Daily loss reset (starting equity: ${last_equity:,.2f})"
+            )
+
+        except AttributeError:
+            return CheckResult(
+                name="daily_loss_reset",
+                passed=False,
+                message="Cannot access last_equity for daily loss tracking"
+            )
+        except Exception as e:
+            return CheckResult(
+                name="daily_loss_reset",
+                passed=False,
+                message=f"Failed to fetch account for daily loss: {e}"
+            )
+
+    def check_positions_accounted(self) -> CheckResult:
+        """Check that all open positions are in the watchlist."""
+        try:
+            positions = self.broker.get_positions()
+
+            if not positions:
+                return CheckResult(
+                    name="positions_accounted",
+                    passed=True,
+                    message="No open positions (0)"
+                )
+
+            # Get watchlist from instance or empty list
+            watchlist = getattr(self, 'watchlist', [])
+            watchlist_set = set(watchlist)
+
+            position_symbols = [p.symbol for p in positions]
+            orphaned = [s for s in position_symbols if s not in watchlist_set]
+
+            if orphaned:
+                return CheckResult(
+                    name="positions_accounted",
+                    passed=False,
+                    message=f"Orphaned positions not in watchlist: {', '.join(orphaned)}"
+                )
+
+            return CheckResult(
+                name="positions_accounted",
+                passed=True,
+                message=f"All positions accounted ({len(positions)} open)"
+            )
+
+        except Exception as e:
+            return CheckResult(
+                name="positions_accounted",
+                passed=False,
+                message=f"Failed to fetch positions: {e}"
+            )
+
+    def run_all_checks(self, pid_file: Path = None) -> Tuple[bool, List[CheckResult]]:
         """
         Run all preflight checks.
 

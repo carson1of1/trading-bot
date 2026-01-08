@@ -139,3 +139,282 @@ class TestCheckNoDuplicateProcess:
         result = checklist.check_no_duplicate_process(pid_file)
 
         assert result.passed is True
+
+
+class TestCheckUniverseLoaded:
+    """Test universe file loading."""
+
+    def test_universe_loaded(self, tmp_path):
+        """Passes when universe file has symbols."""
+        from core.preflight import PreflightChecklist
+
+        universe_file = tmp_path / "universe.yaml"
+        universe_file.write_text(yaml.dump({
+            'scanner_universe': {
+                'tech': ['AAPL', 'MSFT', 'GOOGL']
+            }
+        }))
+
+        config = {'trading': {'watchlist_file': str(universe_file)}}
+        checklist = PreflightChecklist(config, MagicMock())
+        checklist.bot_dir = tmp_path
+
+        result = checklist.check_universe_loaded()
+
+        assert result.passed is True
+        assert "3 symbols" in result.message
+
+    def test_universe_empty(self, tmp_path):
+        """Fails when universe file has no symbols."""
+        from core.preflight import PreflightChecklist
+
+        universe_file = tmp_path / "universe.yaml"
+        universe_file.write_text(yaml.dump({'scanner_universe': {}}))
+
+        config = {'trading': {'watchlist_file': str(universe_file)}}
+        checklist = PreflightChecklist(config, MagicMock())
+        checklist.bot_dir = tmp_path
+
+        result = checklist.check_universe_loaded()
+
+        assert result.passed is False
+        assert "empty" in result.message.lower()
+
+    def test_universe_missing(self, tmp_path):
+        """Fails when universe file doesn't exist."""
+        from core.preflight import PreflightChecklist
+
+        config = {'trading': {'watchlist_file': 'nonexistent.yaml'}}
+        checklist = PreflightChecklist(config, MagicMock())
+        checklist.bot_dir = tmp_path
+
+        result = checklist.check_universe_loaded()
+
+        assert result.passed is False
+        assert "not found" in result.message.lower() or "error" in result.message.lower()
+
+
+class TestCheckAccountBalance:
+    """Test account balance validation."""
+
+    def test_account_balance_success(self):
+        """Passes when balance is fetched and positive."""
+        from core.preflight import PreflightChecklist
+
+        mock_broker = MagicMock()
+        mock_account = MagicMock()
+        mock_account.cash = "10000.00"
+        mock_account.portfolio_value = "25000.00"
+        mock_broker.get_account.return_value = mock_account
+
+        checklist = PreflightChecklist({}, mock_broker)
+        result = checklist.check_account_balance()
+
+        assert result.passed is True
+        assert "$25,000" in result.message or "25000" in result.message
+
+    def test_account_balance_zero(self):
+        """Fails when balance is zero."""
+        from core.preflight import PreflightChecklist
+
+        mock_broker = MagicMock()
+        mock_account = MagicMock()
+        mock_account.cash = "0"
+        mock_account.portfolio_value = "0"
+        mock_broker.get_account.return_value = mock_account
+
+        checklist = PreflightChecklist({}, mock_broker)
+        result = checklist.check_account_balance()
+
+        assert result.passed is False
+        assert "zero" in result.message.lower() or "0" in result.message
+
+    def test_account_balance_api_error(self):
+        """Fails when API call fails."""
+        from core.preflight import PreflightChecklist
+
+        mock_broker = MagicMock()
+        mock_broker.get_account.side_effect = Exception("API connection failed")
+
+        checklist = PreflightChecklist({}, mock_broker)
+        result = checklist.check_account_balance()
+
+        assert result.passed is False
+        assert "error" in result.message.lower() or "failed" in result.message.lower()
+
+
+class TestCheckMarketStatus:
+    """Test market status validation."""
+
+    def test_market_open(self):
+        """Passes when market is open."""
+        from core.preflight import PreflightChecklist
+
+        with patch('core.market_hours.MarketHours') as MockMarketHours:
+            mock_mh = MagicMock()
+            mock_mh.is_market_open.return_value = True
+            MockMarketHours.return_value = mock_mh
+
+            checklist = PreflightChecklist({}, MagicMock())
+            result = checklist.check_market_status()
+
+            assert result.passed is True
+            assert "open" in result.message.lower()
+
+    def test_market_opens_soon(self):
+        """Passes when market opens within 10 minutes."""
+        from core.preflight import PreflightChecklist
+
+        with patch('core.market_hours.MarketHours') as MockMarketHours:
+            mock_mh = MagicMock()
+            mock_mh.is_market_open.return_value = False
+            mock_mh.time_until_market_open.return_value = 5  # 5 minutes
+            MockMarketHours.return_value = mock_mh
+
+            checklist = PreflightChecklist({}, MagicMock())
+            result = checklist.check_market_status()
+
+            assert result.passed is True
+            assert "5" in result.message
+
+    def test_market_closed(self):
+        """Fails when market is closed and not opening soon."""
+        from core.preflight import PreflightChecklist
+
+        with patch('core.market_hours.MarketHours') as MockMarketHours:
+            mock_mh = MagicMock()
+            mock_mh.is_market_open.return_value = False
+            mock_mh.time_until_market_open.return_value = 120  # 2 hours
+            MockMarketHours.return_value = mock_mh
+
+            checklist = PreflightChecklist({}, MagicMock())
+            result = checklist.check_market_status()
+
+            assert result.passed is False
+            assert "closed" in result.message.lower()
+
+    def test_market_opens_in_10_minutes_edge(self):
+        """Passes at exactly 10 minutes until open."""
+        from core.preflight import PreflightChecklist
+
+        with patch('core.market_hours.MarketHours') as MockMarketHours:
+            mock_mh = MagicMock()
+            mock_mh.is_market_open.return_value = False
+            mock_mh.time_until_market_open.return_value = 10
+            MockMarketHours.return_value = mock_mh
+
+            checklist = PreflightChecklist({}, MagicMock())
+            result = checklist.check_market_status()
+
+            assert result.passed is True
+
+
+class TestCheckDailyLossReset:
+    """Test daily loss reset validation."""
+
+    def test_daily_loss_reset_success(self):
+        """Passes when last_equity is accessible."""
+        from core.preflight import PreflightChecklist
+
+        mock_broker = MagicMock()
+        mock_account = MagicMock()
+        mock_account.last_equity = "25000.00"
+        mock_broker.get_account.return_value = mock_account
+
+        checklist = PreflightChecklist({}, mock_broker)
+        result = checklist.check_daily_loss_reset()
+
+        assert result.passed is True
+        assert "25,000" in result.message or "25000" in result.message
+
+    def test_daily_loss_reset_no_last_equity(self):
+        """Fails when last_equity is not available."""
+        from core.preflight import PreflightChecklist
+
+        mock_broker = MagicMock()
+        mock_account = MagicMock(spec=[])  # No last_equity attribute
+        mock_broker.get_account.return_value = mock_account
+
+        checklist = PreflightChecklist({}, mock_broker)
+        result = checklist.check_daily_loss_reset()
+
+        assert result.passed is False
+
+    def test_daily_loss_reset_api_error(self):
+        """Fails when API call fails."""
+        from core.preflight import PreflightChecklist
+
+        mock_broker = MagicMock()
+        mock_broker.get_account.side_effect = Exception("Connection refused")
+
+        checklist = PreflightChecklist({}, mock_broker)
+        result = checklist.check_daily_loss_reset()
+
+        assert result.passed is False
+
+
+class TestCheckPositionsAccounted:
+    """Test position accounting validation."""
+
+    def test_no_positions(self):
+        """Passes when no positions are open."""
+        from core.preflight import PreflightChecklist
+
+        mock_broker = MagicMock()
+        mock_broker.get_positions.return_value = []
+
+        checklist = PreflightChecklist({}, mock_broker)
+        checklist.watchlist = ['AAPL', 'MSFT']
+
+        result = checklist.check_positions_accounted()
+
+        assert result.passed is True
+        assert "0" in result.message
+
+    def test_positions_in_watchlist(self):
+        """Passes when all positions are in watchlist."""
+        from core.preflight import PreflightChecklist
+
+        mock_broker = MagicMock()
+        mock_pos = MagicMock()
+        mock_pos.symbol = 'AAPL'
+        mock_broker.get_positions.return_value = [mock_pos]
+
+        checklist = PreflightChecklist({}, mock_broker)
+        checklist.watchlist = ['AAPL', 'MSFT', 'GOOGL']
+
+        result = checklist.check_positions_accounted()
+
+        assert result.passed is True
+        assert "1" in result.message
+
+    def test_orphaned_positions(self):
+        """Fails when positions exist that aren't in watchlist."""
+        from core.preflight import PreflightChecklist
+
+        mock_broker = MagicMock()
+        mock_pos = MagicMock()
+        mock_pos.symbol = 'TSLA'  # Not in watchlist
+        mock_broker.get_positions.return_value = [mock_pos]
+
+        checklist = PreflightChecklist({}, mock_broker)
+        checklist.watchlist = ['AAPL', 'MSFT']
+
+        result = checklist.check_positions_accounted()
+
+        assert result.passed is False
+        assert "TSLA" in result.message
+
+    def test_positions_api_error(self):
+        """Fails when API call fails."""
+        from core.preflight import PreflightChecklist
+
+        mock_broker = MagicMock()
+        mock_broker.get_positions.side_effect = Exception("API error")
+
+        checklist = PreflightChecklist({}, mock_broker)
+        checklist.watchlist = ['AAPL']
+
+        result = checklist.check_positions_accounted()
+
+        assert result.passed is False
