@@ -217,8 +217,8 @@ print(f"OK:{account.status}:{account.portfolio_value}")
 
 
 def is_trading_hours():
-    """Check if we're within or near trading hours (includes buffer)"""
-    return market_hours.is_market_open() or market_hours.is_premarket_hours() or market_hours.is_afterhours()
+    """Check if we're within regular market hours (9:30 AM - 4:00 PM ET)"""
+    return market_hours.is_market_open()
 
 
 def run_health_check(check_process_and_logs=True):
