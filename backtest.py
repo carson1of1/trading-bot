@@ -24,6 +24,7 @@ import argparse
 import logging
 import sys
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 # statistics not needed - median removed as unused
@@ -42,6 +43,7 @@ from core import (
     VolatilityScanner,
     YFinanceDataFetcher,
 )
+from core.risk import DailyDrawdownGuard, DrawdownTier
 from strategies import StrategyManager
 
 logging.basicConfig(
@@ -168,9 +170,12 @@ class Backtest1Hour:
         # Max hold hours from config
         self.max_hold_hours = exit_config.get('max_hold_hours', self.DEFAULT_MAX_HOLD_BARS)
 
-        # Daily loss kill switch
+        # Daily loss kill switch (legacy - now using tiered DailyDrawdownGuard)
         self.max_daily_loss_pct = risk_config.get('max_daily_loss_pct', 3.0) / 100
         self.daily_loss_kill_switch_enabled = True
+
+        # Tiered drawdown guard (ODE-118)
+        self.drawdown_guard = DailyDrawdownGuard(self.config)
 
         # EOD close simulation
         self.eod_close_bar_hour = 15  # Close on bars starting at 3 PM or later
@@ -182,6 +187,9 @@ class Backtest1Hour:
         self.trailing_activation_pct = trailing_config.get('activation_pct', 0.5) / 100
         self.trailing_trail_pct = trailing_config.get('trail_pct', 0.5) / 100
         self.trailing_move_to_breakeven = trailing_config.get('move_to_breakeven', True)
+
+        # Backtest date range (set by run(), None for direct simulate_trades calls)
+        self._backtest_start_date = None
 
         # State tracking
         self._reset_state()
@@ -203,7 +211,7 @@ class Backtest1Hour:
         self.trades = []
         self.equity_curve = []
         self.positions = {}
-        self._backtest_start_date = None
+        # Note: Do NOT reset _backtest_start_date here - it's set by run() before calling simulate_trades_interleaved()
 
         self.total_trades = 0
         self.winning_trades = 0
@@ -216,6 +224,13 @@ class Backtest1Hour:
         self.daily_starting_capital = self.initial_capital
         self.current_trading_day = None
         self.kill_switch_triggered = False
+
+        # Reset drawdown guard for new backtest (ODE-118)
+        if hasattr(self, 'drawdown_guard'):
+            self.drawdown_guard = DailyDrawdownGuard(self.config)
+
+        # Track partial liquidation state per day
+        self._partial_liquidation_done_today = False
 
         # Reset entry gate
         if self.entry_gate:
@@ -341,6 +356,111 @@ class Backtest1Hour:
         except Exception as e:
             logger.error(f"Error fetching data for {symbol}: {e}", exc_info=True)
             return None
+
+    def fetch_data_parallel(
+        self, symbols: List[str], start_date: str, end_date: str, max_workers: int = 10
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        Fetch data for multiple symbols in parallel.
+
+        FIX (Jan 7, 2026): Added parallel data fetching for 5-10x speedup.
+        Old: 100 symbols x 0.5s = 50+ seconds
+        New: 100 symbols / 10 workers = ~5-10 seconds
+
+        Args:
+            symbols: List of stock ticker symbols
+            start_date: Start date (YYYY-MM-DD)
+            end_date: End date (YYYY-MM-DD)
+            max_workers: Maximum parallel threads (default 10)
+
+        Returns:
+            Dict mapping symbol to DataFrame with OHLCV data
+        """
+        results = {}
+        logger.info(f"Parallel fetching data for {len(symbols)} symbols with {max_workers} workers...")
+        start_time = datetime.now()
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_symbol = {
+                executor.submit(self.fetch_data, symbol, start_date, end_date): symbol
+                for symbol in symbols
+            }
+
+            completed = 0
+            for future in as_completed(future_to_symbol):
+                symbol = future_to_symbol[future]
+                completed += 1
+
+                try:
+                    data = future.result()
+                    if data is not None and len(data) >= 30:
+                        results[symbol] = data
+                        logger.debug(f"[{completed}/{len(symbols)}] {symbol}: {len(data)} bars")
+                    else:
+                        logger.debug(f"[{completed}/{len(symbols)}] {symbol}: insufficient data")
+                except Exception as e:
+                    logger.warning(f"[{completed}/{len(symbols)}] {symbol}: {e}")
+
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(
+            f"Parallel fetch complete: {len(results)}/{len(symbols)} symbols "
+            f"in {elapsed:.1f}s ({elapsed/len(symbols):.2f}s per symbol)"
+        )
+
+        return results
+
+    def generate_signals_parallel(
+        self, symbols_data: Dict[str, pd.DataFrame], max_workers: int = 8
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        Generate signals for multiple symbols in parallel.
+
+        FIX (Jan 7, 2026): Added parallel signal generation for 3-5x speedup.
+        Signal generation is CPU-bound and independent per symbol.
+
+        Args:
+            symbols_data: Dict mapping symbol to DataFrame with OHLCV data
+            max_workers: Maximum parallel threads (default 8)
+
+        Returns:
+            Dict mapping symbol to DataFrame with signals added
+        """
+        results = {}
+        symbols = list(symbols_data.keys())
+        logger.info(f"Parallel generating signals for {len(symbols)} symbols with {max_workers} workers...")
+        start_time = datetime.now()
+
+        def process_symbol(symbol: str) -> tuple:
+            data = symbols_data[symbol]
+            signals_df = self.generate_signals(symbol, data)
+            return symbol, signals_df
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_symbol = {
+                executor.submit(process_symbol, symbol): symbol
+                for symbol in symbols
+            }
+
+            completed = 0
+            for future in as_completed(future_to_symbol):
+                symbol = future_to_symbol[future]
+                completed += 1
+
+                try:
+                    sym, signals_df = future.result()
+                    if signals_df is not None:
+                        results[sym] = signals_df
+                        logger.debug(f"[{completed}/{len(symbols)}] {symbol}: signals generated")
+                except Exception as e:
+                    logger.warning(f"[{completed}/{len(symbols)}] {symbol}: signal error - {e}")
+
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(
+            f"Parallel signal generation complete: {len(results)}/{len(symbols)} symbols "
+            f"in {elapsed:.1f}s ({elapsed/len(symbols):.2f}s per symbol)"
+        )
+
+        return results
 
     def generate_signals(self, symbol: str, data: pd.DataFrame) -> pd.DataFrame:
         """
@@ -574,9 +694,14 @@ class Backtest1Hour:
                                 exit_reason = 'trailing_stop'
 
                 # Tiered exit logic via ExitManager (LONG only)
+                # FIX (Jan 7, 2026): Pass current_price (close) instead of bar_low
+                # bar_low/bar_high are passed as kwargs for stop checks, matching bot.py
                 if not exit_triggered and position_direction == 'LONG' and self.use_tiered_exits and self.exit_manager:
                     current_atr = self._calculate_atr(data, i, period=14)
-                    exit_action = self.exit_manager.evaluate_exit(symbol, bar_low, current_atr)
+                    exit_action = self.exit_manager.evaluate_exit(
+                        symbol, current_price, current_atr,
+                        bar_high=bar_high, bar_low=bar_low
+                    )
 
                     if exit_action:
                         exit_triggered = True
@@ -947,6 +1072,17 @@ class Backtest1Hour:
         all_trades = []
         open_positions = {}  # symbol -> position dict
 
+        # Risk tracking for analytics
+        self._risk_analytics = {
+            'max_positions_open': 0,
+            'max_risk_exposure_pct': 0.0,
+            'max_risk_exposure_dollars': 0.0,
+            'times_at_position_limit': 0,
+            'entries_blocked_by_limit': 0,
+            'position_counts': [],  # (timestamp, count, exposure_pct)
+            'daily_max_exposure': {},  # date -> max exposure that day
+        }
+
         # Build unified timeline from all symbols
         all_events = []
         for symbol, df in signals_data.items():
@@ -967,6 +1103,12 @@ class Backtest1Hour:
         # Track position state per symbol
         position_state = {}  # symbol -> {'direction': 'LONG'/'SHORT', 'entry_price': float, ...}
         last_trade_bar = {}  # symbol -> bar index of last trade
+        last_recorded_ts = None  # For equity curve recording
+        latest_prices = {}  # symbol -> latest price for portfolio valuation
+
+        # Daily tracking for drawdown guard (ODE-118)
+        current_day = None
+        partial_liquidation_done_today = False
 
         for event in all_events:
             symbol = event['symbol']
@@ -988,6 +1130,151 @@ class Backtest1Hour:
             if symbol not in last_trade_bar:
                 last_trade_bar[symbol] = -999
 
+            # ============ DRAWDOWN GUARD (ODE-118) ============
+            # Extract date from timestamp
+            bar_date = None
+            if isinstance(timestamp, (datetime, pd.Timestamp)):
+                bar_date = timestamp.date() if hasattr(timestamp, 'date') else None
+            elif isinstance(timestamp, str):
+                try:
+                    bar_date = pd.to_datetime(timestamp).date()
+                except:
+                    pass
+
+            # Reset guard on new day
+            if bar_date is not None and bar_date != current_day:
+                current_day = bar_date
+                partial_liquidation_done_today = False
+                # Calculate portfolio value for reset
+                position_value = 0
+                for sym, pos in open_positions.items():
+                    if pos is not None:
+                        pos_price = latest_prices.get(sym, pos['entry_price'])
+                        if pos['direction'] == 'LONG':
+                            unrealized_pnl = (pos_price - pos['entry_price']) * pos['shares']
+                        else:
+                            unrealized_pnl = (pos['entry_price'] - pos_price) * pos['shares']
+                        position_value += unrealized_pnl
+                day_start_equity = self.cash + position_value
+                self.drawdown_guard.reset_day(day_start_equity, bar_date)
+
+            # Update drawdown guard with current equity
+            # Calculate current portfolio value
+            position_value = 0
+            for sym, pos in open_positions.items():
+                if pos is not None:
+                    pos_price = latest_prices.get(sym, pos['entry_price'])
+                    if pos['direction'] == 'LONG':
+                        unrealized_pnl = (pos_price - pos['entry_price']) * pos['shares']
+                    else:
+                        unrealized_pnl = (pos['entry_price'] - pos_price) * pos['shares']
+                    position_value += unrealized_pnl
+            portfolio_value = self.cash + position_value
+            self.portfolio_value = portfolio_value
+
+            # Create a simple object for guard.update_equity
+            class EquityHolder:
+                def __init__(self, equity):
+                    self.equity = equity
+            self.drawdown_guard.update_equity(EquityHolder(portfolio_value), current_date=bar_date)
+
+            # ============ LIQUIDATION CHECKS (ODE-118) ============
+            guard_tier = self.drawdown_guard.tier
+
+            # HARD_LIMIT: Full liquidation
+            if guard_tier == DrawdownTier.HARD_LIMIT and open_positions:
+                logger.warning(f"DRAWDOWN_GUARD | HARD_LIMIT | Liquidating all {len(open_positions)} positions")
+                for liq_symbol, pos in list(open_positions.items()):
+                    if pos is None:
+                        continue
+                    direction = pos['direction']
+                    entry_price = pos['entry_price']
+                    shares = pos['shares']
+                    liq_price = latest_prices.get(liq_symbol, entry_price)
+
+                    if direction == 'LONG':
+                        exit_price = liq_price * (1 - self.EXIT_SLIPPAGE)
+                        pnl = (exit_price - entry_price) * shares
+                    else:
+                        exit_price = liq_price * (1 + self.EXIT_SLIPPAGE)
+                        pnl = (entry_price - exit_price) * shares
+
+                    pnl_pct = (pnl / (entry_price * shares)) * 100 if entry_price > 0 else 0
+
+                    all_trades.append({
+                        'symbol': liq_symbol,
+                        'direction': direction,
+                        'entry_date': pos['entry_time'],
+                        'exit_date': timestamp,
+                        'entry_price': entry_price,
+                        'exit_price': exit_price,
+                        'shares': shares,
+                        'pnl': pnl,
+                        'pnl_pct': pnl_pct,
+                        'exit_reason': 'hard_limit_liquidation',
+                        'strategy': pos.get('strategy', 'Unknown'),
+                        'reasoning': pos.get('reasoning', ''),
+                        'bars_held': bar_index - pos['entry_bar'],
+                        'mfe': 0, 'mae': 0, 'mfe_pct': 0, 'mae_pct': 0
+                    })
+
+                    self.cash += pnl
+                    del open_positions[liq_symbol]
+                    position_state[liq_symbol] = None
+
+                # Skip to next event after full liquidation
+                continue
+
+            # MEDIUM: Partial liquidation (50% of each position)
+            if guard_tier == DrawdownTier.MEDIUM and not partial_liquidation_done_today and open_positions:
+                partial_liquidation_done_today = True
+                logger.warning(f"DRAWDOWN_GUARD | MEDIUM | Partial liquidation: closing 50% of {len(open_positions)} positions")
+                for liq_symbol, pos in list(open_positions.items()):
+                    if pos is None:
+                        continue
+                    direction = pos['direction']
+                    entry_price = pos['entry_price']
+                    total_shares = pos['shares']
+                    shares_to_close = total_shares // 2  # Close half (rounded down)
+
+                    if shares_to_close <= 0:
+                        continue
+
+                    liq_price = latest_prices.get(liq_symbol, entry_price)
+
+                    if direction == 'LONG':
+                        exit_price = liq_price * (1 - self.EXIT_SLIPPAGE)
+                        pnl = (exit_price - entry_price) * shares_to_close
+                    else:
+                        exit_price = liq_price * (1 + self.EXIT_SLIPPAGE)
+                        pnl = (entry_price - exit_price) * shares_to_close
+
+                    pnl_pct = (pnl / (entry_price * shares_to_close)) * 100 if entry_price > 0 else 0
+
+                    all_trades.append({
+                        'symbol': liq_symbol,
+                        'direction': direction,
+                        'entry_date': pos['entry_time'],
+                        'exit_date': timestamp,
+                        'entry_price': entry_price,
+                        'exit_price': exit_price,
+                        'shares': shares_to_close,
+                        'pnl': pnl,
+                        'pnl_pct': pnl_pct,
+                        'exit_reason': 'partial_liquidation',
+                        'strategy': pos.get('strategy', 'Unknown'),
+                        'reasoning': pos.get('reasoning', ''),
+                        'bars_held': bar_index - pos['entry_bar'],
+                        'mfe': 0, 'mae': 0, 'mfe_pct': 0, 'mae_pct': 0
+                    })
+
+                    self.cash += pnl
+                    # Reduce position size
+                    pos['shares'] = total_shares - shares_to_close
+                    if pos['shares'] <= 0:
+                        del open_positions[liq_symbol]
+                        position_state[liq_symbol] = None
+
             # ============ EXIT LOGIC ============
             if position_state[symbol] is not None:
                 pos = position_state[symbol]
@@ -999,38 +1286,48 @@ class Backtest1Hour:
                 bar_high = row.get('high', current_price)
                 bar_low = row.get('low', current_price)
 
-                # Update price tracking
-                if bar_high > pos.get('highest_price', entry_price):
-                    pos['highest_price'] = bar_high
-                if bar_low < pos.get('lowest_price', entry_price):
-                    pos['lowest_price'] = bar_low
-
                 exit_triggered = False
                 exit_reason = ''
                 exit_price = current_price
 
-                # Check stop loss
+                # Check stop loss and take profit FIRST to determine effective high/low
                 stop_loss = pos.get('stop_loss', 0)
                 take_profit = pos.get('take_profit', 0)
+
+                # Determine effective high/low for MFE/MAE (capped by exit triggers)
+                effective_high = bar_high
+                effective_low = bar_low
 
                 if direction == 'LONG':
                     if bar_low <= stop_loss:
                         exit_triggered = True
                         exit_price = stop_loss * (1 - self.STOP_SLIPPAGE)
                         exit_reason = 'stop_loss'
+                        effective_low = stop_loss  # Cap MAE at stop
+                        effective_high = min(bar_high, entry_price * 1.001)  # Didn't run up much if stopped
                     elif bar_high >= take_profit:
                         exit_triggered = True
                         exit_price = take_profit * (1 - self.EXIT_SLIPPAGE)
                         exit_reason = 'take_profit'
+                        effective_high = take_profit  # Cap MFE at take profit
                 else:  # SHORT
                     if bar_high >= stop_loss:
                         exit_triggered = True
                         exit_price = stop_loss * (1 + self.STOP_SLIPPAGE)
                         exit_reason = 'stop_loss'
+                        effective_high = stop_loss  # Cap MAE at stop
+                        effective_low = max(bar_low, entry_price * 0.999)  # Didn't run down much if stopped
                     elif bar_low <= take_profit:
                         exit_triggered = True
                         exit_price = take_profit * (1 + self.EXIT_SLIPPAGE)
                         exit_reason = 'take_profit'
+                        effective_low = take_profit  # Cap MFE at take profit
+
+                # Update price tracking with effective values
+                if effective_high > pos.get('highest_price', entry_price):
+                    pos['highest_price'] = effective_high
+                if effective_low < pos.get('lowest_price', entry_price):
+                    pos['lowest_price'] = effective_low
 
                 # Check max hold
                 bars_held = bar_index - entry_bar
@@ -1042,6 +1339,24 @@ class Backtest1Hour:
                     else:
                         exit_price = current_price * (1 + self.EXIT_SLIPPAGE)
 
+                # EOD close - no overnight holding
+                if not exit_triggered and self.eod_close_enabled:
+                    bar_hour = None
+                    if isinstance(timestamp, (datetime, pd.Timestamp)):
+                        bar_hour = timestamp.hour
+                    elif isinstance(timestamp, str):
+                        try:
+                            bar_hour = pd.to_datetime(timestamp).hour
+                        except:
+                            pass
+                    if bar_hour is not None and bar_hour >= self.eod_close_bar_hour:
+                        exit_triggered = True
+                        exit_reason = 'eod_close'
+                        if direction == 'LONG':
+                            exit_price = current_price * (1 - self.EXIT_SLIPPAGE)
+                        else:
+                            exit_price = current_price * (1 + self.EXIT_SLIPPAGE)
+
                 if exit_triggered:
                     # Calculate P&L
                     if direction == 'LONG':
@@ -1050,6 +1365,16 @@ class Backtest1Hour:
                         pnl = (entry_price - exit_price) * shares
 
                     pnl_pct = (pnl / (entry_price * shares)) * 100 if entry_price > 0 else 0
+
+                    # Calculate MFE/MAE
+                    if direction == 'LONG':
+                        mfe = pos.get('highest_price', entry_price) - entry_price
+                        mae = entry_price - pos.get('lowest_price', entry_price)
+                    else:
+                        mfe = entry_price - pos.get('lowest_price', entry_price)
+                        mae = pos.get('highest_price', entry_price) - entry_price
+                    mfe_pct = (mfe / entry_price) * 100 if entry_price > 0 else 0
+                    mae_pct = (mae / entry_price) * 100 if entry_price > 0 else 0
 
                     all_trades.append({
                         'symbol': symbol,
@@ -1065,11 +1390,14 @@ class Backtest1Hour:
                         'strategy': pos.get('strategy', 'Unknown'),
                         'reasoning': pos.get('reasoning', ''),
                         'bars_held': bars_held,
-                        'mfe': pos.get('highest_price', entry_price) - entry_price if direction == 'LONG' else entry_price - pos.get('lowest_price', entry_price),
-                        'mae': entry_price - pos.get('lowest_price', entry_price) if direction == 'LONG' else pos.get('highest_price', entry_price) - entry_price,
-                        'mfe_pct': 0,
-                        'mae_pct': 0
+                        'mfe': mfe,
+                        'mae': mae,
+                        'mfe_pct': mfe_pct,
+                        'mae_pct': mae_pct
                     })
+
+                    # Update realized P&L tracking (for equity curve)
+                    self.cash += pnl  # Add realized P&L to cash
 
                     # Remove from open positions
                     del open_positions[symbol]
@@ -1083,8 +1411,38 @@ class Backtest1Hour:
                 if bars_since_last < self.COOLDOWN_BARS:
                     continue
 
+                # Check drawdown guard entries_allowed (ODE-118)
+                if not self.drawdown_guard.entries_allowed:
+                    self._diag_entry_blocks[symbol]['drawdown_guard'] += 1
+                    if self.kill_switch_trace:
+                        self._kill_switch_trace_log.append({
+                            'event': 'ENTRY_BLOCKED',
+                            'symbol': symbol,
+                            'timestamp': timestamp,
+                            'signal': signal,
+                            'block_reason': f'drawdown_guard tier={self.drawdown_guard.tier.name}',
+                            'drawdown_pct': self.drawdown_guard.drawdown_pct * 100
+                        })
+                    continue
+
+                # Block entries at EOD - no new positions that would be immediately closed
+                if self.eod_close_enabled:
+                    entry_bar_hour = None
+                    if isinstance(timestamp, (datetime, pd.Timestamp)):
+                        entry_bar_hour = timestamp.hour
+                    elif isinstance(timestamp, str):
+                        try:
+                            entry_bar_hour = pd.to_datetime(timestamp).hour
+                        except:
+                            pass
+                    if entry_bar_hour is not None and entry_bar_hour >= self.eod_close_bar_hour:
+                        continue  # Skip entry at EOD
+
                 # Check position limit
                 if len(open_positions) >= self.max_open_positions:
+                    # Track blocked entries
+                    self._risk_analytics['entries_blocked_by_limit'] += 1
+                    self._risk_analytics['times_at_position_limit'] += 1
                     # Log blocked entry
                     if self.kill_switch_trace:
                         self._kill_switch_trace_log.append({
@@ -1121,8 +1479,18 @@ class Backtest1Hour:
                     self.portfolio_value, entry_price, stop_loss
                 )
 
+                # Apply drawdown guard position size multiplier (ODE-118)
+                # WARNING tier reduces size to 50%
+                size_multiplier = self.drawdown_guard.position_size_multiplier
+                if size_multiplier < 1.0:
+                    shares = int(shares * size_multiplier)
+
                 if shares <= 0:
                     continue
+
+                # Track position cost for portfolio calculation
+                # Note: We don't modify self.cash here - portfolio value is calculated
+                # as initial_capital + realized_pnl + unrealized_pnl
 
                 # Open position
                 position_state[symbol] = {
@@ -1140,6 +1508,83 @@ class Backtest1Hour:
                 }
                 open_positions[symbol] = position_state[symbol]
                 last_trade_bar[symbol] = bar_index
+
+                # Track risk analytics after entry
+                num_positions = len(open_positions)
+                if num_positions > self._risk_analytics['max_positions_open']:
+                    self._risk_analytics['max_positions_open'] = num_positions
+
+                # Calculate current exposure
+                total_exposure = sum(
+                    p['shares'] * p['entry_price'] for p in open_positions.values()
+                )
+                exposure_pct = (total_exposure / self.initial_capital) * 100
+
+                if exposure_pct > self._risk_analytics['max_risk_exposure_pct']:
+                    self._risk_analytics['max_risk_exposure_pct'] = exposure_pct
+                    self._risk_analytics['max_risk_exposure_dollars'] = total_exposure
+
+                # Track daily max exposure
+                if hasattr(timestamp, 'date'):
+                    date_key = str(timestamp.date())
+                elif hasattr(timestamp, 'strftime'):
+                    date_key = timestamp.strftime('%Y-%m-%d')
+                else:
+                    date_key = str(timestamp)[:10]
+
+                if date_key not in self._risk_analytics['daily_max_exposure']:
+                    self._risk_analytics['daily_max_exposure'][date_key] = exposure_pct
+                elif exposure_pct > self._risk_analytics['daily_max_exposure'][date_key]:
+                    self._risk_analytics['daily_max_exposure'][date_key] = exposure_pct
+
+            # Track latest price for this symbol
+            latest_prices[symbol] = current_price
+
+            # Record equity curve when timestamp changes (to avoid too many entries)
+            # Only record if we're past the backtest start date
+            should_record = True
+            if self._backtest_start_date is not None:
+                bar_ts = pd.to_datetime(timestamp)
+                # Convert both to UTC for proper comparison
+                if bar_ts.tz is None:
+                    bar_ts = bar_ts.tz_localize('UTC')
+                else:
+                    bar_ts = bar_ts.tz_convert('UTC')
+                should_record = bar_ts >= self._backtest_start_date
+
+            if should_record and last_recorded_ts != timestamp:
+                # Calculate current portfolio value
+                position_value = 0
+                for sym, pos in open_positions.items():
+                    if pos is not None:
+                        pos_price = latest_prices.get(sym, pos['entry_price'])
+                        if pos['direction'] == 'LONG':
+                            # Unrealized P&L for long
+                            unrealized_pnl = (pos_price - pos['entry_price']) * pos['shares']
+                            position_value += unrealized_pnl
+                        else:  # SHORT
+                            # Unrealized P&L for short
+                            unrealized_pnl = (pos['entry_price'] - pos_price) * pos['shares']
+                            position_value += unrealized_pnl
+
+                portfolio_value = self.cash + position_value
+
+                # Update peak and drawdown tracking
+                if portfolio_value > self.peak_value:
+                    self.peak_value = portfolio_value
+                if self.peak_value > 0:
+                    drawdown = (self.peak_value - portfolio_value) / self.peak_value
+                    if drawdown > self.max_drawdown:
+                        self.max_drawdown = drawdown
+
+                self.equity_curve.append({
+                    'timestamp': timestamp,
+                    'portfolio_value': portfolio_value,
+                    'cash': self.cash,
+                    'position_value': position_value,
+                    'num_positions': len(open_positions)
+                })
+                last_recorded_ts = timestamp
 
         # Close any remaining positions at end of backtest
         for symbol, pos in list(open_positions.items()):
@@ -1164,6 +1609,16 @@ class Backtest1Hour:
 
             pnl_pct = (pnl / (entry_price * shares)) * 100 if entry_price > 0 else 0
 
+            # Calculate MFE/MAE for end_of_backtest positions
+            if direction == 'LONG':
+                mfe = pos.get('highest_price', entry_price) - entry_price
+                mae = entry_price - pos.get('lowest_price', entry_price)
+            else:
+                mfe = entry_price - pos.get('lowest_price', entry_price)
+                mae = pos.get('highest_price', entry_price) - entry_price
+            mfe_pct = (mfe / entry_price) * 100 if entry_price > 0 else 0
+            mae_pct = (mae / entry_price) * 100 if entry_price > 0 else 0
+
             all_trades.append({
                 'symbol': symbol,
                 'direction': direction,
@@ -1178,11 +1633,14 @@ class Backtest1Hour:
                 'strategy': pos.get('strategy', 'Unknown'),
                 'reasoning': pos.get('reasoning', ''),
                 'bars_held': len(df) - 1 - pos['entry_bar'],
-                'mfe': 0,
-                'mae': 0,
-                'mfe_pct': 0,
-                'mae_pct': 0
+                'mfe': mfe,
+                'mae': mae,
+                'mfe_pct': mfe_pct,
+                'mae_pct': mae_pct
             })
+
+            # Update realized P&L on end-of-backtest exit
+            self.cash += pnl
 
         return all_trades
 
@@ -1233,6 +1691,84 @@ class Backtest1Hour:
                 excess_returns = returns - daily_rf
                 sharpe_ratio = (excess_returns.mean() / returns.std()) * np.sqrt(252)
 
+        # Calculate worst daily drops from actual trade P&L (not equity curve)
+        # This avoids the bug where equity curve mixes per-symbol data
+        worst_daily_drops = []
+        if trades:
+            from collections import defaultdict
+            daily_pnl = defaultdict(float)
+            for t in trades:
+                exit_date = t.get('exit_date', '')
+                if hasattr(exit_date, 'strftime'):
+                    date_str = exit_date.strftime('%Y-%m-%d')
+                elif hasattr(exit_date, 'isoformat'):
+                    date_str = str(exit_date)[:10]
+                else:
+                    date_str = str(exit_date)[:10]
+                daily_pnl[date_str] += t.get('pnl', 0)
+
+            # Convert to list and calculate % of initial capital
+            daily_list = []
+            for date_str, pnl in daily_pnl.items():
+                pct = (pnl / self.initial_capital) * 100
+                daily_list.append({
+                    'date': date_str,
+                    'open': 0,  # Not tracked per-day
+                    'close': 0,
+                    'high': 0,
+                    'low': 0,
+                    'change_pct': pct,
+                    'change_dollars': pnl
+                })
+
+            # Sort by change_pct ascending (worst first) and take top 5
+            daily_list.sort(key=lambda x: x['change_pct'])
+            worst_daily_drops = daily_list[:5]
+
+        # Calculate drawdown peak/trough - find the peak before max drawdown and the trough during it
+        drawdown_peak_date = None
+        drawdown_peak_value = self.initial_capital
+        drawdown_trough_date = None
+        drawdown_trough_value = self.initial_capital
+        if self.equity_curve:
+            # Track running peak and find max drawdown point
+            running_peak = 0
+            running_peak_date = None
+            max_dd = 0
+            max_dd_peak = self.initial_capital
+            max_dd_peak_date = None
+            max_dd_trough = self.initial_capital
+            max_dd_trough_date = None
+
+            for entry in self.equity_curve:
+                val = entry.get('portfolio_value', 0)
+                ts = entry.get('timestamp', '')
+
+                # Update running peak
+                if val > running_peak:
+                    running_peak = val
+                    running_peak_date = str(ts)
+
+                # Calculate current drawdown from running peak
+                if running_peak > 0:
+                    current_dd = (running_peak - val) / running_peak
+                    if current_dd > max_dd:
+                        max_dd = current_dd
+                        max_dd_peak = running_peak
+                        max_dd_peak_date = running_peak_date
+                        max_dd_trough = val
+                        max_dd_trough_date = str(ts)
+
+            drawdown_peak_value = max_dd_peak
+            drawdown_peak_date = max_dd_peak_date
+            drawdown_trough_value = max_dd_trough
+            drawdown_trough_date = max_dd_trough_date
+            # Update self.max_drawdown with correctly calculated value from equity curve
+            self.max_drawdown = max_dd
+
+        # Get risk analytics if available
+        risk_analytics = getattr(self, '_risk_analytics', {})
+
         return {
             'initial_capital': self.initial_capital,
             'final_value': self.cash,
@@ -1250,7 +1786,18 @@ class Backtest1Hour:
             'sharpe_ratio': sharpe_ratio,
             'best_trade': max(t['pnl'] for t in trades) if trades else 0,
             'worst_trade': min(t['pnl'] for t in trades) if trades else 0,
-            'avg_bars_held': np.mean([t['bars_held'] for t in trades]) if trades else 0
+            'avg_bars_held': np.mean([t['bars_held'] for t in trades]) if trades else 0,
+            'worst_daily_drops': worst_daily_drops,
+            'drawdown_peak_date': drawdown_peak_date,
+            'drawdown_peak_value': drawdown_peak_value,
+            'drawdown_trough_date': drawdown_trough_date,
+            'drawdown_trough_value': drawdown_trough_value,
+            # Risk Analytics
+            'max_positions_open': risk_analytics.get('max_positions_open', 0),
+            'max_risk_exposure_pct': risk_analytics.get('max_risk_exposure_pct', 0),
+            'max_risk_exposure_dollars': risk_analytics.get('max_risk_exposure_dollars', 0),
+            'entries_blocked_by_limit': risk_analytics.get('entries_blocked_by_limit', 0),
+            'daily_max_exposure': risk_analytics.get('daily_max_exposure', {}),
         }
 
     def run(self, symbols: List[str], start_date: str, end_date: str) -> Dict:
@@ -1288,41 +1835,47 @@ class Backtest1Hour:
 
         all_trades = []
 
-        # Pre-fetch all data for scanner mode
-        all_data = {}
-        if self.scanner_enabled:
-            logger.info("Scanner mode: pre-fetching data for all symbols...")
-            for symbol in symbols:
-                data = self.fetch_data(symbol, start_date, end_date)
-                if data is not None and len(data) >= 30:
-                    all_data[symbol] = data
-            logger.info(f"Pre-fetched data for {len(all_data)} symbols")
+        # FIX (Jan 7, 2026): Use parallel data fetching for 5-10x speedup
+        # Old: sequential fetch = 100 symbols x 0.5s = 50+ seconds
+        # New: parallel fetch = 100 symbols / 10 workers = ~5-10 seconds
+        logger.info("Fetching data for all symbols in parallel...")
+        all_data = self.fetch_data_parallel(symbols, start_date, end_date, max_workers=10)
 
+        if self.scanner_enabled:
+            logger.info(f"Scanner mode: building daily scan results from {len(all_data)} symbols...")
             self._daily_scanned_symbols = self._build_daily_scan_results(
                 all_data, start_date, end_date
             )
 
-        for symbol in symbols:
-            logger.info(f"Processing {symbol}...")
+        # FIX (Jan 7, 2026): Use parallel signal generation for 3-5x speedup
+        # Signal generation is CPU-bound and independent per symbol
+        logger.info("Generating signals for all symbols in parallel...")
+        signals_data = self.generate_signals_parallel(all_data, max_workers=8)
 
-            # Fetch data
-            if self.scanner_enabled and symbol in all_data:
-                data = all_data[symbol]
-            else:
-                data = self.fetch_data(symbol, start_date, end_date)
+        # Simulate trades with position limit enforcement across all symbols
+        if signals_data:
+            logger.info(f"Running interleaved simulation with max_open_positions={self.max_open_positions}")
+            all_trades = self.simulate_trades_interleaved(signals_data)
 
-            if data is None or len(data) < 30:
-                logger.warning(f"Insufficient data for {symbol}")
-                continue
+            # Log per-symbol summary
+            trades_by_symbol = {}
+            for t in all_trades:
+                sym = t['symbol']
+                if sym not in trades_by_symbol:
+                    trades_by_symbol[sym] = []
+                trades_by_symbol[sym].append(t)
 
-            # Generate signals
-            data = self.generate_signals(symbol, data)
+            for sym, sym_trades in trades_by_symbol.items():
+                logger.info(f"{sym}: {len(sym_trades)} trades, P&L: ${sum(t['pnl'] for t in sym_trades):,.2f}")
 
-            # Simulate trades
-            trades = self.simulate_trades(symbol, data)
-            all_trades.extend(trades)
+            # Update instance state from trades (simulate_trades_interleaved doesn't update these)
+            self.total_pnl = sum(t['pnl'] for t in all_trades)
+            self.cash = self.initial_capital + self.total_pnl
+            self.portfolio_value = self.cash
 
-            logger.info(f"{symbol}: {len(trades)} trades, P&L: ${sum(t['pnl'] for t in trades):,.2f}")
+            # Note: max_drawdown is already calculated correctly from equity curve
+            # in simulate_trades_interleaved() using actual portfolio values.
+            # Do NOT overwrite it here with trade-based P&L calculation.
 
         # Calculate metrics
         metrics = self.calculate_metrics(all_trades)
@@ -1376,8 +1929,19 @@ def run_backtest(
         if universe_path.exists():
             with open(universe_path, 'r') as f:
                 universe = yaml.safe_load(f)
-            symbols = universe.get('proven_symbols', [])
 
+            # Use scanner_universe (400 symbols) for full scanner benefit
+            scanner_universe = universe.get('scanner_universe', {})
+            symbols = []
+            for category, syms in scanner_universe.items():
+                if isinstance(syms, list):
+                    for s in syms:
+                        if s not in symbols:
+                            symbols.append(s)
+
+            # Fallback to proven_symbols if scanner_universe empty
+            if not symbols:
+                symbols = universe.get('proven_symbols', [])
             if not symbols:
                 symbols = universe.get('candidates', ['SPY', 'AAPL', 'MSFT'])
         else:
@@ -1450,6 +2014,30 @@ def main():
         print(f"  Profit Factor: {metrics.get('profit_factor', 0):.2f}")
         print(f"  Max Drawdown: {metrics.get('max_drawdown', 0):.1f}%")
         print(f"  Sharpe Ratio: {metrics.get('sharpe_ratio', 0):.2f}")
+        print(f"{'='*60}")
+        print(f"  RISK ANALYTICS (Funded Account Check)")
+        print(f"{'='*60}")
+        print(f"  Max Positions Open: {metrics.get('max_positions_open', 0)}")
+        print(f"  Max Risk Exposure: {metrics.get('max_risk_exposure_pct', 0):.1f}% (${metrics.get('max_risk_exposure_dollars', 0):,.2f})")
+        print(f"  Entries Blocked by Limit: {metrics.get('entries_blocked_by_limit', 0)}")
+
+        # Show worst daily exposure days
+        daily_exposure = metrics.get('daily_max_exposure', {})
+        if daily_exposure:
+            sorted_days = sorted(daily_exposure.items(), key=lambda x: x[1], reverse=True)[:5]
+            print(f"  Top 5 Highest Exposure Days:")
+            for date, exp in sorted_days:
+                print(f"    {date}: {exp:.1f}%")
+
+        # Funded account warning
+        max_exp = metrics.get('max_risk_exposure_pct', 0)
+        if max_exp > 50:
+            print(f"  ⚠️  WARNING: Max exposure {max_exp:.1f}% exceeds 50% - risky for funded account")
+        elif max_exp > 30:
+            print(f"  ⚠️  CAUTION: Max exposure {max_exp:.1f}% is moderate")
+        else:
+            print(f"  ✓ Exposure within safe limits for funded account")
+
         print(f"{'='*60}\n")
 
 

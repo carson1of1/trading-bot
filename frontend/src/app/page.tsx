@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { MetricCard } from "@/components/cards/MetricCard";
 import { BotStatusCard } from "@/components/cards/BotStatusCard";
@@ -7,9 +8,11 @@ import { EquityCurveChart } from "@/components/charts/EquityCurveChart";
 import { MiniPositionsTable } from "@/components/cards/MiniPositionsTable";
 import { DollarSign, TrendingUp, Briefcase, Target, AlertTriangle } from "lucide-react";
 import { usePolling } from "@/hooks/usePolling";
-import { getAccount, getPositions, AccountData, PositionsData } from "@/lib/api";
+import { getAccount, getPositions, getEquityHistory, AccountData, PositionsData, EquityHistoryData, EquityPeriod } from "@/lib/api";
 
 export default function DashboardPage() {
+  const [equityPeriod, setEquityPeriod] = useState<EquityPeriod>("30D");
+
   const { data: account, isLoading: accountLoading, error: accountError } = usePolling<AccountData>({
     fetcher: getAccount,
     interval: 5000,
@@ -20,6 +23,12 @@ export default function DashboardPage() {
     interval: 5000,
   });
 
+  const { data: equityHistoryData } = usePolling<EquityHistoryData>({
+    fetcher: () => getEquityHistory(equityPeriod),
+    interval: 60000, // Refresh every minute
+    deps: [equityPeriod], // Refetch when period changes
+  });
+
   // Transform positions for MiniPositionsTable
   const positions = positionsData?.positions.map(pos => ({
     symbol: pos.symbol,
@@ -27,10 +36,14 @@ export default function DashboardPage() {
     pnlPercent: pos.unrealized_plpc,
   })) || [];
 
-  // Mock equity data for now (will add equity curve endpoint later)
-  const equityData = account ? [
-    { date: "Now", value: account.portfolio_value },
-  ] : [];
+  // Transform equity history data for the chart
+  const equityData = equityHistoryData?.data.map(point => {
+    const date = new Date(point.timestamp);
+    return {
+      date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      value: point.equity,
+    };
+  }) || [];
 
   // Loading state
   if (accountLoading && !account) {
@@ -104,7 +117,11 @@ export default function DashboardPage() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <BotStatusCard />
           <div className="lg:col-span-2">
-            <EquityCurveChart data={equityData} />
+            <EquityCurveChart
+              data={equityData}
+              selectedPeriod={equityPeriod}
+              onPeriodChange={setEquityPeriod}
+            />
           </div>
         </div>
 

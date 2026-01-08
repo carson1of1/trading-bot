@@ -291,12 +291,13 @@ class TestCalculatePositionSize:
         # Entry $100, stop $98, risk per share = $2
         # Position size = $1500 / $2 = 750 shares
         # But capped by 3% position size = $3K / $100 = 30 shares
+        # With 95% buffer (Jan 7, 2026 fix): 30 * 0.95 = 28 shares
         size = rm.calculate_position_size(
             portfolio_value=100000,
             entry_price=100,
             stop_loss_price=98
         )
-        assert size == 30  # Capped at 3% of portfolio ($3K)
+        assert size == 28  # Capped at 3% of portfolio with 95% buffer
 
     def test_respects_max_position_dollars(self):
         """Should respect max_position_dollars setting"""
@@ -307,7 +308,8 @@ class TestCalculatePositionSize:
             entry_price=100,
             stop_loss_price=98
         )
-        assert size == 50  # $5000 / $100 = 50 shares
+        # $5000 * 0.95 buffer / $100 = 47.5 -> 47 shares
+        assert size == 47
 
     def test_returns_zero_for_nan_inputs(self):
         """Should return 0 for NaN inputs"""

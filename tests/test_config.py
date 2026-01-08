@@ -217,5 +217,68 @@ class TestAlpacaEndpoint:
             assert 'api.alpaca.markets' in endpoint
 
 
+class TestDebugConfig:
+    """Test debug configuration settings for signal logging"""
+
+    def test_debug_defaults_when_missing(self):
+        """Debug settings should default to False when not in config"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "test.yaml")
+            with open(config_path, 'w') as f:
+                yaml.dump({
+                    'mode': 'PAPER',
+                    'trading': {},
+                    'risk_management': {},
+                    'strategies': {}
+                }, f)
+
+            cfg = GlobalConfig(config_path)
+            debug = cfg.get('debug', {})
+            assert debug.get('log_all_signals', False) is False
+            assert debug.get('log_signal_components', False) is False
+
+    def test_debug_settings_loaded_from_config(self):
+        """Debug settings should be loaded from config file"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "test.yaml")
+            with open(config_path, 'w') as f:
+                yaml.dump({
+                    'mode': 'PAPER',
+                    'trading': {},
+                    'risk_management': {},
+                    'strategies': {},
+                    'debug': {
+                        'log_all_signals': True,
+                        'log_signal_components': True
+                    }
+                }, f)
+
+            cfg = GlobalConfig(config_path)
+            debug = cfg.get('debug', {})
+            assert debug.get('log_all_signals') is True
+            assert debug.get('log_signal_components') is True
+
+    def test_debug_partial_settings(self):
+        """Should handle partial debug settings"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "test.yaml")
+            with open(config_path, 'w') as f:
+                yaml.dump({
+                    'mode': 'PAPER',
+                    'trading': {},
+                    'risk_management': {},
+                    'strategies': {},
+                    'debug': {
+                        'log_all_signals': True
+                        # log_signal_components not specified
+                    }
+                }, f)
+
+            cfg = GlobalConfig(config_path)
+            debug = cfg.get('debug', {})
+            assert debug.get('log_all_signals') is True
+            assert debug.get('log_signal_components', False) is False
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

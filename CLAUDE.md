@@ -64,7 +64,7 @@ python3 -m pytest -k "test_check_exit"   # Run tests matching pattern
 
 ### Configuration
 - **config.yaml**: Main config (mode, risk params, strategy weights, exit thresholds)
-- **universe.yaml**: Stock watchlist (`proven_symbols` list)
+- **universe.yaml**: Stock watchlist (`scanner_universe` with 400 symbols across categories)
 - **.env**: Alpaca API keys (`ALPACA_API_KEY`, `ALPACA_SECRET_KEY`)
 
 ### Trading Modes (set in config.yaml `mode:`)
