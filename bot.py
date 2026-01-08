@@ -345,6 +345,83 @@ class TradingBot:
         if self.use_tiered_exits and self.exit_manager:
             self.exit_manager.unregister_position(symbol)
 
+    def _cleanup_dust_position(self, symbol: str, qty: int, price: float, position: dict) -> None:
+        """
+        Force-close a dust position that's below minimum value threshold.
+
+        ODE-123: After partial fill, if remaining position value < min_position_value,
+        automatically submit market order to close the dust.
+
+        Args:
+            symbol: Stock symbol
+            qty: Remaining quantity to close
+            price: Current price for P&L calculation
+            position: Position dict with entry_price, direction, strategy
+        """
+        direction = position.get('direction', 'LONG')
+        side = 'sell' if direction == 'LONG' else 'buy'
+        entry_price = position['entry_price']
+
+        logger.info(f"DUST_CLEANUP | {symbol} | Closing {qty} shares (${qty * price:.2f} < min threshold)")
+
+        try:
+            order = self.broker.submit_order(
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                type='market',
+                time_in_force='day'
+            )
+
+            if order and hasattr(order, 'filled_qty') and order.filled_qty:
+                fill_price = float(order.filled_avg_price) if order.filled_avg_price else price
+                filled_qty = int(order.filled_qty)
+
+                # Calculate P&L for dust portion
+                if direction == 'LONG':
+                    pnl = (fill_price - entry_price) * filled_qty
+                else:
+                    pnl = (entry_price - fill_price) * filled_qty
+
+                # Log the dust trade
+                self.trade_logger.log_trade({
+                    'symbol': symbol,
+                    'action': 'SELL' if direction == 'LONG' else 'BUY',
+                    'quantity': filled_qty,
+                    'price': fill_price,
+                    'strategy': position.get('strategy', 'Unknown'),
+                    'pnl': pnl,
+                    'exit_reason': 'dust_cleanup'
+                })
+
+                # Record P&L in guards
+                if pnl < 0 and self.entry_gate:
+                    self.entry_gate.record_loss(datetime.now())
+                if self.drawdown_guard.enabled:
+                    self.drawdown_guard.record_realized_pnl(pnl)
+                if self.losing_streak_guard.enabled:
+                    risk_amount = position.get('risk_amount', abs(pnl))
+                    original_qty = position.get('qty', filled_qty)
+                    scaled_risk = risk_amount * (filled_qty / original_qty) if original_qty > 0 else risk_amount
+                    self.losing_streak_guard.record_trade(
+                        symbol=symbol,
+                        realized_pnl=pnl,
+                        risk_amount=scaled_risk,
+                        close_time=datetime.now()
+                    )
+
+                logger.info(f"DUST_CLEANUP | {symbol} | Closed {filled_qty} @ ${fill_price:.2f} | P&L: ${pnl:+.2f}")
+
+        except Exception as e:
+            logger.error(f"DUST_CLEANUP | {symbol} | Failed: {e}")
+
+        # Full cleanup regardless of order result to avoid stuck state
+        if self.use_tiered_exits and self.exit_manager:
+            self.exit_manager.unregister_position(symbol)
+        self._cleanup_position(symbol)
+        if symbol in self.open_positions:
+            del self.open_positions[symbol]
+
     def _reconcile_broker_state(self):
         """
         Detect divergence between internal state and broker state.
@@ -1101,6 +1178,13 @@ class TradingBot:
                     # Update ExitManager quantity instead of unregistering
                     if self.use_tiered_exits and self.exit_manager:
                         self.exit_manager.update_quantity(symbol, remaining_qty)
+
+                    # ODE-123: Dust cleanup - force close if remaining value is too small
+                    min_position_value = self.config.get('risk_management', {}).get('min_position_value', 0)
+                    if min_position_value > 0:
+                        remaining_value = remaining_qty * exit_price
+                        if remaining_value < min_position_value:
+                            self._cleanup_dust_position(symbol, remaining_qty, exit_price, position)
                 else:
                     # Full fill: Complete cleanup
                     # Unregister from exit manager (LONG and SHORT - Jan 2026)

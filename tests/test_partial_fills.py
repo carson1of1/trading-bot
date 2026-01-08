@@ -329,6 +329,8 @@ proven_symbols:
 
     def test_dust_cleanup_triggers_on_small_remaining(self, bot_with_dust_config, caplog):
         """Partial fill leaving < $50 should trigger dust cleanup."""
+        import logging
+        caplog.set_level(logging.INFO)
         bot = bot_with_dust_config
 
         # First order: partial fill leaves 2 shares at $24 = $48 < $50 threshold
@@ -469,6 +471,8 @@ proven_symbols:
 
     def test_dust_cleanup_handles_failed_order(self, bot_with_dust_config, caplog):
         """Dust cleanup should handle broker errors gracefully."""
+        import logging
+        caplog.set_level(logging.INFO)
         bot = bot_with_dust_config
 
         mock_order_partial = MagicMock()
