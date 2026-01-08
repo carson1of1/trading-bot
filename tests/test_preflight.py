@@ -83,3 +83,59 @@ class TestCheckApiKeys:
             result = checklist.check_api_keys()
 
             assert result.passed is False
+
+
+class TestCheckNoDuplicateProcess:
+    """Test duplicate process detection."""
+
+    def test_no_pid_file(self, tmp_path):
+        """Passes when no PID file exists."""
+        from core.preflight import PreflightChecklist
+
+        pid_file = tmp_path / "bot.pid"
+        checklist = PreflightChecklist({}, MagicMock())
+
+        result = checklist.check_no_duplicate_process(pid_file)
+
+        assert result.passed is True
+        assert "no duplicate" in result.message.lower()
+
+    def test_stale_pid_file(self, tmp_path):
+        """Passes when PID file exists but process is dead."""
+        from core.preflight import PreflightChecklist
+
+        pid_file = tmp_path / "bot.pid"
+        pid_file.write_text("999999")  # Non-existent PID
+
+        checklist = PreflightChecklist({}, MagicMock())
+        result = checklist.check_no_duplicate_process(pid_file)
+
+        assert result.passed is True
+        # Should also clean up stale PID file
+        assert not pid_file.exists()
+
+    def test_running_process(self, tmp_path):
+        """Fails when another bot process is running."""
+        from core.preflight import PreflightChecklist
+
+        pid_file = tmp_path / "bot.pid"
+        # Use current process PID (known to be running)
+        pid_file.write_text(str(os.getpid()))
+
+        checklist = PreflightChecklist({}, MagicMock())
+        result = checklist.check_no_duplicate_process(pid_file)
+
+        assert result.passed is False
+        assert "already running" in result.message.lower()
+
+    def test_invalid_pid_file(self, tmp_path):
+        """Passes when PID file contains invalid data."""
+        from core.preflight import PreflightChecklist
+
+        pid_file = tmp_path / "bot.pid"
+        pid_file.write_text("not_a_number")
+
+        checklist = PreflightChecklist({}, MagicMock())
+        result = checklist.check_no_duplicate_process(pid_file)
+
+        assert result.passed is True

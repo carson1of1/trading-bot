@@ -62,6 +62,40 @@ class PreflightChecklist:
             message="API keys loaded"
         )
 
+    def check_no_duplicate_process(self, pid_file: Path = None) -> CheckResult:
+        """Check that no other bot process is running."""
+        if pid_file is None:
+            pid_file = Path(__file__).parent.parent / "logs" / "bot.pid"
+
+        if not pid_file.exists():
+            return CheckResult(
+                name="no_duplicate_process",
+                passed=True,
+                message="No duplicate process (no PID file)"
+            )
+
+        try:
+            pid = int(pid_file.read_text().strip())
+            # Check if process exists (signal 0 doesn't kill, just checks)
+            os.kill(pid, 0)
+            # Process exists
+            return CheckResult(
+                name="no_duplicate_process",
+                passed=False,
+                message=f"Bot already running (PID {pid})"
+            )
+        except (ValueError, ProcessLookupError, OSError):
+            # Invalid PID or process doesn't exist - clean up stale file
+            try:
+                pid_file.unlink()
+            except OSError:
+                pass
+            return CheckResult(
+                name="no_duplicate_process",
+                passed=True,
+                message="No duplicate process (stale PID file removed)"
+            )
+
     def run_all_checks(self) -> Tuple[bool, List[CheckResult]]:
         """
         Run all preflight checks.
