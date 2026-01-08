@@ -38,8 +38,11 @@ from core.data import YFinanceDataFetcher
 from core.logger import TradeLogger
 import subprocess
 
-# Systemd service management (user-level service, no sudo required)
+# Systemd service management
+# Detect if running on AWS (system service) or local (user service)
 SYSTEMD_SERVICE_NAME = "trading-bot"
+_IS_AWS = os.path.exists("/home/ubuntu")  # Simple AWS detection
+
 # Environment needed for systemctl --user to work from any process
 _SYSTEMD_USER_ENV = {
     **os.environ,
@@ -48,15 +51,25 @@ _SYSTEMD_USER_ENV = {
 
 
 def _is_bot_running() -> bool:
-    """Check if bot is running via systemd user service."""
+    """Check if bot is running via systemd service."""
     try:
-        result = subprocess.run(
-            ["systemctl", "--user", "is-active", SYSTEMD_SERVICE_NAME],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=_SYSTEMD_USER_ENV
-        )
+        if _IS_AWS:
+            # System service on AWS
+            result = subprocess.run(
+                ["systemctl", "is-active", SYSTEMD_SERVICE_NAME],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+        else:
+            # User service on local machine
+            result = subprocess.run(
+                ["systemctl", "--user", "is-active", SYSTEMD_SERVICE_NAME],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=_SYSTEMD_USER_ENV
+            )
         return result.stdout.strip() == "active"
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
@@ -95,14 +108,23 @@ def _stop_bot_service() -> bool:
 def _get_bot_status() -> dict:
     """Get detailed bot status from systemd."""
     try:
-        result = subprocess.run(
-            ["systemctl", "--user", "show", SYSTEMD_SERVICE_NAME,
-             "--property=ActiveState,SubState,MainPID"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=_SYSTEMD_USER_ENV
-        )
+        if _IS_AWS:
+            result = subprocess.run(
+                ["systemctl", "show", SYSTEMD_SERVICE_NAME,
+                 "--property=ActiveState,SubState,MainPID"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+        else:
+            result = subprocess.run(
+                ["systemctl", "--user", "show", SYSTEMD_SERVICE_NAME,
+                 "--property=ActiveState,SubState,MainPID"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=_SYSTEMD_USER_ENV
+            )
         status = {}
         for line in result.stdout.strip().split('\n'):
             if '=' in line:
