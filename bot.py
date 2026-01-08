@@ -543,10 +543,15 @@ class TradingBot:
         """
         Check for entry signal using StrategyManager.
 
+        FIX (Jan 2026): Match backtest behavior by passing historical data
+        (excluding current bar) to strategies. The backtest uses:
+            historical_data = data.iloc[:i].copy()  # excludes bar i
+            current_price = data.iloc[i]['close']   # bar i's close
+
         Args:
             symbol: Stock symbol
-            data: Historical data with indicators
-            current_price: Current price
+            data: Historical data with indicators (includes current bar)
+            current_price: Current price (from the current bar)
 
         Returns:
             Signal dict with action, confidence, strategy, reasoning
@@ -554,7 +559,9 @@ class TradingBot:
         # Default no-signal
         no_signal = {'action': 'HOLD', 'confidence': 0, 'strategy': '', 'reasoning': ''}
 
-        if len(data) < 30:
+        # FIX (Jan 2026): Need 31 bars because we exclude current bar for strategy
+        # After exclusion, strategy sees 30 bars minimum
+        if len(data) < 31:
             return {**no_signal, 'reasoning': 'Insufficient data'}
 
         # Kill switch check
@@ -579,10 +586,15 @@ class TradingBot:
                 return {**no_signal, 'reasoning': f'Entry gate: {reason}'}
 
         try:
+            # FIX (Jan 2026): Pass historical data excluding current bar to match backtest
+            # Backtest uses data.iloc[:i] (excludes bar i), live should do the same
+            # This ensures strategies see the same indicator values in both modes
+            historical_data = data.iloc[:-1].copy()
+
             # Get signal from strategy manager
             signal = self.strategy_manager.get_best_signal(
                 symbol=symbol,
-                data=data,
+                data=historical_data,
                 current_price=current_price,
                 indicators=self.indicators
             )
