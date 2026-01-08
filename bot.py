@@ -194,7 +194,7 @@ class TradingBot:
         exit_config = self.config.get('exit_manager', {})
         exit_settings = {
             'hard_stop_pct': abs(exit_config.get('tier_0_hard_stop', -0.02)) * 100,  # Default -2% matches backtest
-            'profit_floor_pct': exit_config.get('tier_1_profit_floor', 0.02) * 100,
+            'profit_floor_activation_pct': exit_config.get('tier_1_profit_floor', 0.0125) * 100,  # FIX: correct key name
             'trailing_activation_pct': exit_config.get('tier_2_atr_trailing', 0.03) * 100,
             'partial_tp_pct': exit_config.get('tier_3_partial_take', 0.04) * 100,
             'partial_tp2_pct': exit_config.get('tier_4_partial_take2', 0.05) * 100,

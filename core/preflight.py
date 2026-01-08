@@ -244,10 +244,12 @@ class PreflightChecklist:
             orphaned = [s for s in position_symbols if s not in watchlist_set]
 
             if orphaned:
+                # WARNING only - bot.py syncs ALL positions regardless of watchlist
+                # Don't fail preflight for positions from previous day's scanner
                 return CheckResult(
                     name="positions_accounted",
-                    passed=False,
-                    message=f"Orphaned positions not in watchlist: {', '.join(orphaned)}"
+                    passed=True,
+                    message=f"WARNING: Positions not in watchlist (will still be managed): {', '.join(orphaned)}"
                 )
 
             return CheckResult(
@@ -262,6 +264,28 @@ class PreflightChecklist:
                 passed=False,
                 message=f"Failed to fetch positions: {e}"
             )
+
+    def check_stop_config_alignment(self) -> CheckResult:
+        """Verify broker stop_loss_pct matches software tier_0_hard_stop."""
+        risk_config = self.config.get('risk_management', {})
+        exit_config = self.config.get('exit_manager', {})
+
+        broker_stop = risk_config.get('stop_loss_pct', 5.0)  # Percentage (e.g., 5.0)
+        software_stop = abs(exit_config.get('tier_0_hard_stop', -0.05)) * 100  # Convert to percentage
+
+        # Allow small floating point tolerance
+        if abs(broker_stop - software_stop) > 0.01:
+            return CheckResult(
+                name="stop_config_alignment",
+                passed=False,
+                message=f"MISMATCH: Broker stop ({broker_stop}%) != Software stop ({software_stop}%). Fix config.yaml."
+            )
+
+        return CheckResult(
+            name="stop_config_alignment",
+            passed=True,
+            message=f"Stop configs aligned at {broker_stop}%"
+        )
 
     def run_all_checks(self, pid_file: Path = None) -> Tuple[bool, List[CheckResult]]:
         """
@@ -284,6 +308,7 @@ class PreflightChecklist:
             ("Positions accounted", self.check_positions_accounted),
             ("Universe loaded", self.check_universe_loaded),
             ("No duplicate process", lambda: self.check_no_duplicate_process(pid_file)),
+            ("Stop config alignment", self.check_stop_config_alignment),
         ]
 
         for check_name, check_fn in checks:

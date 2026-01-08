@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException
 # FIX (Jan 7, 2026): Thread pool for running blocking operations with timeouts
 # Prevents long-running backtests/scans from blocking the API indefinitely
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="api_worker")
-BACKTEST_TIMEOUT_SECONDS = 300  # 5 minutes max for backtest
+BACKTEST_TIMEOUT_SECONDS = 900  # 15 minutes max for backtest (1-year needs ~10 mins)
 SCANNER_TIMEOUT_SECONDS = 60   # 1 minute max for scanner
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field

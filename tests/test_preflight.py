@@ -389,7 +389,7 @@ class TestCheckPositionsAccounted:
         assert "1" in result.message
 
     def test_orphaned_positions(self):
-        """Fails when positions exist that aren't in watchlist."""
+        """Warns (but passes) when positions exist that aren't in watchlist."""
         from core.preflight import PreflightChecklist
 
         mock_broker = MagicMock()
@@ -402,7 +402,9 @@ class TestCheckPositionsAccounted:
 
         result = checklist.check_positions_accounted()
 
-        assert result.passed is False
+        # Should PASS with warning - bot.py syncs ALL positions regardless of watchlist
+        assert result.passed is True
+        assert "WARNING" in result.message
         assert "TSLA" in result.message
 
     def test_positions_api_error(self):
@@ -460,7 +462,7 @@ class TestRunAllChecks:
             all_passed, results = checklist.run_all_checks(pid_file=pid_file)
 
             assert all_passed is True
-            assert len(results) == 7
+            assert len(results) == 8  # Including stop config alignment check
             assert all(r.passed for r in results)
 
     def test_one_check_fails(self, tmp_path):
@@ -529,8 +531,8 @@ class TestRunAllChecks:
             pid_file = tmp_path / "bot.pid"
             all_passed, results = checklist.run_all_checks(pid_file=pid_file)
 
-            # Should have run all 7 checks even though many failed
-            assert len(results) == 7
+            # Should have run all 8 checks even though many failed
+            assert len(results) == 8  # Including stop config alignment check
             assert all_passed is False
 
 

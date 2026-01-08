@@ -4,8 +4,11 @@ from datetime import datetime, timedelta, date
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 import logging
+import os
 import pytz
 import json
+import shutil
+import tempfile
 from pathlib import Path
 
 class RiskManager:
@@ -917,7 +920,7 @@ class PositionExitState:
     partial_tp_size: float = 0.50                # Close 50% at partial TP
     partial_tp2_pct: float = 0.05                # +5.00% second partial TP
     partial_tp2_size: float = 1.0                # Close 100% of remaining at TP2
-    hard_stop_pct: float = 0.005                 # -0.50% hard stop (from entry)
+    hard_stop_pct: float = 0.05                  # -5.0% hard stop (from entry) - matches config default
 
     # State tracking
     profit_floor_active: bool = False
@@ -1003,7 +1006,7 @@ class ExitManager:
         self.partial_tp_size = risk_settings.get('partial_tp_size', 0.50)  # 50% default
         self.partial_tp2_pct = risk_settings.get('partial_tp2_pct', 5.0) / 100  # 5% second TP
         self.partial_tp2_size = risk_settings.get('partial_tp2_size', 1.0)  # 100% of remaining
-        self.hard_stop_pct = risk_settings.get('hard_stop_pct', 0.50) / 100
+        self.hard_stop_pct = risk_settings.get('hard_stop_pct', 5.0) / 100  # Default 5% matches config
 
         # ATR settings
         self.atr_multiplier = risk_settings.get('atr_trailing_multiplier', 2.0)
@@ -1061,8 +1064,21 @@ class ExitManager:
             # Ensure logs directory exists
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
 
-            with open(self.state_file, 'w') as f:
-                json.dump(state_to_save, f, indent=2)
+            # Atomic write: write to temp file then rename (prevents corruption on crash)
+            temp_fd, temp_path = tempfile.mkstemp(
+                dir=self.state_file.parent,
+                prefix='exit_manager_state_',
+                suffix='.tmp'
+            )
+            try:
+                with os.fdopen(temp_fd, 'w') as f:
+                    json.dump(state_to_save, f, indent=2)
+                shutil.move(temp_path, self.state_file)
+            except Exception:
+                # Clean up temp file on failure
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                raise
 
             self.logger.debug(f"EXIT_MGR | Saved state for {len(state_to_save)} positions")
         except Exception as e:
