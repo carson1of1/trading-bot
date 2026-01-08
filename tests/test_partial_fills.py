@@ -271,3 +271,225 @@ class TestExitManagerUpdateQuantity:
         result = exit_mgr.update_quantity('NONEXISTENT', 25)
 
         assert result is False
+
+
+class TestDustCleanup:
+    """Test automatic cleanup of small 'dust' positions after partial fills."""
+
+    @pytest.fixture
+    def bot_with_dust_config(self, tmp_path):
+        """Create a bot with dust cleanup enabled."""
+        config = """
+mode: PAPER
+timeframe: 1Hour
+trading:
+  watchlist_file: "universe.yaml"
+risk_management:
+  min_position_value: 50
+logging:
+  database: "logs/trades.db"
+exit_manager:
+  enabled: true
+"""
+        universe = """
+proven_symbols:
+  - AAPL
+"""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(config)
+        universe_path = tmp_path / "universe.yaml"
+        universe_path.write_text(universe)
+
+        with patch('bot.create_broker') as mock_broker, \
+             patch('bot.TradeLogger') as mock_logger, \
+             patch('bot.YFinanceDataFetcher'):
+            mock_broker_instance = MagicMock()
+            mock_broker.return_value = mock_broker_instance
+            mock_logger_instance = MagicMock()
+            mock_logger.return_value = mock_logger_instance
+            bot = TradingBot(config_path=str(config_path))
+            bot.portfolio_value = 100000.0
+
+            # Set up an existing position: 100 shares @ $150
+            bot.open_positions = {
+                'AAPL': {
+                    'symbol': 'AAPL',
+                    'qty': 100,
+                    'entry_price': 150.0,
+                    'direction': 'LONG',
+                    'strategy': 'Momentum',
+                    'entry_time': datetime.now(),
+                }
+            }
+            bot.highest_prices['AAPL'] = 150.0
+            bot.lowest_prices['AAPL'] = 150.0
+            bot.trailing_stops['AAPL'] = {'activated': False, 'price': 0.0}
+
+            return bot
+
+    def test_dust_cleanup_triggers_on_small_remaining(self, bot_with_dust_config, caplog):
+        """Partial fill leaving < $50 should trigger dust cleanup."""
+        import logging
+        caplog.set_level(logging.INFO)
+        bot = bot_with_dust_config
+
+        # First order: partial fill leaves 2 shares at $24 = $48 < $50 threshold
+        mock_order_partial = MagicMock()
+        mock_order_partial.status = 'filled'
+        mock_order_partial.id = 'order_partial'
+        mock_order_partial.filled_avg_price = 24.0
+        mock_order_partial.filled_qty = 98  # 98 of 100 filled, 2 remaining
+
+        # Second order: dust cleanup order
+        mock_order_dust = MagicMock()
+        mock_order_dust.status = 'filled'
+        mock_order_dust.id = 'order_dust'
+        mock_order_dust.filled_avg_price = 24.0
+        mock_order_dust.filled_qty = 2
+
+        bot.broker.submit_order.side_effect = [mock_order_partial, mock_order_dust]
+
+        exit_signal = {'exit': True, 'reason': 'stop_loss', 'price': 24.0, 'qty': 100}
+        result = bot.execute_exit('AAPL', exit_signal)
+
+        assert result['filled'] is True
+        # Position should be fully cleaned up (not left with 2 shares)
+        assert 'AAPL' not in bot.open_positions
+        # Should have logged dust cleanup
+        assert 'DUST_CLEANUP' in caplog.text
+
+    def test_dust_cleanup_skipped_when_above_threshold(self, bot_with_dust_config):
+        """Partial fill leaving >= $50 should NOT trigger dust cleanup."""
+        bot = bot_with_dust_config
+
+        # Partial fill leaves 10 shares at $150 = $1500, well above threshold
+        mock_order = MagicMock()
+        mock_order.status = 'filled'
+        mock_order.id = 'order456'
+        mock_order.filled_avg_price = 150.0
+        mock_order.filled_qty = 90  # 90 of 100 filled, 10 remaining
+        bot.broker.submit_order.return_value = mock_order
+
+        exit_signal = {'exit': True, 'reason': 'stop_loss', 'price': 150.0, 'qty': 100}
+        bot.execute_exit('AAPL', exit_signal)
+
+        # Position should still exist with 10 shares
+        assert 'AAPL' in bot.open_positions
+        assert bot.open_positions['AAPL']['qty'] == 10
+        # Only one order should have been submitted
+        assert bot.broker.submit_order.call_count == 1
+
+    def test_dust_cleanup_disabled_when_threshold_zero(self, tmp_path):
+        """Dust cleanup should not trigger when min_position_value is 0 or missing."""
+        config = """
+mode: PAPER
+timeframe: 1Hour
+trading:
+  watchlist_file: "universe.yaml"
+risk_management:
+  min_position_value: 0
+logging:
+  database: "logs/trades.db"
+"""
+        universe = """
+proven_symbols:
+  - AAPL
+"""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(config)
+        universe_path = tmp_path / "universe.yaml"
+        universe_path.write_text(universe)
+
+        with patch('bot.create_broker') as mock_broker, \
+             patch('bot.TradeLogger'), \
+             patch('bot.YFinanceDataFetcher'):
+            mock_broker_instance = MagicMock()
+            mock_broker.return_value = mock_broker_instance
+            bot = TradingBot(config_path=str(config_path))
+            bot.portfolio_value = 100000.0
+
+            bot.open_positions = {
+                'AAPL': {
+                    'symbol': 'AAPL',
+                    'qty': 100,
+                    'entry_price': 150.0,
+                    'direction': 'LONG',
+                    'strategy': 'Momentum',
+                    'entry_time': datetime.now(),
+                }
+            }
+            bot.highest_prices['AAPL'] = 150.0
+            bot.lowest_prices['AAPL'] = 150.0
+            bot.trailing_stops['AAPL'] = {'activated': False, 'price': 0.0}
+
+            # Partial fill leaving tiny amount
+            mock_order = MagicMock()
+            mock_order.status = 'filled'
+            mock_order.id = 'order456'
+            mock_order.filled_avg_price = 10.0
+            mock_order.filled_qty = 98  # Leaves 2 shares @ $10 = $20
+            bot.broker.submit_order.return_value = mock_order
+
+            exit_signal = {'exit': True, 'reason': 'stop_loss', 'price': 10.0, 'qty': 100}
+            bot.execute_exit('AAPL', exit_signal)
+
+            # Position should still exist (no cleanup)
+            assert 'AAPL' in bot.open_positions
+            assert bot.open_positions['AAPL']['qty'] == 2
+
+    def test_dust_cleanup_logs_pnl_correctly(self, bot_with_dust_config):
+        """Dust cleanup should log P&L for the dust portion."""
+        bot = bot_with_dust_config
+
+        mock_order_partial = MagicMock()
+        mock_order_partial.status = 'filled'
+        mock_order_partial.id = 'order_partial'
+        mock_order_partial.filled_avg_price = 24.0
+        mock_order_partial.filled_qty = 98
+
+        mock_order_dust = MagicMock()
+        mock_order_dust.status = 'filled'
+        mock_order_dust.id = 'order_dust'
+        mock_order_dust.filled_avg_price = 24.0
+        mock_order_dust.filled_qty = 2
+
+        bot.broker.submit_order.side_effect = [mock_order_partial, mock_order_dust]
+
+        exit_signal = {'exit': True, 'reason': 'stop_loss', 'price': 24.0, 'qty': 100}
+        bot.execute_exit('AAPL', exit_signal)
+
+        # Trade logger should have been called twice (main exit + dust)
+        assert bot.trade_logger.log_trade.call_count == 2
+
+        # Check dust trade was logged with correct P&L
+        dust_call = bot.trade_logger.log_trade.call_args_list[1]
+        dust_trade = dust_call[0][0]
+        assert dust_trade['exit_reason'] == 'dust_cleanup'
+        assert dust_trade['quantity'] == 2
+        # P&L: (24 - 150) * 2 = -252
+        assert dust_trade['pnl'] == pytest.approx(-252.0)
+
+    def test_dust_cleanup_handles_failed_order(self, bot_with_dust_config, caplog):
+        """Dust cleanup should handle broker errors gracefully."""
+        import logging
+        caplog.set_level(logging.INFO)
+        bot = bot_with_dust_config
+
+        mock_order_partial = MagicMock()
+        mock_order_partial.status = 'filled'
+        mock_order_partial.id = 'order_partial'
+        mock_order_partial.filled_avg_price = 24.0
+        mock_order_partial.filled_qty = 98
+
+        # Dust cleanup order fails
+        bot.broker.submit_order.side_effect = [mock_order_partial, Exception("Broker error")]
+
+        exit_signal = {'exit': True, 'reason': 'stop_loss', 'price': 24.0, 'qty': 100}
+        result = bot.execute_exit('AAPL', exit_signal)
+
+        # Original exit should still succeed
+        assert result['filled'] is True
+        # Error should be logged
+        assert 'DUST_CLEANUP' in caplog.text and 'Failed' in caplog.text
+        # Position should be cleaned up anyway to avoid stuck state
+        assert 'AAPL' not in bot.open_positions

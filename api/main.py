@@ -6,6 +6,7 @@ Provides REST API endpoints for running backtests with scanner-selected symbols.
 
 import sys
 import os
+import signal
 import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
