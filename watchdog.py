@@ -16,7 +16,15 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 
+# Add parent dir to path for imports
+sys.path.insert(0, str(Path(__file__).parent))
+
+from core.market_hours import MarketHours
+
 load_dotenv()
+
+# Market hours checker
+market_hours = MarketHours()
 
 # Configuration
 BOT_PID_FILE = "logs/bot.pid"
@@ -208,19 +216,33 @@ print(f"OK:{account.status}:{account.portfolio_value}")
         return False, str(e)
 
 
-def run_health_check():
-    """Run all health checks and return status"""
+def is_trading_hours():
+    """Check if we're within or near trading hours (includes buffer)"""
+    return market_hours.is_market_open() or market_hours.is_premarket_hours() or market_hours.is_afterhours()
+
+
+def run_health_check(check_process_and_logs=True):
+    """Run all health checks and return status
+
+    Args:
+        check_process_and_logs: If False, skip process/log checks (used outside market hours)
+    """
     results = {}
 
-    # Check process
-    ok, msg = check_process_running()
-    results["process"] = {"ok": ok, "msg": msg}
+    if check_process_and_logs:
+        # Check process
+        ok, msg = check_process_running()
+        results["process"] = {"ok": ok, "msg": msg}
 
-    # Check log activity
-    ok, msg = check_log_activity()
-    results["log_activity"] = {"ok": ok, "msg": msg}
+        # Check log activity
+        ok, msg = check_log_activity()
+        results["log_activity"] = {"ok": ok, "msg": msg}
+    else:
+        # Outside market hours - skip these checks
+        results["process"] = {"ok": True, "msg": "Skipped (market closed)", "skipped": True}
+        results["log_activity"] = {"ok": True, "msg": "Skipped (market closed)", "skipped": True}
 
-    # Check for critical errors
+    # Check for critical errors (always check - catches issues if bot runs outside hours)
     errors = check_for_critical_errors(since_minutes=5)
     results["critical_errors"] = {"ok": len(errors) == 0, "msg": f"{len(errors)} errors", "errors": errors}
 
@@ -256,27 +278,48 @@ def main():
     print(f"[WATCHDOG] Starting trading bot watchdog...")
     print(f"[WATCHDOG] Check interval: {CHECK_INTERVAL_SECONDS}s")
     print(f"[WATCHDOG] Email alerts: {'Configured' if GMAIL_ADDRESS else 'Not configured'}")
+    print(f"[WATCHDOG] Market-hours aware: Yes (process/log checks only during trading hours)")
     print(f"[WATCHDOG] Press Ctrl+C to stop\n")
 
     last_alert_time = {}
     alert_cooldown = 300  # Don't repeat same alert within 5 minutes
     check_count = 0
+    last_market_status = None
 
     while True:
         try:
             check_count += 1
-            results = run_health_check()
+            timestamp = datetime.now().strftime("%H:%M:%S")
 
-            # Check broker every 5 checks (5 minutes)
-            if check_count % 5 == 0:
+            # Check if we're in trading hours
+            in_trading_hours = is_trading_hours()
+
+            # Log market status changes
+            if in_trading_hours != last_market_status:
+                if in_trading_hours:
+                    print(f"\n[{timestamp}] MARKET HOURS - Full monitoring enabled")
+                else:
+                    # Get time until next market open
+                    next_open = market_hours.get_next_market_open()
+                    now = market_hours.get_market_time()
+                    time_diff = next_open - now
+                    mins_until = max(0, int(time_diff.total_seconds() / 60))
+                    hours = mins_until // 60
+                    mins = mins_until % 60
+                    print(f"\n[{timestamp}] OUTSIDE MARKET HOURS - Reduced monitoring (next open in {hours}h {mins}m)")
+                last_market_status = in_trading_hours
+
+            # Run health check (skip process/log checks outside market hours)
+            results = run_health_check(check_process_and_logs=in_trading_hours)
+
+            # Check broker every 5 checks (5 minutes) - only during market hours
+            if check_count % 5 == 0 and in_trading_hours:
                 ok, msg = check_broker_connection()
                 results["broker"] = {"ok": ok, "msg": msg, "skipped": False}
 
-            # Find failed checks
+            # Find failed checks (exclude skipped checks)
             failed_checks = [name for name, r in results.items()
                           if not r["ok"] and not r.get("skipped")]
-
-            timestamp = datetime.now().strftime("%H:%M:%S")
 
             if failed_checks:
                 # Check cooldown
@@ -299,10 +342,15 @@ def main():
                     remaining = int(alert_cooldown - (time.time() - last_alert))
                     print(f"[{timestamp}] FAIL: {', '.join(failed_checks)} (cooldown: {remaining}s)")
             else:
-                # All OK
-                broker_status = results["broker"]["msg"] if not results["broker"].get("skipped") else ""
-                print(f"[{timestamp}] OK | Process: {results['process']['msg']} | Log: {results['log_activity']['msg']}" +
-                      (f" | Broker: {broker_status}" if broker_status else ""))
+                # All OK - show different output based on market hours
+                if in_trading_hours:
+                    broker_status = results["broker"]["msg"] if not results["broker"].get("skipped") else ""
+                    print(f"[{timestamp}] OK | Process: {results['process']['msg']} | Log: {results['log_activity']['msg']}" +
+                          (f" | Broker: {broker_status}" if broker_status else ""))
+                else:
+                    # Outside market hours - quieter output
+                    errors = results["critical_errors"]["msg"]
+                    print(f"[{timestamp}] OK (market closed) | Errors: {errors}")
 
             time.sleep(CHECK_INTERVAL_SECONDS)
 
