@@ -105,6 +105,13 @@ volatility_scanner:
     atr_pct: 0.5
     daily_range_pct: 0.3
     volume_ratio: 0.2
+hot_stocks:
+  enabled: true              # Fetch top weekly movers at startup
+  top_n: 50                  # Number of gainers to fetch
+  min_price: 5               # Minimum stock price
+  max_price: 1000            # Maximum stock price
+  min_volume: 500000         # Minimum average volume
+  cache_hours: 20            # Hours to cache results
 debug:
   log_all_signals: false       # Log every signal (not just executed ones)
   log_signal_components: false # Log indicator values that made up the signal

@@ -71,6 +71,9 @@ class VolatilityScanner:
 
         self.market_tz = pytz.timezone('America/New_York')
 
+        # Temporary symbols from hot stocks feed (cleared daily)
+        self._temporary_symbols: List[str] = []
+
         self.logger.info(
             f"VolatilityScanner initialized: "
             f"top_n={self.top_n}, min_price=${self.min_price}, "
@@ -286,6 +289,35 @@ class VolatilityScanner:
             'lookback_days': self.lookback_days
         }
 
+    def add_temporary_symbols(self, symbols: List[str]) -> None:
+        """
+        Add temporary symbols to the scanner pool (e.g., from hot stocks feed).
+
+        These symbols are included in the next scan() call but are not persisted.
+        Call clear_temporary_symbols() to remove them.
+
+        Args:
+            symbols: List of symbols to add temporarily
+        """
+        if not symbols:
+            return
+
+        # Filter out duplicates
+        new_symbols = [s for s in symbols if s not in self._temporary_symbols]
+        self._temporary_symbols.extend(new_symbols)
+
+        self.logger.info(
+            f"Added {len(new_symbols)} temporary symbols to scanner pool "
+            f"(total temporary: {len(self._temporary_symbols)})"
+        )
+
+    def clear_temporary_symbols(self) -> None:
+        """Clear all temporary symbols from the scanner pool."""
+        count = len(self._temporary_symbols)
+        self._temporary_symbols = []
+        if count > 0:
+            self.logger.debug(f"Cleared {count} temporary symbols")
+
     def scan(self) -> List[str]:
         """
         Scan for most volatile stocks using current market data (for live trading).
@@ -326,6 +358,19 @@ class VolatilityScanner:
         if not symbols:
             self.logger.warning("No symbols in scanner_universe")
             return []
+
+        # Add temporary symbols (from hot stocks feed)
+        static_count = len(symbols)
+        for sym in self._temporary_symbols:
+            if sym not in seen:
+                symbols.append(sym)
+                seen.add(sym)
+
+        if self._temporary_symbols:
+            self.logger.info(
+                f"Scanner pool: {static_count} static + "
+                f"{len(symbols) - static_count} hot = {len(symbols)} total"
+            )
 
         self.logger.info(f"Scanning {len(symbols)} symbols for volatility...")
 

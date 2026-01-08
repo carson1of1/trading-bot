@@ -39,6 +39,7 @@ from core import (
     TradeLogger,
     MarketHours,
     VolatilityScanner,
+    HotStocksFeed,
     DailyDrawdownGuard,
     DrawdownTier,
     LosingStreakGuard,
@@ -152,6 +153,14 @@ class TradingBot:
         elif self.config.get('volatility_scanner', {}).get('enabled', False):
             scanner_config = self.config.get('volatility_scanner', {})
             self.scanner = VolatilityScanner(scanner_config)
+
+            # Fetch hot stocks and add to scanner pool before scanning
+            hot_stocks_config = self.config.get('hot_stocks', {})
+            if hot_stocks_config.get('enabled', False):
+                hot_feed = HotStocksFeed(hot_stocks_config)
+                hot_symbols = hot_feed.fetch()
+                self.scanner.add_temporary_symbols(hot_symbols)
+
             scanned_symbols = self.scanner.scan()
             if scanned_symbols:
                 self.watchlist = scanned_symbols
