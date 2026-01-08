@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.broker import (
     Position, Order, Account,
-    BrokerInterface, FakeBroker, BrokerFactory,
+    BrokerInterface, FakeBroker, BrokerFactory, AlpacaBroker,
     BrokerAPIError, create_broker
 )
 
@@ -598,6 +598,32 @@ class TestBrokerAPIError:
 # =============================================================================
 # IMPORT TESTS
 # =============================================================================
+
+class TestAlpacaBrokerSafeguard:
+    """Test that AlpacaBroker is blocked in test environments"""
+
+    def test_alpaca_broker_blocked_in_tests(self):
+        """AlpacaBroker should raise RuntimeError when instantiated in tests"""
+        # Ensure the flag is False (default)
+        AlpacaBroker._allow_in_tests = False
+
+        with pytest.raises(RuntimeError, match="SAFETY BLOCK"):
+            AlpacaBroker('test_key', 'test_secret', 'https://paper-api.alpaca.markets')
+
+    def test_alpaca_broker_allowed_when_flag_set(self):
+        """AlpacaBroker should work when _allow_in_tests is True"""
+        from unittest.mock import patch, MagicMock
+
+        AlpacaBroker._allow_in_tests = True
+        try:
+            with patch('alpaca_trade_api.REST') as mock_rest:
+                mock_rest.return_value = MagicMock()
+                # Should not raise
+                broker = AlpacaBroker('test_key', 'test_secret', 'https://paper-api.alpaca.markets')
+                assert broker is not None
+        finally:
+            AlpacaBroker._allow_in_tests = False
+
 
 class TestBrokerImports:
     """Test that all broker exports are importable"""

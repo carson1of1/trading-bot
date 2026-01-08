@@ -24,6 +24,23 @@ from core.broker import (
 
 
 # =============================================================================
+# FIXTURES
+# =============================================================================
+
+@pytest.fixture
+def allow_alpaca_in_tests():
+    """Fixture to temporarily allow AlpacaBroker in test environment.
+
+    This is used for tests that intentionally test AlpacaBroker with mocked API.
+    The fixture ensures the flag is reset after the test.
+    """
+    original = AlpacaBroker._allow_in_tests
+    AlpacaBroker._allow_in_tests = True
+    yield
+    AlpacaBroker._allow_in_tests = original
+
+
+# =============================================================================
 # FAKEBROKER BRACKET ORDER TESTS
 # =============================================================================
 
@@ -368,6 +385,7 @@ class TestFakeBrokerStopOrdersList:
 # ALPACABROKER BRACKET ORDER TESTS (MOCKED)
 # =============================================================================
 
+@pytest.mark.usefixtures('allow_alpaca_in_tests')
 class TestAlpacaBrokerBracketOrder:
     """Test AlpacaBroker bracket order submission with mocked API"""
 

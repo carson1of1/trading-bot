@@ -10,6 +10,16 @@ from core.broker import (
     FakeBroker,
 )
 
+
+@pytest.fixture
+def allow_alpaca_in_tests():
+    """Fixture to temporarily allow AlpacaBroker in test environment."""
+    original = AlpacaBroker._allow_in_tests
+    AlpacaBroker._allow_in_tests = True
+    yield
+    AlpacaBroker._allow_in_tests = original
+
+
 # Optional import for API tests
 try:
     from fastapi.testclient import TestClient
@@ -84,6 +94,7 @@ class TestFakeBrokerPortfolioHistory:
         assert history.base_value == 25000.0
 
 
+@pytest.mark.usefixtures('allow_alpaca_in_tests')
 class TestAlpacaBrokerPortfolioHistory:
     """Test AlpacaBroker.get_portfolio_history()."""
 

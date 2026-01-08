@@ -331,6 +331,9 @@ class BrokerInterface(ABC):
 class AlpacaBroker(BrokerInterface):
     """Real broker implementation using Alpaca API"""
 
+    # Safety flag: Set to True ONLY for integration tests that intentionally use real API
+    _allow_in_tests = False
+
     def __init__(self, api_key: str, secret_key: str, base_url: str = None):
         """
         Initialize Alpaca broker
@@ -339,10 +342,29 @@ class AlpacaBroker(BrokerInterface):
             api_key: Alpaca API key
             secret_key: Alpaca secret key
             base_url: Base URL (paper or live endpoint)
+
+        Raises:
+            RuntimeError: If called from a test environment without explicit permission
         """
+        import sys
         import alpaca_trade_api as tradeapi
 
         self.logger = logging.getLogger(__name__)
+
+        # SAFETY: Block real broker in test environments
+        # This prevents tests from accidentally placing real orders
+        in_pytest = 'pytest' in sys.modules
+        in_unittest = 'unittest' in sys.modules and any(
+            'test_' in arg or 'tests/' in arg for arg in sys.argv
+        )
+        testing_env = os.environ.get('TESTING', '').lower() in ('1', 'true', 'yes')
+
+        if (in_pytest or in_unittest or testing_env) and not AlpacaBroker._allow_in_tests:
+            raise RuntimeError(
+                "SAFETY BLOCK: AlpacaBroker cannot be used in test environment! "
+                "Tests must use FakeBroker to prevent accidental real orders. "
+                "If this is an intentional integration test, set AlpacaBroker._allow_in_tests = True"
+            )
 
         # Initialize Alpaca API
         if base_url:
