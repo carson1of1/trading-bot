@@ -19,6 +19,7 @@ risk_management:
   emergency_stop_pct: 8.0
   max_open_positions: 3
   max_position_dollars: 999999  # Disabled - use percentage-based sizing only (scales with portfolio)
+  force_liquidate_on_kill_switch: true  # When kill switch triggers, immediately close all positions
 daily_drawdown_guard:
   enabled: true
   warning_pct: 2.0          # -2.0%: Reduce position sizes
@@ -69,8 +70,8 @@ strategies:
     enabled: false  # Disabled: catches end of moves, only $2 avg P&L
     weight: 0.0
   mean_reversion:
-    enabled: true
-    weight: 0.25
+    enabled: false
+    weight: 0.0
   breakout:
     enabled: true
     weight: 0.4  # Increased: this is the main edge

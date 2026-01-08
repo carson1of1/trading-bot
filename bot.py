@@ -313,6 +313,18 @@ class TradingBot:
                         self.kill_switch_triggered = True
                         logger.warning(f"KILL SWITCH: Daily loss {daily_loss_pct*100:.2f}% >= {max_daily_loss*100}% (equity=${self.portfolio_value:.2f}, start=${self.daily_starting_capital:.2f})")
 
+                        # ODE-121: Force liquidation on kill switch when enabled
+                        force_liquidate = self.config.get('risk_management', {}).get('force_liquidate_on_kill_switch', False)
+                        if force_liquidate:
+                            positions = self.broker.get_positions()
+                            if positions:
+                                logger.warning(f"KILL SWITCH LIQUIDATION: Force closing {len(positions)} position(s)")
+                                result = self.drawdown_guard.force_liquidate_all(self.broker, positions)
+                                if result.get('success'):
+                                    logger.warning(f"KILL SWITCH LIQUIDATION COMPLETE: {len(result.get('liquidated', []))} closed, {len(result.get('failed', []))} failed")
+                                else:
+                                    logger.error(f"KILL SWITCH LIQUIDATION FAILED: {result.get('reason', 'unknown')}")
+
             logger.debug(f"Account synced: cash=${self.cash:.2f}, portfolio=${self.portfolio_value:.2f}")
 
         except Exception as e:

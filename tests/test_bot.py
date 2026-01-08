@@ -166,6 +166,100 @@ proven_symbols:
 
         assert bot.kill_switch_triggered is True
 
+    def test_kill_switch_does_not_liquidate_by_default(self, bot_with_mocks):
+        """Kill switch does NOT liquidate when force_liquidate_on_kill_switch is False."""
+        bot = bot_with_mocks
+        bot.current_trading_day = datetime.now().date()
+        bot.config['risk_management']['force_liquidate_on_kill_switch'] = False
+
+        # Setup positions
+        mock_pos = MagicMock()
+        mock_pos.symbol = 'AAPL'
+        mock_pos.qty = 100
+        mock_pos.side = 'long'
+        bot.broker.get_positions.return_value = [mock_pos]
+
+        # Mock force_liquidate_all on the drawdown_guard
+        bot.drawdown_guard.force_liquidate_all = MagicMock(return_value={
+            'success': True, 'liquidated': [], 'failed': []
+        })
+
+        # Trigger kill switch with 6% loss
+        mock_account = MagicMock()
+        mock_account.cash = 94000.0
+        mock_account.portfolio_value = 94000.0
+        mock_account.last_equity = 100000.0
+        bot.broker.get_account.return_value = mock_account
+
+        bot.sync_account()
+
+        assert bot.kill_switch_triggered is True
+        # force_liquidate_all should NOT be called
+        bot.drawdown_guard.force_liquidate_all.assert_not_called()
+
+    def test_kill_switch_liquidates_when_enabled(self, bot_with_mocks):
+        """Kill switch liquidates all positions when force_liquidate_on_kill_switch is True."""
+        bot = bot_with_mocks
+        bot.current_trading_day = datetime.now().date()
+        bot.config['risk_management']['force_liquidate_on_kill_switch'] = True
+
+        # Setup positions
+        mock_pos = MagicMock()
+        mock_pos.symbol = 'AAPL'
+        mock_pos.qty = 100
+        mock_pos.side = 'long'
+        bot.broker.get_positions.return_value = [mock_pos]
+
+        # Mock force_liquidate_all on the drawdown_guard
+        bot.drawdown_guard.force_liquidate_all = MagicMock(return_value={
+            'success': True,
+            'liquidated': [{'symbol': 'AAPL', 'qty': 100}],
+            'failed': []
+        })
+
+        # Trigger kill switch with 6% loss
+        mock_account = MagicMock()
+        mock_account.cash = 94000.0
+        mock_account.portfolio_value = 94000.0
+        mock_account.last_equity = 100000.0
+        bot.broker.get_account.return_value = mock_account
+
+        bot.sync_account()
+
+        assert bot.kill_switch_triggered is True
+        # force_liquidate_all SHOULD be called with broker and positions
+        bot.drawdown_guard.force_liquidate_all.assert_called_once()
+        call_args = bot.drawdown_guard.force_liquidate_all.call_args
+        assert call_args[0][0] == bot.broker  # First arg is broker
+        assert len(call_args[0][1]) == 1  # Second arg is positions list
+
+    def test_kill_switch_liquidation_skipped_when_no_positions(self, bot_with_mocks):
+        """Kill switch liquidation skipped when there are no positions."""
+        bot = bot_with_mocks
+        bot.current_trading_day = datetime.now().date()
+        bot.config['risk_management']['force_liquidate_on_kill_switch'] = True
+
+        # No positions
+        bot.broker.get_positions.return_value = []
+
+        # Mock force_liquidate_all on the drawdown_guard
+        bot.drawdown_guard.force_liquidate_all = MagicMock(return_value={
+            'success': True, 'liquidated': [], 'failed': []
+        })
+
+        # Trigger kill switch with 6% loss
+        mock_account = MagicMock()
+        mock_account.cash = 94000.0
+        mock_account.portfolio_value = 94000.0
+        mock_account.last_equity = 100000.0
+        bot.broker.get_account.return_value = mock_account
+
+        bot.sync_account()
+
+        assert bot.kill_switch_triggered is True
+        # force_liquidate_all should NOT be called (no positions)
+        bot.drawdown_guard.force_liquidate_all.assert_not_called()
+
     def test_sync_account_resets_on_new_day(self, bot_with_mocks):
         """sync_account resets kill switch on new day and uses last_equity for P&L."""
         bot = bot_with_mocks
