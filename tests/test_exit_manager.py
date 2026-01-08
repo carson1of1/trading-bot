@@ -66,7 +66,7 @@ class TestPositionExitState:
         assert state.profit_floor_lock_pct == 0.005  # +0.50%
         assert state.trailing_activation_pct == 0.0175  # +1.75%
         assert state.partial_tp_pct == 0.02  # +2.00%
-        assert state.hard_stop_pct == 0.005  # -0.50%
+        assert state.hard_stop_pct == 0.05  # -5.0% (matches config default)
         assert state.partial_tp_size == 0.50  # 50%
 
     def test_state_tracking_defaults(self):
@@ -94,7 +94,7 @@ class TestExitManagerInitialization:
         assert exit_mgr.profit_floor_lock_pct == 0.005  # 0.50%
         assert exit_mgr.trailing_activation_pct == 0.0175  # 1.75%
         assert exit_mgr.partial_tp_pct == 0.02  # 2.0%
-        assert exit_mgr.hard_stop_pct == 0.005  # 0.50%
+        assert exit_mgr.hard_stop_pct == 0.05  # 5.0% (matches config default)
         assert exit_mgr.atr_multiplier == 2.0
 
     def test_custom_configuration(self):
@@ -200,18 +200,18 @@ class TestPositionRegistration:
 
 
 class TestTier0HardStop:
-    """Tests for Tier 0: Hard Stop (-0.50%)."""
+    """Tests for Tier 0: Hard Stop (using 5% default)."""
 
     def test_hard_stop_triggers(self):
-        """Test hard stop triggers at -0.50% loss."""
-        exit_mgr = ExitManager()
+        """Test hard stop triggers at -5% loss (default)."""
+        exit_mgr = ExitManager()  # Default 5% hard stop
         exit_mgr.register_position("AAPL", 100.0, 100)
         # Simulate enough bars held to pass min hold check
         for _ in range(15):
             exit_mgr.increment_bars_held("AAPL")
 
-        # Price at exactly -0.50% = $99.50
-        result = exit_mgr.evaluate_exit("AAPL", 99.50)
+        # Price at exactly -5% = $95.00
+        result = exit_mgr.evaluate_exit("AAPL", 95.00)
 
         assert result is not None
         assert result['action'] == 'full_exit'
@@ -219,14 +219,14 @@ class TestTier0HardStop:
         assert result['qty'] == 100
 
     def test_hard_stop_triggers_below_threshold(self):
-        """Test hard stop triggers below -0.50% loss."""
-        exit_mgr = ExitManager()
+        """Test hard stop triggers below -5% loss."""
+        exit_mgr = ExitManager()  # Default 5% hard stop
         exit_mgr.register_position("AAPL", 100.0, 100)
         for _ in range(15):
             exit_mgr.increment_bars_held("AAPL")
 
-        # Price at -1.0% = $99.00
-        result = exit_mgr.evaluate_exit("AAPL", 99.00)
+        # Price at -6% = $94.00
+        result = exit_mgr.evaluate_exit("AAPL", 94.00)
 
         assert result is not None
         assert result['action'] == 'full_exit'
@@ -234,11 +234,11 @@ class TestTier0HardStop:
 
     def test_hard_stop_immediate(self):
         """Test hard stop triggers immediately on first bar."""
-        exit_mgr = ExitManager()
+        exit_mgr = ExitManager()  # Default 5% hard stop
         exit_mgr.register_position("AAPL", 100.0, 100)
 
-        # Hard stop at -0.50%
-        result = exit_mgr.evaluate_exit("AAPL", 99.50)
+        # Hard stop at -5%
+        result = exit_mgr.evaluate_exit("AAPL", 95.00)
 
         assert result is not None
         assert result['action'] == 'full_exit'
@@ -246,7 +246,7 @@ class TestTier0HardStop:
 
     def test_hard_stop_precedence_over_profit_floor(self):
         """Test hard stop takes precedence even if profit floor was active."""
-        exit_mgr = ExitManager()
+        exit_mgr = ExitManager()  # Default 5% hard stop
         state = exit_mgr.register_position("AAPL", 100.0, 100)
         for _ in range(15):
             exit_mgr.increment_bars_held("AAPL")
@@ -255,8 +255,8 @@ class TestTier0HardStop:
         state.profit_floor_active = True
         state.profit_floor_price = 100.50
 
-        # Price drops below hard stop
-        result = exit_mgr.evaluate_exit("AAPL", 99.50)
+        # Price drops below hard stop at -5%
+        result = exit_mgr.evaluate_exit("AAPL", 95.00)
 
         assert result['reason'] == ExitManager.REASON_HARD_STOP
 
@@ -546,7 +546,7 @@ class TestTierPrecedence:
 
     def test_hard_stop_over_all_others(self):
         """Test hard stop takes precedence over all other exits."""
-        exit_mgr = ExitManager()
+        exit_mgr = ExitManager()  # Default 5% hard stop
         state = exit_mgr.register_position("AAPL", 100.0, 100)
         for _ in range(15):
             exit_mgr.increment_bars_held("AAPL")
@@ -555,10 +555,10 @@ class TestTierPrecedence:
         state.profit_floor_active = True
         state.profit_floor_price = 100.50
         state.trailing_active = True
-        state.trailing_stop_price = 99.80
+        state.trailing_stop_price = 96.00
 
-        # Price at hard stop level
-        result = exit_mgr.evaluate_exit("AAPL", 99.50)
+        # Price at hard stop level (-5%)
+        result = exit_mgr.evaluate_exit("AAPL", 95.00)
 
         assert result['reason'] == ExitManager.REASON_HARD_STOP
 

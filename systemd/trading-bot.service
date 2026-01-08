@@ -1,0 +1,17 @@
+[Unit]
+Description=Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=carsonodell
+WorkingDirectory=/home/carsonodell/trading-bot
+ExecStart=/usr/bin/python3 bot.py
+Restart=no
+Environment=PYTHONUNBUFFERED=1
+# Load environment variables from .env file
+EnvironmentFile=/home/carsonodell/trading-bot/.env
+
+[Install]
+WantedBy=multi-user.target

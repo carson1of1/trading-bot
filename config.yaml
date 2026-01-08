@@ -11,15 +11,16 @@ trading:
   lookback_period: 200
   warmup_bars: 200
 risk_management:
-  max_position_size_pct: 10      # 10% per position (scales with ANY account size)
+  max_position_size_pct: 15      # 15% per position
   max_portfolio_risk_pct: 30.0
   stop_loss_pct: 5.0
   take_profit_pct: 5.0
   max_daily_loss_pct: 4.0
   emergency_stop_pct: 8.0
   max_open_positions: 3
-  max_position_dollars: 999999  # Disabled - use percentage only (works for $500, $10k, or $100k)
+  max_position_dollars: 999999  # Disabled - use percentage-based sizing only (scales with portfolio)
   min_position_value: 50        # Force-close dust positions under this dollar value (ODE-123)
+  force_liquidate_on_kill_switch: true  # When kill switch triggers, immediately close all positions
 daily_drawdown_guard:
   enabled: true
   warning_pct: 2.0          # -2.0%: Reduce position sizes
@@ -55,9 +56,9 @@ exit_manager:
   tier_2_atr_trailing: 0.02
   tier_3_partial_take: 0.03
   max_hold_hours: 48
-  eod_close: false
+  eod_close: true  # Close all positions at 3 PM ET (matches backtest)
 trailing_stop:
-  enabled: true
+  enabled: false  # DISABLED - was killing profits at tight settings (0.15%)
   activation_pct: 0.15
   trail_pct: 0.15
   move_to_breakeven: true
@@ -105,6 +106,13 @@ volatility_scanner:
     atr_pct: 0.5
     daily_range_pct: 0.3
     volume_ratio: 0.2
+hot_stocks:
+  enabled: true              # Fetch top weekly movers at startup
+  top_n: 50                  # Number of gainers to fetch
+  min_price: 5               # Minimum stock price
+  max_price: 1000            # Maximum stock price
+  min_volume: 500000         # Minimum average volume
+  cache_hours: 20            # Hours to cache results
 debug:
   log_all_signals: false       # Log every signal (not just executed ones)
   log_signal_components: false # Log indicator values that made up the signal

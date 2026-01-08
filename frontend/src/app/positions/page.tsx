@@ -1,15 +1,29 @@
 "use client";
 
+import { useState } from "react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { usePolling } from "@/hooks/usePolling";
-import { getPositions, PositionsData } from "@/lib/api";
-import { Briefcase, TrendingUp, TrendingDown, AlertTriangle } from "lucide-react";
+import { getPositions, PositionsData, Position } from "@/lib/api";
+import { Briefcase, TrendingUp, TrendingDown, AlertTriangle, BarChart3 } from "lucide-react";
+import { RecoveryStatsPanel } from "@/components/panels/RecoveryStatsPanel";
 
 export default function PositionsPage() {
   const { data: positionsData, isLoading, error } = usePolling<PositionsData>({
     fetcher: getPositions,
     interval: 3000,
   });
+
+  const [selectedPosition, setSelectedPosition] = useState<Position | null>(null);
+  const [isPanelOpen, setIsPanelOpen] = useState(false);
+
+  const handlePositionClick = (position: Position) => {
+    setSelectedPosition(position);
+    setIsPanelOpen(true);
+  };
+
+  const handleClosePanel = () => {
+    setIsPanelOpen(false);
+  };
 
   if (isLoading && !positionsData) {
     return (
@@ -76,6 +90,7 @@ export default function PositionsPage() {
                   <th>Market Value</th>
                   <th>P&L $</th>
                   <th>P&L %</th>
+                  <th>Analyze</th>
                 </tr>
               </thead>
               <tbody>
@@ -84,7 +99,8 @@ export default function PositionsPage() {
                   return (
                     <tr
                       key={position.symbol}
-                      className={`border-l-2 ${isProfit ? "border-l-emerald" : "border-l-red"}`}
+                      onClick={() => handlePositionClick(position)}
+                      className={`border-l-2 ${isProfit ? "border-l-emerald" : "border-l-red"} cursor-pointer hover:bg-surface-2`}
                     >
                       <td>
                         <span className="font-semibold text-white mono">
@@ -115,6 +131,18 @@ export default function PositionsPage() {
                       <td className={`mono font-medium ${isProfit ? "pnl-positive" : "pnl-negative"}`}>
                         {isProfit ? "+" : ""}{position.unrealized_plpc.toFixed(2)}%
                       </td>
+                      <td>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handlePositionClick(position);
+                          }}
+                          className="flex items-center gap-1 px-2 py-1 text-xs bg-blue-glow text-blue-light border border-blue-strong rounded hover:bg-blue/20 transition-colors"
+                        >
+                          <BarChart3 className="w-3 h-3" />
+                          Stats
+                        </button>
+                      </td>
                     </tr>
                   );
                 })}
@@ -123,6 +151,15 @@ export default function PositionsPage() {
           </div>
         )}
       </div>
+
+      {/* Recovery Stats Panel */}
+      {selectedPosition && (
+        <RecoveryStatsPanel
+          position={selectedPosition}
+          isOpen={isPanelOpen}
+          onClose={handleClosePanel}
+        />
+      )}
     </PageWrapper>
   );
 }

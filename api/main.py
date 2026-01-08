@@ -21,7 +21,7 @@ from fastapi import FastAPI, HTTPException
 # FIX (Jan 7, 2026): Thread pool for running blocking operations with timeouts
 # Prevents long-running backtests/scans from blocking the API indefinitely
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="api_worker")
-BACKTEST_TIMEOUT_SECONDS = 300  # 5 minutes max for backtest
+BACKTEST_TIMEOUT_SECONDS = 900  # 15 minutes max for backtest (1-year needs ~10 mins)
 SCANNER_TIMEOUT_SECONDS = 60   # 1 minute max for scanner
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -34,76 +34,106 @@ from core.broker import create_broker, BrokerInterface, BrokerAPIError
 from core.config import get_global_config
 from core.market_hours import is_market_open, get_market_status_message
 from core.scanner import VolatilityScanner
+from core.hot_stocks import HotStocksFeed
 from core.data import YFinanceDataFetcher
 from core.logger import TradeLogger
 import subprocess
 
-# PID file for tracking bot process
-BOT_PID_FILE = Path(__file__).parent.parent / "logs" / "bot.pid"
+# Systemd service management
+# Detect if running on AWS (system service) or local (user service)
+SYSTEMD_SERVICE_NAME = "trading-bot"
+_IS_AWS = os.path.exists("/home/ubuntu")  # Simple AWS detection
 
-
-def _read_bot_pid() -> Optional[int]:
-    """Read bot PID from file."""
-    try:
-        if BOT_PID_FILE.exists():
-            pid = int(BOT_PID_FILE.read_text().strip())
-            return pid
-    except (ValueError, IOError):
-        pass
-    return None
-
-
-def _write_bot_pid(pid: int):
-    """Write bot PID to file."""
-    BOT_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    BOT_PID_FILE.write_text(str(pid))
-
-
-def _clear_bot_pid():
-    """Clear bot PID file."""
-    try:
-        if BOT_PID_FILE.exists():
-            BOT_PID_FILE.unlink()
-    except IOError:
-        pass
+# Environment needed for systemctl --user to work from any process
+_SYSTEMD_USER_ENV = {
+    **os.environ,
+    "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"
+}
 
 
 def _is_bot_running() -> bool:
-    """Check if bot process is actually running."""
-    pid = _read_bot_pid()
-    if pid is None:
-        return False
+    """Check if bot is running via systemd service."""
     try:
-        # Check if process exists (signal 0 doesn't kill, just checks)
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
-        # Process doesn't exist, clean up stale PID file
-        _clear_bot_pid()
+        if _IS_AWS:
+            # System service on AWS
+            result = subprocess.run(
+                ["systemctl", "is-active", SYSTEMD_SERVICE_NAME],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+        else:
+            # User service on local machine
+            result = subprocess.run(
+                ["systemctl", "--user", "is-active", SYSTEMD_SERVICE_NAME],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=_SYSTEMD_USER_ENV
+            )
+        return result.stdout.strip() == "active"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
 
 
-def _kill_bot_process() -> bool:
-    """Kill the bot process if running."""
-    pid = _read_bot_pid()
-    if pid is None:
-        return False
+def _start_bot_service() -> bool:
+    """Start the bot via systemd user service."""
     try:
-        os.kill(pid, signal.SIGTERM)
-        # Give it a moment to terminate gracefully
-        import time
-        time.sleep(0.5)
-        # Check if still running, force kill if needed
-        try:
-            os.kill(pid, 0)
-            os.kill(pid, signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            pass
-        _clear_bot_pid()
-        return True
-    except (OSError, ProcessLookupError):
-        _clear_bot_pid()
+        result = subprocess.run(
+            ["systemctl", "--user", "start", SYSTEMD_SERVICE_NAME],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_SYSTEMD_USER_ENV
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
+
+
+def _stop_bot_service() -> bool:
+    """Stop the bot via systemd user service."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "stop", SYSTEMD_SERVICE_NAME],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_SYSTEMD_USER_ENV
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def _get_bot_status() -> dict:
+    """Get detailed bot status from systemd."""
+    try:
+        if _IS_AWS:
+            result = subprocess.run(
+                ["systemctl", "show", SYSTEMD_SERVICE_NAME,
+                 "--property=ActiveState,SubState,MainPID"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+        else:
+            result = subprocess.run(
+                ["systemctl", "--user", "show", SYSTEMD_SERVICE_NAME,
+                 "--property=ActiveState,SubState,MainPID"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=_SYSTEMD_USER_ENV
+            )
+        status = {}
+        for line in result.stdout.strip().split('\n'):
+            if '=' in line:
+                key, value = line.split('=', 1)
+                status[key] = value
+        return status
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return {"ActiveState": "unknown"}
 
 # Broker singleton for API
 _broker: Optional[BrokerInterface] = None
@@ -144,6 +174,10 @@ class BacktestRequest(BaseModel):
     longs_only: bool = Field(default=False, description="Only take LONG positions")
     shorts_only: bool = Field(default=False, description="Only take SHORT positions")
     initial_capital: float = Field(default=10000.0, ge=1000, le=10000000, description="Starting capital")
+    # Trailing stop parameters - DISABLED by default (was killing profits at tight settings)
+    trailing_stop_enabled: bool = Field(default=False, description="Enable trailing stop loss")
+    trailing_activation_pct: float = Field(default=0.15, ge=0.1, le=10.0, description="% profit to activate trailing stop")
+    trailing_trail_pct: float = Field(default=0.15, ge=0.1, le=10.0, description="% to trail below peak")
 
 
 class TradeResult(BaseModel):
@@ -415,6 +449,38 @@ class RiskMetrics(BaseModel):
     largest_position_percent: float
     current_drawdown: float
     position_sizes: List[dict]
+
+
+class RecoveryStatsResponse(BaseModel):
+    """Recovery statistics for a position."""
+    # Core probabilities
+    recovery_probability: float
+    take_profit_probability: float
+    stop_loss_probability: float
+
+    # Drawdown stats
+    avg_max_drawdown: float
+    avg_bars_to_recovery: float
+
+    # Gap context
+    is_gap_entry: bool
+    gap_percentage: Optional[float] = None
+    gap_win_rate: Optional[float] = None
+
+    # Current position context
+    current_drawdown_pct: float
+    distance_to_stop_pct: float
+    distance_to_tp_pct: float
+
+    # Expected values
+    ev_cut_now: float
+    ev_hold_to_breakeven: float
+    ev_hold_for_tp: float
+
+    # Recommendation
+    recommendation: str
+    recommendation_reason: str
+    risk_warning: Optional[str] = None
 
 
 # Initialize FastAPI app
@@ -965,6 +1031,90 @@ async def get_positions():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/positions/{symbol}/recovery-stats", response_model=RecoveryStatsResponse)
+async def get_recovery_stats(symbol: str, take_profit_pct: float = 5.0):
+    """
+    Get recovery statistics for a specific position.
+
+    Calculates the probability of a trade recovering from its current drawdown,
+    expected values for different actions, and provides a recommendation.
+
+    Args:
+        symbol: The stock symbol
+        take_profit_pct: Take profit target as % from entry (default: 5.0)
+    """
+    try:
+        from core.recovery_stats import calculate_recovery_stats
+
+        broker = get_broker()
+        config = load_config()
+
+        # Get position
+        positions = broker.get_positions()
+        position = next((p for p in positions if p.symbol == symbol), None)
+
+        if not position:
+            raise HTTPException(status_code=404, detail=f"Position {symbol} not found")
+
+        # Get risk metrics for context
+        account = broker.get_account()
+        daily_loss_pct = abs(account.daily_pnl_percent * 100) if account.daily_pnl < 0 else 0
+
+        # Get config values
+        risk_config = config.get('risk', {})
+        exit_config = config.get('exit_rules', {})
+        daily_loss_limit = risk_config.get('daily_drawdown_limit', 4.0)
+        stop_loss_pct = exit_config.get('hard_stop_loss', 0.05) * 100
+
+        # Calculate position size as % of portfolio
+        position_size_pct = (position.market_value / account.portfolio_value * 100) if account.portfolio_value > 0 else 10
+
+        # Calculate stop price
+        stop_price = position.avg_entry_price * (1 - stop_loss_pct / 100)
+
+        # Run in thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+
+        def _calculate():
+            return calculate_recovery_stats(
+                symbol=symbol,
+                entry_price=position.avg_entry_price,
+                current_price=position.current_price,
+                stop_price=stop_price,
+                take_profit_pct=take_profit_pct,
+                daily_loss_pct=daily_loss_pct,
+                daily_loss_limit_pct=daily_loss_limit,
+                position_size_pct=position_size_pct
+            )
+
+        stats = await loop.run_in_executor(_executor, _calculate)
+
+        return RecoveryStatsResponse(
+            recovery_probability=round(stats.recovery_probability, 1),
+            take_profit_probability=round(stats.take_profit_probability, 1),
+            stop_loss_probability=round(stats.stop_loss_probability, 1),
+            avg_max_drawdown=round(stats.avg_max_drawdown, 1),
+            avg_bars_to_recovery=round(stats.avg_bars_to_recovery, 0),
+            is_gap_entry=stats.is_gap_entry,
+            gap_percentage=round(stats.gap_percentage, 1) if stats.gap_percentage else None,
+            gap_win_rate=round(stats.gap_win_rate, 1) if stats.gap_win_rate else None,
+            current_drawdown_pct=round(stats.current_drawdown_pct, 2),
+            distance_to_stop_pct=round(stats.distance_to_stop_pct, 2),
+            distance_to_tp_pct=round(stats.distance_to_tp_pct, 2),
+            ev_cut_now=round(stats.ev_cut_now, 2),
+            ev_hold_to_breakeven=round(stats.ev_hold_to_breakeven, 2),
+            ev_hold_for_tp=round(stats.ev_hold_for_tp, 2),
+            recommendation=stats.recommendation,
+            recommendation_reason=stats.recommendation_reason,
+            risk_warning=stats.risk_warning
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/bot/status", response_model=BotStatusResponse)
 async def get_bot_status():
     """Get current bot status."""
@@ -1073,6 +1223,16 @@ async def start_bot():
         scanner_config = config.get('volatility_scanner', {})
         scanner = VolatilityScanner(scanner_config)
 
+        # Fetch hot stocks and add to pool
+        hot_stocks_config = config.get('hot_stocks', {})
+        if hot_stocks_config.get('enabled', False):
+            hot_feed = HotStocksFeed(hot_stocks_config)
+            hot_symbols = hot_feed.fetch()
+            if hot_symbols:
+                # Add hot stocks to scanner pool (they'll be fetched with the rest)
+                scanner_symbols = list(set(scanner_symbols) | set(hot_symbols))
+                print(f"[API] Added {len(hot_symbols)} hot stocks to scanner pool")
+
         # Fetch data and scan
         fetcher = YFinanceDataFetcher()
         end_date = datetime.now()
@@ -1080,7 +1240,7 @@ async def start_bot():
         # Use get_historical_data with limit=200 (same as scanner/scan endpoint)
         # This ensures enough bars for ATR calculation (scanner needs ~98 bars minimum)
         historical_data = {}
-        for symbol in scanner_symbols[:100]:  # Limit to avoid timeout
+        for symbol in scanner_symbols[:150]:  # Increased limit to include hot stocks
             try:
                 data = fetcher.get_historical_data(
                     symbol,
@@ -1125,28 +1285,33 @@ async def start_bot():
             }
         )
 
-    # Step 3: Start bot with scanned symbols
+    # Step 3: Start bot via systemd (bot runs its own scanner)
     try:
-        symbols_arg = ",".join(watchlist)
-        process = subprocess.Popen(
-            ["python3", "bot.py", "--symbols", symbols_arg],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
+        if not _start_bot_service():
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "reason": "bot_start_error",
+                    "message": "Failed to start bot service. Check systemctl --user status trading-bot"
+                }
+            )
 
-        # FIX (Jan 2026): Save PID to prevent duplicate bots
-        _write_bot_pid(process.pid)
+        # Get PID from systemd for status tracking
+        status = _get_bot_status()
+        pid = status.get("MainPID", "unknown")
 
         _bot_state["status"] = "running"
-        _bot_state["watchlist"] = watchlist
-        update_bot_state(status="running", last_action=f"Started with scanner: {', '.join(watchlist)} (PID: {process.pid})")
+        _bot_state["watchlist"] = watchlist  # Preview from API scanner
+        update_bot_state(status="running", last_action=f"Started via systemd (PID: {pid})")
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail={
                 "reason": "bot_start_error",
-                "message": f"Failed to start bot process: {str(e)}"
+                "message": f"Failed to start bot service: {str(e)}"
             }
         )
 
@@ -1154,30 +1319,31 @@ async def start_bot():
         status="started",
         watchlist=watchlist,
         scanner_ran_at=datetime.now().isoformat(),
-        message=f"Bot started with {len(watchlist)} scanned stocks: {', '.join(watchlist)}"
+        message=f"Bot started via systemd. Scanner preview: {', '.join(watchlist)}"
     )
 
 
 @app.post("/api/bot/stop")
 async def stop_bot():
-    """Stop the trading bot."""
+    """Stop the trading bot via systemd."""
     global _bot_state
 
-    # FIX (Jan 2026): Actually kill the bot process instead of just updating state
-    pid = _read_bot_pid()
+    # Get current status before stopping
+    status = _get_bot_status()
+    pid = status.get("MainPID", "unknown")
     was_running = _is_bot_running()
 
     if was_running:
-        killed = _kill_bot_process()
-        if killed:
+        stopped = _stop_bot_service()
+        if stopped:
             _bot_state["status"] = "stopped"
-            _bot_state["last_action"] = f"Bot stopped (killed PID {pid})"
+            _bot_state["last_action"] = f"Bot stopped via systemd (PID {pid})"
             _bot_state["last_action_time"] = datetime.now().isoformat()
-            return {"success": True, "status": "stopped", "killed_pid": pid}
+            return {"success": True, "status": "stopped", "stopped_pid": pid}
         else:
             raise HTTPException(
                 status_code=500,
-                detail={"reason": "kill_failed", "message": f"Failed to kill bot process (PID {pid})"}
+                detail={"reason": "stop_failed", "message": "Failed to stop bot service via systemd"}
             )
     else:
         # No process running, just update state
@@ -1212,18 +1378,28 @@ def _run_scanner_sync(top_n: int) -> ScannerResponse:
     FIX (Jan 7, 2026): Use parallel batch fetching for 5-10x speedup.
     """
     from core.scanner import VolatilityScanner
+    from core.hot_stocks import HotStocksFeed
     from core.data import YFinanceDataFetcher
 
     config = load_config()
     universe = load_universe()
     symbols = collect_scanner_symbols(universe)
 
+    # Add hot stocks to scanner pool
+    hot_stocks_config = config.get('hot_stocks', {})
+    if hot_stocks_config.get('enabled', False):
+        hot_feed = HotStocksFeed(hot_stocks_config)
+        hot_symbols = hot_feed.fetch()
+        if hot_symbols:
+            symbols = list(set(symbols) | set(hot_symbols))
+            print(f"[API] Scanner: added {len(hot_symbols)} hot stocks to pool")
+
     # FIX (Jan 7, 2026): Use parallel batch fetching instead of sequential loop
     # Old: 100 symbols x 0.3s = 30+ seconds
     # New: 100 symbols / 10 workers = ~3-5 seconds
     fetcher = YFinanceDataFetcher()
     historical_data = fetcher.get_historical_data_batch(
-        symbols[:100],  # Scan top 100 volatile symbols
+        symbols[:150],  # Increased to include hot stocks
         timeframe="1Hour",
         limit=200,
         max_workers=10

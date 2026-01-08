@@ -17,6 +17,15 @@ from core.broker import (
 )
 
 
+@pytest.fixture
+def allow_alpaca_in_tests():
+    """Fixture to temporarily allow AlpacaBroker in test environment."""
+    original = AlpacaBroker._allow_in_tests
+    AlpacaBroker._allow_in_tests = True
+    yield
+    AlpacaBroker._allow_in_tests = original
+
+
 class TestRetryableExceptions:
     """Test that retryable exception types are properly defined"""
 
@@ -58,6 +67,7 @@ class TestRetryableOrderError:
         assert err.original_exception == original
 
 
+@pytest.mark.usefixtures('allow_alpaca_in_tests')
 class TestSubmitOrderRetry:
     """Test that submit_order retries on transient failures"""
 
@@ -299,6 +309,7 @@ class TestSubmitOrderRetry:
         assert mock_api.submit_order.call_count == 2
 
 
+@pytest.mark.usefixtures('allow_alpaca_in_tests')
 class TestSubmitOrderRetryLogging:
     """Test that retry attempts are properly logged"""
 

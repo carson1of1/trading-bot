@@ -425,3 +425,46 @@ export async function getRiskMetrics(): Promise<RiskMetrics> {
   }
   return response.json();
 }
+
+// =============================================================================
+// Recovery Stats Types and API
+// =============================================================================
+
+export interface RecoveryStats {
+  // Core probabilities
+  recovery_probability: number;
+  take_profit_probability: number;
+  stop_loss_probability: number;
+
+  // Drawdown stats
+  avg_max_drawdown: number;
+  avg_bars_to_recovery: number;
+
+  // Gap context
+  is_gap_entry: boolean;
+  gap_percentage: number | null;
+  gap_win_rate: number | null;
+
+  // Current position context
+  current_drawdown_pct: number;
+  distance_to_stop_pct: number;
+  distance_to_tp_pct: number;
+
+  // Expected values
+  ev_cut_now: number;
+  ev_hold_to_breakeven: number;
+  ev_hold_for_tp: number;
+
+  // Recommendation
+  recommendation: "CUT" | "HOLD_TO_BE" | "HOLD_FOR_TP";
+  recommendation_reason: string;
+  risk_warning: string | null;
+}
+
+export async function getRecoveryStats(symbol: string, takeProfitPct: number = 5.0): Promise<RecoveryStats> {
+  const response = await fetch(`${API_BASE_URL}/api/positions/${symbol}/recovery-stats?take_profit_pct=${takeProfitPct}`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch recovery stats: ${response.status}`);
+  }
+  return response.json();
+}

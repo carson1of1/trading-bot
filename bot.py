@@ -17,6 +17,8 @@ Usage:
 
 import argparse
 import logging
+import os
+import sys
 import time
 import yaml
 from datetime import datetime, timedelta
@@ -37,6 +39,7 @@ from core import (
     TradeLogger,
     MarketHours,
     VolatilityScanner,
+    HotStocksFeed,
     DailyDrawdownGuard,
     DrawdownTier,
     LosingStreakGuard,
@@ -58,6 +61,26 @@ file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(logging.Formatter(log_format))
 logger.addHandler(file_handler)
 logger.info(f"Logging to {log_file}")
+
+# PID file for tracking bot process (used by API and watchdog)
+PID_FILE = Path(__file__).parent / 'logs' / 'bot.pid'
+
+
+def _write_pid_file():
+    """Write current process PID to file for tracking."""
+    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(os.getpid()))
+    logger.info(f"PID file written: {PID_FILE} (PID: {os.getpid()})")
+
+
+def _clear_pid_file():
+    """Clear PID file on shutdown."""
+    try:
+        if PID_FILE.exists():
+            PID_FILE.unlink()
+            logger.info("PID file cleared")
+    except OSError as e:
+        logger.warning(f"Failed to clear PID file: {e}")
 
 
 class TradingBot:
@@ -130,6 +153,14 @@ class TradingBot:
         elif self.config.get('volatility_scanner', {}).get('enabled', False):
             scanner_config = self.config.get('volatility_scanner', {})
             self.scanner = VolatilityScanner(scanner_config)
+
+            # Fetch hot stocks and add to scanner pool before scanning
+            hot_stocks_config = self.config.get('hot_stocks', {})
+            if hot_stocks_config.get('enabled', False):
+                hot_feed = HotStocksFeed(hot_stocks_config)
+                hot_symbols = hot_feed.fetch()
+                self.scanner.add_temporary_symbols(hot_symbols)
+
             scanned_symbols = self.scanner.scan()
             if scanned_symbols:
                 self.watchlist = scanned_symbols
@@ -163,7 +194,7 @@ class TradingBot:
         exit_config = self.config.get('exit_manager', {})
         exit_settings = {
             'hard_stop_pct': abs(exit_config.get('tier_0_hard_stop', -0.02)) * 100,  # Default -2% matches backtest
-            'profit_floor_pct': exit_config.get('tier_1_profit_floor', 0.02) * 100,
+            'profit_floor_activation_pct': exit_config.get('tier_1_profit_floor', 0.0125) * 100,  # FIX: correct key name
             'trailing_activation_pct': exit_config.get('tier_2_atr_trailing', 0.03) * 100,
             'partial_tp_pct': exit_config.get('tier_3_partial_take', 0.04) * 100,
             'partial_tp2_pct': exit_config.get('tier_4_partial_take2', 0.05) * 100,
@@ -226,6 +257,33 @@ class TradingBot:
         self.last_bar_time = None
         self.last_cycle_time = None
 
+    def run_preflight(self) -> bool:
+        """
+        Run preflight checks before enabling trading.
+
+        Returns:
+            True if all checks pass, False otherwise.
+        """
+        from core.preflight import PreflightChecklist
+
+        logger.info("Running preflight checks...")
+
+        checklist = PreflightChecklist(self.config, self.broker)
+        checklist.bot_dir = self.bot_dir
+        checklist.watchlist = self.watchlist
+
+        all_passed, results = checklist.run_all_checks()
+
+        if not all_passed:
+            failed = [r for r in results if not r.passed]
+            logger.error(f"PREFLIGHT FAILED: {len(failed)} check(s) failed")
+            for r in failed:
+                logger.error(f"  - {r.name}: {r.message}")
+            return False
+
+        logger.info("PREFLIGHT PASSED: All checks passed, trading enabled")
+        return True
+
     def sync_account(self):
         """Sync account state from broker."""
         try:
@@ -263,6 +321,18 @@ class TradingBot:
                     if not self.kill_switch_triggered:
                         self.kill_switch_triggered = True
                         logger.warning(f"KILL SWITCH: Daily loss {daily_loss_pct*100:.2f}% >= {max_daily_loss*100}% (equity=${self.portfolio_value:.2f}, start=${self.daily_starting_capital:.2f})")
+
+                        # ODE-121: Force liquidation on kill switch when enabled
+                        force_liquidate = self.config.get('risk_management', {}).get('force_liquidate_on_kill_switch', False)
+                        if force_liquidate:
+                            positions = self.broker.get_positions()
+                            if positions:
+                                logger.warning(f"KILL SWITCH LIQUIDATION: Force closing {len(positions)} position(s)")
+                                result = self.drawdown_guard.force_liquidate_all(self.broker, positions)
+                                if result.get('success'):
+                                    logger.warning(f"KILL SWITCH LIQUIDATION COMPLETE: {len(result.get('liquidated', []))} closed, {len(result.get('failed', []))} failed")
+                                else:
+                                    logger.error(f"KILL SWITCH LIQUIDATION FAILED: {result.get('reason', 'unknown')}")
 
             logger.debug(f"Account synced: cash=${self.cash:.2f}, portfolio=${self.portfolio_value:.2f}")
 
@@ -571,10 +641,15 @@ class TradingBot:
         """
         Check for entry signal using StrategyManager.
 
+        FIX (Jan 2026): Match backtest behavior by passing historical data
+        (excluding current bar) to strategies. The backtest uses:
+            historical_data = data.iloc[:i].copy()  # excludes bar i
+            current_price = data.iloc[i]['close']   # bar i's close
+
         Args:
             symbol: Stock symbol
-            data: Historical data with indicators
-            current_price: Current price
+            data: Historical data with indicators (includes current bar)
+            current_price: Current price (from the current bar)
 
         Returns:
             Signal dict with action, confidence, strategy, reasoning
@@ -582,7 +657,9 @@ class TradingBot:
         # Default no-signal
         no_signal = {'action': 'HOLD', 'confidence': 0, 'strategy': '', 'reasoning': ''}
 
-        if len(data) < 30:
+        # FIX (Jan 2026): Need 31 bars because we exclude current bar for strategy
+        # After exclusion, strategy sees 30 bars minimum
+        if len(data) < 31:
             return {**no_signal, 'reasoning': 'Insufficient data'}
 
         # Kill switch check
@@ -607,10 +684,15 @@ class TradingBot:
                 return {**no_signal, 'reasoning': f'Entry gate: {reason}'}
 
         try:
+            # FIX (Jan 2026): Pass historical data excluding current bar to match backtest
+            # Backtest uses data.iloc[:i] (excludes bar i), live should do the same
+            # This ensures strategies see the same indicator values in both modes
+            historical_data = data.iloc[:-1].copy()
+
             # Get signal from strategy manager
             signal = self.strategy_manager.get_best_signal(
                 symbol=symbol,
-                data=data,
+                data=historical_data,
                 current_price=current_price,
                 indicators=self.indicators
             )
@@ -2161,6 +2243,8 @@ def main():
                         help='Comma-separated list of symbols from scanner (overrides config)')
     parser.add_argument('--candle-delay', type=int, default=31,
                         help='Minutes after hour to run cycle (default: 31 for :30 bar alignment)')
+    parser.add_argument('--skip-preflight', action='store_true',
+                        help='Skip preflight checks (for manual/debug runs)')
     args = parser.parse_args()
 
     # Parse symbols if provided
@@ -2170,6 +2254,15 @@ def main():
         print(f"[SCANNER] Using {len(scanner_symbols)} symbols from scanner: {scanner_symbols}")
 
     bot = TradingBot(config_path=args.config, scanner_symbols=scanner_symbols)
+
+    # Run preflight checks (unless skipped)
+    if not args.skip_preflight:
+        if not bot.run_preflight():
+            logger.error("Exiting due to preflight failure")
+            sys.exit(1)
+    else:
+        logger.warning("Preflight checks SKIPPED (--skip-preflight flag)")
+
     eastern = pytz.timezone('America/New_York')
 
     # FIX (Jan 7, 2026): Crash protection - track consecutive failures to prevent infinite loops
@@ -2179,7 +2272,27 @@ def main():
 
     try:
         if bot.start():
+            _write_pid_file()  # Write PID so API/watchdog can track us
             logger.info(f"Bot started with candle-delay={args.candle_delay} minutes")
+
+            # FIX (Jan 8, 2026): Wait for candle boundary before first cycle
+            # Previously bot would trade immediately on startup regardless of time
+            # Now it waits until the proper candle close time (e.g., :31 past hour)
+            now = datetime.now(eastern)
+            current_minute = now.minute
+
+            # Check if we're NOT at the candle boundary (within 2 min tolerance)
+            target_minute = args.candle_delay
+            if abs(current_minute - target_minute) > 2 and abs(current_minute - target_minute) < 58:
+                wait_seconds = get_seconds_until_next_hour(buffer_minutes=args.candle_delay)
+                next_run = now + timedelta(seconds=wait_seconds)
+                logger.info(
+                    f"STARTUP_WAIT | Not at candle boundary (current: :{current_minute:02d}, target: :{target_minute:02d}) | "
+                    f"Waiting {wait_seconds//60}m {wait_seconds%60}s until {next_run.strftime('%H:%M')} EST"
+                )
+                time.sleep(wait_seconds)
+            else:
+                logger.info(f"STARTUP | At candle boundary (:{current_minute:02d}), running first cycle immediately")
 
             # FIX (Jan 2026): Smart hourly scheduling - align to candle boundaries
             # Instead of sleeping 3600s from start, wait until :02 past next hour
@@ -2232,6 +2345,7 @@ def main():
         logger.critical(f"FATAL MAIN LOOP ERROR: {e}", exc_info=True)
     finally:
         bot.stop()
+        _clear_pid_file()  # Clean up PID file on shutdown
 
 
 if __name__ == '__main__':
