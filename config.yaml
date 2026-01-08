@@ -54,9 +54,9 @@ exit_manager:
   tier_2_atr_trailing: 0.02
   tier_3_partial_take: 0.03
   max_hold_hours: 48
-  eod_close: false
+  eod_close: true  # Close all positions at 3 PM ET (matches backtest)
 trailing_stop:
-  enabled: true
+  enabled: false  # DISABLED - was killing profits at tight settings (0.15%)
   activation_pct: 0.15
   trail_pct: 0.15
   move_to_breakeven: true

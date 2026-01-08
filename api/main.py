@@ -144,6 +144,10 @@ class BacktestRequest(BaseModel):
     longs_only: bool = Field(default=False, description="Only take LONG positions")
     shorts_only: bool = Field(default=False, description="Only take SHORT positions")
     initial_capital: float = Field(default=10000.0, ge=1000, le=10000000, description="Starting capital")
+    # Trailing stop parameters - DISABLED by default (was killing profits at tight settings)
+    trailing_stop_enabled: bool = Field(default=False, description="Enable trailing stop loss")
+    trailing_activation_pct: float = Field(default=0.15, ge=0.1, le=10.0, description="% profit to activate trailing stop")
+    trailing_trail_pct: float = Field(default=0.15, ge=0.1, le=10.0, description="% to trail below peak")
 
 
 class TradeResult(BaseModel):
