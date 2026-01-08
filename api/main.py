@@ -7,14 +7,22 @@ Provides REST API endpoints for running backtests with scanner-selected symbols.
 import sys
 import os
 import signal
+import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi import FastAPI, HTTPException
+
+# FIX (Jan 7, 2026): Thread pool for running blocking operations with timeouts
+# Prevents long-running backtests/scans from blocking the API indefinitely
+_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="api_worker")
+BACKTEST_TIMEOUT_SECONDS = 300  # 5 minutes max for backtest
+SCANNER_TIMEOUT_SECONDS = 60   # 1 minute max for scanner
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import yaml
@@ -1197,73 +1205,149 @@ async def get_settings():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _run_scanner_sync(top_n: int) -> ScannerResponse:
+    """
+    Synchronous scanner runner - executed in thread pool with timeout.
+    FIX (Jan 7, 2026): Extracted to allow timeout wrapper in async endpoint.
+    FIX (Jan 7, 2026): Use parallel batch fetching for 5-10x speedup.
+    """
+    from core.scanner import VolatilityScanner
+    from core.data import YFinanceDataFetcher
+
+    config = load_config()
+    universe = load_universe()
+    symbols = collect_scanner_symbols(universe)
+
+    # FIX (Jan 7, 2026): Use parallel batch fetching instead of sequential loop
+    # Old: 100 symbols x 0.3s = 30+ seconds
+    # New: 100 symbols / 10 workers = ~3-5 seconds
+    fetcher = YFinanceDataFetcher()
+    historical_data = fetcher.get_historical_data_batch(
+        symbols[:100],  # Scan top 100 volatile symbols
+        timeframe="1Hour",
+        limit=200,
+        max_workers=10
+    )
+
+    if not historical_data:
+        return ScannerResponse(results=[], scanned_at=datetime.now().isoformat())
+
+    # Run scanner
+    scanner_config = config.get("volatility_scanner", {})
+    scanner_config["top_n"] = top_n
+    scanner = VolatilityScanner(scanner_config)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    top_symbols = scanner.scan_historical(today, list(historical_data.keys()), historical_data)
+
+    # Build results with current prices
+    scanner_results = []
+    for symbol in top_symbols:
+        df = historical_data.get(symbol)
+        if df is not None and not df.empty:
+            current_price = float(df['close'].iloc[-1])
+            # Calculate ATR ratio
+            high = df['high'].tail(14)
+            low = df['low'].tail(14)
+            close = df['close'].tail(14)
+            tr = pd.concat([high - low, abs(high - close.shift(1)), abs(low - close.shift(1))], axis=1).max(axis=1)
+            atr = tr.mean()
+            atr_ratio = atr / current_price if current_price > 0 else 0
+
+            # Volume ratio
+            vol_avg = df['volume'].tail(20).mean()
+            vol_recent = df['volume'].tail(5).mean()
+            vol_ratio = vol_recent / vol_avg if vol_avg > 0 else 1
+
+            scanner_results.append(ScannerResult(
+                symbol=symbol,
+                atr_ratio=round(atr_ratio, 4),
+                volume_ratio=round(vol_ratio, 2),
+                composite_score=round(atr_ratio * vol_ratio, 4),
+                current_price=round(current_price, 2)
+            ))
+
+    return ScannerResponse(
+        results=scanner_results,
+        scanned_at=datetime.now().isoformat()
+    )
+
+
 @app.get("/api/scanner/scan", response_model=ScannerResponse)
 async def run_scanner(top_n: int = 10):
-    """Run volatility scanner and return top N symbols."""
+    """Run volatility scanner and return top N symbols.
+
+    FIX (Jan 7, 2026): Added timeout to prevent API from hanging indefinitely.
+    Scanner runs in thread pool with 1-minute timeout.
+    """
     try:
-        from core.scanner import VolatilityScanner
-        from core.data import YFinanceDataFetcher
+        # Run scanner in thread pool with timeout
+        loop = asyncio.get_event_loop()
+        future = loop.run_in_executor(_executor, _run_scanner_sync, top_n)
 
-        config = load_config()
-        universe = load_universe()
-        symbols = collect_scanner_symbols(universe)
+        try:
+            result = await asyncio.wait_for(future, timeout=SCANNER_TIMEOUT_SECONDS)
+            return result
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail=f"Scanner timed out after {SCANNER_TIMEOUT_SECONDS} seconds. Try again later."
+            )
 
-        # Fetch historical data for all symbols
-        fetcher = YFinanceDataFetcher()
-        historical_data = {}
-
-        for symbol in symbols[:100]:  # Scan top 100 volatile symbols
-            try:
-                df = fetcher.get_historical_data(symbol, timeframe="1Hour", limit=200)
-                if df is not None and not df.empty:
-                    historical_data[symbol] = df
-            except Exception:
-                continue
-
-        if not historical_data:
-            return ScannerResponse(results=[], scanned_at=datetime.now().isoformat())
-
-        # Run scanner
-        scanner_config = config.get("volatility_scanner", {})
-        scanner_config["top_n"] = top_n
-        scanner = VolatilityScanner(scanner_config)
-
-        today = datetime.now().strftime("%Y-%m-%d")
-        top_symbols = scanner.scan_historical(today, list(historical_data.keys()), historical_data)
-
-        # Build results with current prices
-        scanner_results = []
-        for symbol in top_symbols:
-            df = historical_data.get(symbol)
-            if df is not None and not df.empty:
-                current_price = float(df['close'].iloc[-1])
-                # Calculate ATR ratio
-                high = df['high'].tail(14)
-                low = df['low'].tail(14)
-                close = df['close'].tail(14)
-                tr = pd.concat([high - low, abs(high - close.shift(1)), abs(low - close.shift(1))], axis=1).max(axis=1)
-                atr = tr.mean()
-                atr_ratio = atr / current_price if current_price > 0 else 0
-
-                # Volume ratio
-                vol_avg = df['volume'].tail(20).mean()
-                vol_recent = df['volume'].tail(5).mean()
-                vol_ratio = vol_recent / vol_avg if vol_avg > 0 else 1
-
-                scanner_results.append(ScannerResult(
-                    symbol=symbol,
-                    atr_ratio=round(atr_ratio, 4),
-                    volume_ratio=round(vol_ratio, 2),
-                    composite_score=round(atr_ratio * vol_ratio, 4),
-                    current_price=round(current_price, 2)
-                ))
-
-        return ScannerResponse(
-            results=scanner_results,
-            scanned_at=datetime.now().isoformat()
-        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _run_backtest_sync(request: BacktestRequest) -> BacktestResponse:
+    """
+    Synchronous backtest runner - executed in thread pool with timeout.
+    FIX (Jan 7, 2026): Extracted to allow timeout wrapper in async endpoint.
+    """
+    # Load config and universe
+    config = load_config()
+    universe = load_universe()
+
+    # Set scanner enabled with top_n from request
+    if "volatility_scanner" not in config:
+        config["volatility_scanner"] = {}
+    config["volatility_scanner"]["enabled"] = True
+    config["volatility_scanner"]["top_n"] = request.top_n
+
+    # Calculate date range
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=request.days)).strftime("%Y-%m-%d")
+
+    # Collect all symbols from scanner_universe
+    symbols = collect_scanner_symbols(universe)
+
+    if not symbols:
+        return BacktestResponse(
+            success=False,
+            error="No symbols found in scanner_universe"
+        )
+
+    # Override trailing stop settings from request
+    if "trailing_stop" not in config:
+        config["trailing_stop"] = {}
+    config["trailing_stop"]["enabled"] = request.trailing_stop_enabled
+    config["trailing_stop"]["activation_pct"] = request.trailing_activation_pct / 100.0  # Convert % to decimal
+    config["trailing_stop"]["trail_pct"] = request.trailing_trail_pct / 100.0  # Convert % to decimal
+
+    # Create and run backtest
+    backtester = Backtest1Hour(
+        initial_capital=request.initial_capital,
+        config=config,
+        longs_only=request.longs_only,
+        shorts_only=request.shorts_only,
+        scanner_enabled=True
+    )
+
+    results = backtester.run(symbols, start_date, end_date)
+
+    # Format and return results
+    return format_backtest_results(results, symbols)
 
 
 @app.post("/api/backtest", response_model=BacktestResponse)
@@ -1273,44 +1357,23 @@ async def run_backtest(request: BacktestRequest):
 
     The scanner will select the top N volatile stocks from the scanner_universe
     each day during the backtest period.
+
+    FIX (Jan 7, 2026): Added timeout to prevent API from hanging indefinitely.
+    Backtest runs in thread pool with 5-minute timeout.
     """
     try:
-        # Load config and universe
-        config = load_config()
-        universe = load_universe()
+        # Run backtest in thread pool with timeout
+        loop = asyncio.get_event_loop()
+        future = loop.run_in_executor(_executor, _run_backtest_sync, request)
 
-        # Set scanner enabled with top_n from request
-        if "volatility_scanner" not in config:
-            config["volatility_scanner"] = {}
-        config["volatility_scanner"]["enabled"] = True
-        config["volatility_scanner"]["top_n"] = request.top_n
-
-        # Calculate date range
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        start_date = (datetime.now() - timedelta(days=request.days)).strftime("%Y-%m-%d")
-
-        # Collect all symbols from scanner_universe
-        symbols = collect_scanner_symbols(universe)
-
-        if not symbols:
+        try:
+            result = await asyncio.wait_for(future, timeout=BACKTEST_TIMEOUT_SECONDS)
+            return result
+        except asyncio.TimeoutError:
             return BacktestResponse(
                 success=False,
-                error="No symbols found in scanner_universe"
+                error=f"Backtest timed out after {BACKTEST_TIMEOUT_SECONDS} seconds. Try reducing the number of days or symbols."
             )
-
-        # Create and run backtest
-        backtester = Backtest1Hour(
-            initial_capital=request.initial_capital,
-            config=config,
-            longs_only=request.longs_only,
-            shorts_only=request.shorts_only,
-            scanner_enabled=True
-        )
-
-        results = backtester.run(symbols, start_date, end_date)
-
-        # Format and return results
-        return format_backtest_results(results, symbols)
 
     except Exception as e:
         return BacktestResponse(

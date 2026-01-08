@@ -2088,6 +2088,11 @@ def main():
     bot = TradingBot(config_path=args.config, scanner_symbols=scanner_symbols)
     eastern = pytz.timezone('America/New_York')
 
+    # FIX (Jan 7, 2026): Crash protection - track consecutive failures to prevent infinite loops
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 5
+    FAILURE_BACKOFF_SECONDS = [60, 120, 300, 600, 900]  # Exponential backoff: 1m, 2m, 5m, 10m, 15m
+
     try:
         if bot.start():
             logger.info(f"Bot started with candle-delay={args.candle_delay} minutes")
@@ -2097,9 +2102,35 @@ def main():
             while bot.running:
                 now = datetime.now(eastern)
 
-                # Run trading cycle immediately on first iteration
-                logger.info(f"=== Running cycle at {now.strftime('%H:%M:%S')} EST ===")
-                bot.run_trading_cycle()
+                # FIX (Jan 7, 2026): Wrap trading cycle in try/except to prevent crashes
+                # Previously, any exception in run_trading_cycle() would crash the entire bot
+                try:
+                    logger.info(f"=== Running cycle at {now.strftime('%H:%M:%S')} EST ===")
+                    bot.run_trading_cycle()
+                    consecutive_failures = 0  # Reset on success
+                except Exception as e:
+                    consecutive_failures += 1
+                    logger.error(
+                        f"CYCLE_CRASH | Attempt {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES} | "
+                        f"Error: {e}",
+                        exc_info=True
+                    )
+
+                    # Check if we've hit max failures
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        logger.critical(
+                            f"FATAL: {MAX_CONSECUTIVE_FAILURES} consecutive cycle failures - "
+                            f"stopping bot to prevent damage"
+                        )
+                        bot.running = False
+                        break
+
+                    # Apply exponential backoff before retry
+                    backoff_idx = min(consecutive_failures - 1, len(FAILURE_BACKOFF_SECONDS) - 1)
+                    backoff_seconds = FAILURE_BACKOFF_SECONDS[backoff_idx]
+                    logger.warning(f"BACKOFF | Waiting {backoff_seconds}s before next attempt")
+                    time.sleep(backoff_seconds)
+                    continue  # Skip normal wait, go straight to next cycle attempt
 
                 # Calculate wait time until next hour + buffer
                 wait_seconds = get_seconds_until_next_hour(buffer_minutes=args.candle_delay)
@@ -2112,6 +2143,9 @@ def main():
 
     except KeyboardInterrupt:
         logger.info("Received shutdown signal")
+    except Exception as e:
+        # FIX (Jan 7, 2026): Catch any exception that escapes the main loop
+        logger.critical(f"FATAL MAIN LOOP ERROR: {e}", exc_info=True)
     finally:
         bot.stop()
 

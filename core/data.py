@@ -4,10 +4,13 @@ from datetime import datetime, timedelta
 import pytz
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from .market_hours import MarketHours  # FIX (Dec 9, 2025): Check market hours for stale threshold
 from .config import get_global_config  # FIX (Dec 9, 2025): Load configurable stale thresholds
 from .cache import get_cache  # Disk cache for backtest data
+
+# FIX (Jan 7, 2026): Timeout for individual yfinance API calls to prevent hanging
+YFINANCE_TIMEOUT_SECONDS = 30
 
 class YFinanceDataFetcher:
     """
@@ -119,14 +122,24 @@ class YFinanceDataFetcher:
             # BUG FIX (Dec 2025): Record API call time for rate limiting
             self.last_api_call[symbol] = time.time()
 
-            try:
-                df = ticker.history(
+            # FIX (Jan 7, 2026): Add timeout to yfinance API call to prevent hanging
+            # yfinance doesn't have built-in timeout, so use ThreadPoolExecutor
+            def _fetch_history():
+                return ticker.history(
                     period=period,
                     interval=yf_interval,
                     actions=False,  # Don't include dividends/splits
                     auto_adjust=False,  # Don't auto-adjust prices
                     prepost=False  # No pre/post market data
                 )
+
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_fetch_history)
+                    df = future.result(timeout=YFINANCE_TIMEOUT_SECONDS)
+            except FuturesTimeoutError:
+                self.logger.warning(f"yfinance timeout for {symbol} after {YFINANCE_TIMEOUT_SECONDS}s")
+                return None
             except Exception as e:
                 self.logger.error(f"yfinance download error for {symbol}: {e}", exc_info=True)
                 return None
