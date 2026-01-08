@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import logging
+import os
 import sys
 import time
 import yaml
@@ -59,6 +60,26 @@ file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(logging.Formatter(log_format))
 logger.addHandler(file_handler)
 logger.info(f"Logging to {log_file}")
+
+# PID file for tracking bot process (used by API and watchdog)
+PID_FILE = Path(__file__).parent / 'logs' / 'bot.pid'
+
+
+def _write_pid_file():
+    """Write current process PID to file for tracking."""
+    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(os.getpid()))
+    logger.info(f"PID file written: {PID_FILE} (PID: {os.getpid()})")
+
+
+def _clear_pid_file():
+    """Clear PID file on shutdown."""
+    try:
+        if PID_FILE.exists():
+            PID_FILE.unlink()
+            logger.info("PID file cleared")
+    except OSError as e:
+        logger.warning(f"Failed to clear PID file: {e}")
 
 
 class TradingBot:
@@ -2134,6 +2155,7 @@ def main():
 
     try:
         if bot.start():
+            _write_pid_file()  # Write PID so API/watchdog can track us
             logger.info(f"Bot started with candle-delay={args.candle_delay} minutes")
 
             # FIX (Jan 2026): Smart hourly scheduling - align to candle boundaries
@@ -2187,6 +2209,7 @@ def main():
         logger.critical(f"FATAL MAIN LOOP ERROR: {e}", exc_info=True)
     finally:
         bot.stop()
+        _clear_pid_file()  # Clean up PID file on shutdown
 
 
 if __name__ == '__main__':

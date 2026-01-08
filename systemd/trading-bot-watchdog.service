@@ -1,0 +1,18 @@
+[Unit]
+Description=Trading Bot Watchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=carsonodell
+WorkingDirectory=/home/carsonodell/trading-bot
+ExecStart=/usr/bin/python3 watchdog.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+# Load environment variables from .env file (for email alerts)
+EnvironmentFile=/home/carsonodell/trading-bot/.env
+
+[Install]
+WantedBy=multi-user.target
