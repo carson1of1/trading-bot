@@ -240,8 +240,10 @@ class TestHotStocksYahooFetch:
 
         mock_get.side_effect = Exception("Network error")
 
-        result = feed.fetch()
-        assert result == []  # Should return empty on error
+        # Also mock cache to return None so it actually tries to fetch
+        with patch.object(feed, '_load_cache', return_value=None):
+            result = feed.fetch()
+            assert result == []  # Should return empty on error
 
 
 class TestHotStocksUniverseExclusion:
