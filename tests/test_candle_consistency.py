@@ -11,6 +11,7 @@ including current bar, while backtest excluded it. This caused different
 indicator values and signal timing between live and backtest.
 """
 
+import os
 import numpy as np
 import pandas as pd
 import pytest
@@ -239,6 +240,10 @@ proven_symbols:
         assert bot.strategy_manager.get_best_signal.called
 
 
+@pytest.mark.skipif(
+    not os.getenv('ALPACA_API_KEY'),
+    reason="Requires Alpaca credentials (integration test)"
+)
 class TestFakeTradeSimulation:
     """Test that a fake trade can go through end-to-end."""
 
