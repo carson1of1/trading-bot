@@ -21,7 +21,7 @@ from fastapi import FastAPI, HTTPException
 # FIX (Jan 7, 2026): Thread pool for running blocking operations with timeouts
 # Prevents long-running backtests/scans from blocking the API indefinitely
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="api_worker")
-BACKTEST_TIMEOUT_SECONDS = 900  # 15 minutes max for backtest (1-year needs ~10 mins)
+BACKTEST_TIMEOUT_SECONDS = 3600  # 60 minutes max for backtest (large universes can take 30+ mins)
 SCANNER_TIMEOUT_SECONDS = 60   # 1 minute max for scanner
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -166,6 +166,22 @@ def update_bot_state(status: str = None, last_action: str = None):
         _bot_state["last_action_time"] = datetime.now().isoformat()
 
 
+# Shared state file written by bot.py
+BOT_STATE_FILE = "/tmp/trading-bot-state.json"
+
+
+def read_bot_state_file() -> dict:
+    """Read bot state from shared file written by bot.py."""
+    try:
+        if os.path.exists(BOT_STATE_FILE):
+            with open(BOT_STATE_FILE, 'r') as f:
+                import json
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
 # Pydantic models for request/response
 class BacktestRequest(BaseModel):
     """Request model for backtest endpoint."""
@@ -173,7 +189,7 @@ class BacktestRequest(BaseModel):
     days: int = Field(default=60, ge=7, le=365, description="Number of days to backtest")
     longs_only: bool = Field(default=False, description="Only take LONG positions")
     shorts_only: bool = Field(default=False, description="Only take SHORT positions")
-    initial_capital: float = Field(default=10000.0, ge=1000, le=10000000, description="Starting capital")
+    initial_capital: float = Field(default=10000.0, ge=500, le=10000000, description="Starting capital")
     # Trailing stop parameters - DISABLED by default (was killing profits at tight settings)
     trailing_stop_enabled: bool = Field(default=False, description="Enable trailing stop loss")
     trailing_activation_pct: float = Field(default=0.15, ge=0.1, le=10.0, description="% profit to activate trailing stop")
@@ -483,6 +499,36 @@ class RecoveryStatsResponse(BaseModel):
     risk_warning: Optional[str] = None
 
 
+class SignalItem(BaseModel):
+    """Single signal from trading cycle."""
+    symbol: str
+    action: str  # BUY, SELL, HOLD
+    confidence: float
+    strategy: str
+    direction: str  # LONG, SHORT
+    price: float
+
+
+class SignalSummary(BaseModel):
+    """Summary of all signals from trading cycle."""
+    total_scanned: int
+    buy_signals: int
+    sell_signals: int
+    hold_signals: int
+    above_threshold: int
+    executed: int
+    blocked: int
+    block_reasons: Dict[str, int] = {}
+
+
+class LatestSignalsResponse(BaseModel):
+    """Response for latest signals endpoint."""
+    timestamp: Optional[str] = None
+    summary: Optional[SignalSummary] = None
+    top_signals: List[SignalItem] = []
+    has_data: bool = False
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Trading Bot API",
@@ -493,7 +539,7 @@ app = FastAPI(
 # Add CORS middleware for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "http://127.0.0.1:3001"],
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1|13\.58\.138\.4)(:\d+)?",  # Any port on localhost or AWS
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1128,20 +1174,102 @@ async def get_bot_status():
         if actual_running and _bot_state["status"] == "stopped":
             # Process is running but state says stopped (API restarted)
             _bot_state["status"] = "running"
-            _bot_state["last_action"] = "Bot detected running (recovered after API restart)"
         elif not actual_running and _bot_state["status"] == "running":
             # State says running but process died
             _bot_state["status"] = "stopped"
             _bot_state["last_action"] = "Bot stopped (process terminated)"
 
+        # Read watchlist from shared state file
+        bot_file_state = read_bot_state_file()
+        watchlist = bot_file_state.get('watchlist', [])
+
+        # Build useful status message when running
+        last_action = _bot_state["last_action"]
+        if actual_running:
+            try:
+                broker = get_broker()
+                positions = broker.list_positions()
+                if positions:
+                    symbols = [p.symbol for p in positions]
+                    total_pl = sum(float(p.unrealized_pl) for p in positions)
+                    pl_sign = "+" if total_pl >= 0 else ""
+                    last_action = f"Trading {', '.join(symbols)} ({pl_sign}${total_pl:.2f})"
+                elif watchlist:
+                    # Show watchlist when no positions
+                    if len(watchlist) <= 5:
+                        last_action = f"Watching: {', '.join(watchlist)}"
+                    else:
+                        last_action = f"Watching {len(watchlist)} stocks: {', '.join(watchlist[:5])}..."
+                else:
+                    last_action = "Scanning for opportunities"
+            except Exception:
+                # Fall back to showing watchlist if available
+                if watchlist:
+                    if len(watchlist) <= 5:
+                        last_action = f"Watching: {', '.join(watchlist)}"
+                    else:
+                        last_action = f"Watching {len(watchlist)} stocks: {', '.join(watchlist[:5])}..."
+                elif not last_action or "recovered" in (last_action or ""):
+                    last_action = "Bot running - waiting for next cycle"
+
         return BotStatusResponse(
             status=_bot_state["status"],
             mode=mode,
-            last_action=_bot_state["last_action"],
+            last_action=last_action,
             last_action_time=_bot_state["last_action_time"],
             kill_switch_triggered=_bot_state["kill_switch_triggered"],
-            watchlist=_bot_state.get("watchlist")
+            watchlist=watchlist if watchlist else None
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/signals/latest", response_model=LatestSignalsResponse)
+async def get_latest_signals():
+    """
+    Get the latest signal data from the most recent trading cycle.
+
+    Returns summary statistics and top signals from the bot's last scan.
+    """
+    try:
+        bot_state = read_bot_state_file()
+        signals_data = bot_state.get('signals')
+
+        if not signals_data:
+            return LatestSignalsResponse(has_data=False)
+
+        # Parse signal summary
+        summary_data = signals_data.get('summary', {})
+        summary = SignalSummary(
+            total_scanned=summary_data.get('total_scanned', 0),
+            buy_signals=summary_data.get('buy_signals', 0),
+            sell_signals=summary_data.get('sell_signals', 0),
+            hold_signals=summary_data.get('hold_signals', 0),
+            above_threshold=summary_data.get('above_threshold', 0),
+            executed=summary_data.get('executed', 0),
+            blocked=summary_data.get('blocked', 0),
+            block_reasons=summary_data.get('block_reasons', {})
+        )
+
+        # Parse top signals
+        top_signals = []
+        for sig in signals_data.get('top_signals', []):
+            top_signals.append(SignalItem(
+                symbol=sig.get('symbol', ''),
+                action=sig.get('action', 'HOLD'),
+                confidence=sig.get('confidence', 0),
+                strategy=sig.get('strategy', 'Unknown'),
+                direction=sig.get('direction', 'LONG'),
+                price=sig.get('price', 0)
+            ))
+
+        return LatestSignalsResponse(
+            timestamp=signals_data.get('timestamp'),
+            summary=summary,
+            top_signals=top_signals,
+            has_data=True
+        )
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
