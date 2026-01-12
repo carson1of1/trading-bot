@@ -241,6 +241,10 @@ class TradingBot:
         self.risk_manager = RiskManager(self.config.get('risk_management', {}))
         self.entry_gate = EntryGate(self.config.get('entry_gate', {}))
 
+        # Set data_fetcher on breakout scanner (needs to be after data_fetcher init)
+        if self.breakout_scanner:
+            self.breakout_scanner.data_fetcher = self.data_fetcher
+
         # Initialize ExitManager with proper format (matching backtest.py)
         # ExitManager expects {'risk': {settings}} format with percentages as whole numbers
         # FIX (Jan 2026): Aligned default values to match backtest.py exactly
