@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -28,6 +29,31 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+
+# Shared state file for API to read
+BOT_STATE_FILE = "/tmp/trading-bot-state.json"
+
+
+def write_bot_state(watchlist: List[str] = None, last_cycle: str = None, next_cycle: str = None, signals: Dict = None):
+    """Write bot state to shared file for API to read."""
+    try:
+        state = {}
+        if os.path.exists(BOT_STATE_FILE):
+            with open(BOT_STATE_FILE, 'r') as f:
+                state = json.load(f)
+        if watchlist is not None:
+            state['watchlist'] = watchlist
+        if last_cycle is not None:
+            state['last_cycle'] = last_cycle
+        if next_cycle is not None:
+            state['next_cycle'] = next_cycle
+        if signals is not None:
+            state['signals'] = signals
+        state['updated_at'] = datetime.now().isoformat()
+        with open(BOT_STATE_FILE, 'w') as f:
+            json.dump(state, f)
+    except Exception:
+        pass  # Don't let state file errors crash the bot
 
 from core import (
     YFinanceDataFetcher,
@@ -176,6 +202,9 @@ class TradingBot:
         logger.info(f"Mode: {self.mode}, Timeframe: {self.timeframe}")
         logger.info(f"Symbols: {self.watchlist}")
         logger.info(f"Risk: {self.config.get('risk_management', {}).get('max_position_size_pct')}% per trade")
+
+        # Write watchlist to shared state file for API
+        write_bot_state(watchlist=self.watchlist)
 
         if not self.watchlist:
             logger.warning("No symbols in universe! Bot will have nothing to trade.")
@@ -1099,8 +1128,9 @@ class TradingBot:
                     )
 
                 # Update tracking
-                # ODE-117: Track stop_order_id for bracket order cancellation on exit
+                # ODE-117: Track bracket order IDs for cancellation on exit
                 stop_order_id = getattr(order, 'stop_order_id', None)
+                take_profit_order_id = getattr(order, 'take_profit_order_id', None)
                 self.open_positions[symbol] = {
                     'symbol': symbol,
                     'qty': fill_qty,
@@ -1111,6 +1141,7 @@ class TradingBot:
                     'reasoning': reasoning,
                     'risk_amount': risk_amount,  # For losing streak guard (Jan 4, 2026)
                     'stop_order_id': stop_order_id,  # ODE-117: Broker-level stop for crash protection
+                    'take_profit_order_id': take_profit_order_id,  # Bracket take-profit leg
                 }
                 self.highest_prices[symbol] = fill_price
                 self.lowest_prices[symbol] = fill_price
@@ -1169,15 +1200,18 @@ class TradingBot:
             qty = exit_signal.get('qty', position['qty'])
             exit_reason = exit_signal.get('reason', 'unknown')
 
-            # ODE-117: Cancel broker-level stop order before exiting
-            # This prevents the bracket stop from triggering after we've closed the position
+            # ODE-117: Cancel ALL bracket leg orders before exiting
+            # Both stop-loss AND take-profit orders lock shares - must cancel both
             stop_order_id = position.get('stop_order_id')
-            if stop_order_id:
-                try:
-                    self.broker.cancel_order(stop_order_id)
-                    logger.debug(f"Cancelled broker stop order {stop_order_id} for {symbol}")
-                except Exception as e:
-                    logger.warning(f"Failed to cancel stop order {stop_order_id} for {symbol}: {e}")
+            take_profit_order_id = position.get('take_profit_order_id')
+
+            for order_id, order_type in [(stop_order_id, 'stop'), (take_profit_order_id, 'take-profit')]:
+                if order_id:
+                    try:
+                        self.broker.cancel_order(order_id)
+                        logger.info(f"Cancelled bracket {order_type} order {order_id} for {symbol}")
+                    except Exception as e:
+                        logger.warning(f"Failed to cancel {order_type} order {order_id} for {symbol}: {e}")
 
             # Submit exit order
             side = 'sell' if direction == 'LONG' else 'buy'
@@ -1712,6 +1746,7 @@ class TradingBot:
             qualifying_signals = []
             first_candle_logged = False  # FIX (Jan 2026): Log first candle for verification
             bar_validated = False  # FIX (Jan 2026): Track if we've validated the bar
+            candle_timestamp = None  # FIX (Jan 2026): Track candle timestamp for signal display
 
             for symbol in self.watchlist:
                 if symbol in self.open_positions:
@@ -1731,6 +1766,7 @@ class TradingBot:
                 # This verifies we're getting the correct completed candle
                 if not first_candle_logged and 'timestamp' in data.columns:
                     latest_ts = data['timestamp'].iloc[-1]
+                    candle_timestamp = latest_ts  # FIX (Jan 2026): Store for signal display
                     logger.info(f"CANDLE_CHECK | Latest bar timestamp: {latest_ts}")
                     first_candle_logged = True
 
@@ -1818,6 +1854,45 @@ class TradingBot:
                 f"Executed: {signal_stats['executed']} | "
                 f"Blocked: {signal_stats['blocked']} (reasons: {signal_stats['block_reasons']})"
             )
+
+            # Write signal data to shared state for UI
+            top_signals = []
+            for entry in qualifying_signals[:10]:  # Top 10 signals
+                sig = entry['signal']
+                top_signals.append({
+                    'symbol': entry['symbol'],
+                    'action': sig.get('action', 'HOLD'),
+                    'confidence': sig.get('confidence', 0),
+                    'strategy': sig.get('strategy', 'Unknown'),
+                    'direction': sig.get('direction', 'LONG'),
+                    'price': round(entry['price'], 2)
+                })
+
+            # FIX (Jan 2026): Use candle timestamp for signal display instead of current time
+            # Convert pandas Timestamp to string if needed
+            signal_timestamp = candle_timestamp
+            if signal_timestamp is not None:
+                if hasattr(signal_timestamp, 'isoformat'):
+                    signal_timestamp = signal_timestamp.isoformat()
+                else:
+                    signal_timestamp = str(signal_timestamp)
+            else:
+                signal_timestamp = datetime.now().isoformat()
+
+            write_bot_state(signals={
+                'timestamp': signal_timestamp,
+                'summary': {
+                    'total_scanned': signal_stats['total'],
+                    'buy_signals': signal_stats['buy'],
+                    'sell_signals': signal_stats['sell'],
+                    'hold_signals': signal_stats['hold'],
+                    'above_threshold': signal_stats['above_threshold'],
+                    'executed': signal_stats['executed'],
+                    'blocked': signal_stats['blocked'],
+                    'block_reasons': signal_stats['block_reasons']
+                },
+                'top_signals': top_signals
+            })
 
             logger.info(f"=== Cycle Complete: {len(self.open_positions)} positions ===")
 
