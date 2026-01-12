@@ -262,7 +262,7 @@ class TradingBot:
         self.use_tiered_exits = exit_config.get('enabled', True)
         # FIX (Jan 2026): Add EOD close logic to match backtest.py
         self.eod_close_enabled = exit_config.get('eod_close', False)
-        self.eod_close_bar_hour = 15  # 3 PM ET (15:00) - close before market close
+        self.eod_close_time = (15, 55)  # 3:55 PM ET - close 5 min before market close at 4 PM
         self.market_hours = MarketHours()
 
         # Strategy Manager
@@ -1032,7 +1032,8 @@ class TradingBot:
             import pytz
             market_tz = pytz.timezone('America/New_York')
             current_time = datetime.now(market_tz)
-            if current_time.hour >= self.eod_close_bar_hour:
+            eod_hour, eod_minute = self.eod_close_time
+            if current_time.hour > eod_hour or (current_time.hour == eod_hour and current_time.minute >= eod_minute):
                 return {
                     'exit': True,
                     'reason': 'eod_close',
@@ -1241,7 +1242,73 @@ class TradingBot:
                     except Exception as e:
                         logger.warning(f"Failed to cancel {order_type} order {order_id} for {symbol}: {e}")
 
-            # Submit exit order
+            # Use close_position which handles bracket order cancellation automatically
+            # This is more reliable than manual order submission when bracket orders exist
+            try:
+                close_success = self.broker.close_position(symbol)
+                if close_success:
+                    logger.info(f"Used close_position to exit {symbol}")
+                    # Get exit price from current price since close_position doesn't return order
+                    exit_price = exit_signal.get('price', 0)
+                    filled_qty = qty
+
+                    # Calculate PnL
+                    if direction == 'LONG':
+                        pnl = (exit_price - entry_price) * filled_qty
+                    else:
+                        pnl = (entry_price - exit_price) * filled_qty
+                    pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+                    if direction == 'SHORT':
+                        pnl_pct = -pnl_pct
+
+                    # Log trade
+                    self.trade_logger.log_trade({
+                        'symbol': symbol,
+                        'action': 'SELL' if direction == 'LONG' else 'BUY',
+                        'quantity': filled_qty,
+                        'price': exit_price,
+                        'strategy': position.get('strategy', 'Unknown'),
+                        'pnl': pnl,
+                        'exit_reason': exit_reason
+                    })
+
+                    # Record loss in entry gate
+                    if pnl < 0 and self.entry_gate:
+                        self.entry_gate.record_loss(datetime.now())
+
+                    # Record realized P&L in drawdown guard
+                    if self.drawdown_guard.enabled:
+                        self.drawdown_guard.record_realized_pnl(pnl)
+
+                    # Record trade in losing streak guard
+                    if self.losing_streak_guard.enabled:
+                        risk_amount = position.get('risk_amount', abs(pnl))
+                        self.losing_streak_guard.record_trade(
+                            symbol=symbol,
+                            realized_pnl=pnl,
+                            risk_amount=risk_amount,
+                            close_time=datetime.now()
+                        )
+
+                    # Clean up position tracking
+                    del self.open_positions[symbol]
+                    if symbol in self.highest_prices:
+                        del self.highest_prices[symbol]
+                    if symbol in self.lowest_prices:
+                        del self.lowest_prices[symbol]
+
+                    return {
+                        'filled': True,
+                        'price': exit_price,
+                        'qty': filled_qty,
+                        'pnl': pnl,
+                        'pnl_pct': pnl_pct,
+                        'reason': exit_reason
+                    }
+            except Exception as e:
+                logger.warning(f"close_position failed for {symbol}: {e}, trying manual order")
+
+            # Fallback: Submit exit order manually
             side = 'sell' if direction == 'LONG' else 'buy'
             order = self.broker.submit_order(
                 symbol=symbol,
