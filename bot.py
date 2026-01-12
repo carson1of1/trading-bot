@@ -1770,6 +1770,11 @@ class TradingBot:
                     logger.info(f"CANDLE_CHECK | Latest bar timestamp: {latest_ts}")
                     first_candle_logged = True
 
+                # FIX (Jan 12, 2026): Always capture timestamp from any symbol with data
+                # This ensures we have a candle timestamp even if first symbol had issues
+                if candle_timestamp is None and 'timestamp' in data.columns:
+                    candle_timestamp = data['timestamp'].iloc[-1]
+
                 # FIX (Jan 2026): Validate bar is COMPLETE before ANY entries
                 # This prevents trading on incomplete forming bars
                 if not bar_validated and 'timestamp' in data.columns:
@@ -1869,15 +1874,18 @@ class TradingBot:
                 })
 
             # FIX (Jan 2026): Use candle timestamp for signal display instead of current time
-            # Convert pandas Timestamp to string if needed
+            # FIX (Jan 12, 2026): Ensure timestamp always includes timezone for proper frontend display
             signal_timestamp = candle_timestamp
             if signal_timestamp is not None:
                 if hasattr(signal_timestamp, 'isoformat'):
                     signal_timestamp = signal_timestamp.isoformat()
                 else:
                     signal_timestamp = str(signal_timestamp)
+                logger.debug(f"Using candle timestamp for signals: {signal_timestamp}")
             else:
-                signal_timestamp = datetime.now().isoformat()
+                # Fallback: use current time in EST for consistency
+                signal_timestamp = datetime.now(eastern).isoformat()
+                logger.warning(f"candle_timestamp was None, using current time: {signal_timestamp}")
 
             write_bot_state(signals={
                 'timestamp': signal_timestamp,

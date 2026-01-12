@@ -10,15 +10,16 @@ export function SignalSummaryCard() {
     interval: 10000, // Refresh every 10 seconds
   });
 
-  // Format timestamp - show actual candle time (e.g., "10:00")
+  // Format timestamp - show in user's local timezone
   const formatTime = (isoTime: string | null) => {
     if (!isoTime) return "No data";
     const date = new Date(isoTime);
-    // Show the actual candle time in HH:MM format
+    // Show time in user's local timezone
     return date.toLocaleTimeString('en-US', {
       hour: 'numeric',
       minute: '2-digit',
-      hour12: true
+      hour12: true,
+      timeZoneName: 'short'
     });
   };
 
