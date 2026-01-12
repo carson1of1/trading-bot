@@ -32,6 +32,8 @@ from .risk import (
 )
 from .scanner import VolatilityScanner
 from .hot_stocks import HotStocksFeed
+from .premarket_scanner import PremarketScanner
+from .breakout_scanner import BreakoutScanner
 from .logger import TradeLogger
 from .simplified_exit import SimplifiedExitManager, RBasedPosition
 from .preflight import PreflightChecklist, CheckResult

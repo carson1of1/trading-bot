@@ -66,6 +66,8 @@ from core import (
     MarketHours,
     VolatilityScanner,
     HotStocksFeed,
+    PremarketScanner,
+    BreakoutScanner,
     DailyDrawdownGuard,
     DrawdownTier,
     LosingStreakGuard,
@@ -197,6 +199,28 @@ class TradingBot:
         else:
             self.scanner = None
             self.watchlist = static_watchlist
+
+        # Store static universe for pre-market/breakout scanning
+        self._static_universe = static_watchlist
+
+        # Initialize pre-market scanner (catches gap-ups before 9:30)
+        premarket_config = self.config.get('premarket_scanner', {})
+        if premarket_config.get('enabled', True):
+            self.premarket_scanner = PremarketScanner(premarket_config)
+            logger.info("PremarketScanner initialized")
+        else:
+            self.premarket_scanner = None
+
+        # Initialize breakout scanner (continuous intraday scanning)
+        breakout_config = self.config.get('breakout_scanner', {})
+        if breakout_config.get('enabled', True):
+            self.breakout_scanner = BreakoutScanner(breakout_config)
+            logger.info("BreakoutScanner initialized")
+        else:
+            self.breakout_scanner = None
+
+        # Store hot stocks feed for refreshing
+        self.hot_stocks_feed = HotStocksFeed(self.config.get('hot_stocks', {}))
 
         logger.info(f"Trading Bot initialized")
         logger.info(f"Mode: {self.mode}, Timeframe: {self.timeframe}")
@@ -1581,6 +1605,15 @@ class TradingBot:
             logger.info(f"=== Trading Cycle Start @ {now.strftime('%H:%M:%S')} EST ===")
             logger.info(f"Expecting candles from {expected_candle_hour}:00 hour")
 
+            # NEW (Jan 12, 2026): Refresh hot stocks and run breakout scan at start of cycle
+            # This catches new movers that appeared since last cycle
+            if now.hour >= 9 and now.hour < 16:  # Only during market hours
+                try:
+                    self.refresh_hot_stocks()
+                    self.run_breakout_scan()
+                except Exception as e:
+                    logger.warning(f"Scanner refresh failed (non-fatal): {e}")
+
             # 0. Reconcile broker state BEFORE syncing (detect divergence)
             self._reconcile_broker_state()
 
@@ -2090,6 +2123,131 @@ class TradingBot:
 
         return results
 
+    def run_premarket_scan(self) -> List[str]:
+        """
+        Run pre-market gap scanner to find stocks gapping up before 9:30.
+
+        Should be called at ~9:25 AM before the first trading cycle.
+        Adds gap-up candidates to the watchlist for the 9:30 candle.
+
+        Returns:
+            List of new symbols added from pre-market scan
+        """
+        if not self.premarket_scanner:
+            return []
+
+        try:
+            logger.info("Running pre-market gap scan...")
+            gap_symbols = self.premarket_scanner.get_gap_symbols(self._static_universe)
+
+            if gap_symbols:
+                # Add to scanner's temporary symbols
+                if self.scanner:
+                    self.scanner.add_temporary_symbols(gap_symbols)
+
+                # Merge with current watchlist
+                new_symbols = [s for s in gap_symbols if s not in self.watchlist]
+                if new_symbols:
+                    logger.info(f"PRE_MARKET_SCAN | Added {len(new_symbols)} gap-ups: {new_symbols}")
+                    # Add to watchlist (scanner will filter on next scan)
+                    self.watchlist = list(set(self.watchlist + new_symbols))
+                    write_bot_state(watchlist=self.watchlist)
+
+                return new_symbols
+
+        except Exception as e:
+            logger.error(f"Pre-market scan failed: {e}")
+
+        return []
+
+    def run_breakout_scan(self, data_cache: Dict[str, pd.DataFrame] = None) -> List[str]:
+        """
+        Run continuous breakout scanner to find stocks approaching resistance.
+
+        Should be called periodically during market hours.
+        Identifies stocks that may break out on the next candle.
+
+        Args:
+            data_cache: Optional pre-fetched data cache
+
+        Returns:
+            List of breakout candidate symbols
+        """
+        if not self.breakout_scanner:
+            return []
+
+        if not self.breakout_scanner.should_scan_now():
+            return self.breakout_scanner.get_candidate_symbols()
+
+        try:
+            logger.info("Running breakout setup scan...")
+            candidates = self.breakout_scanner.scan(
+                symbols=self._static_universe,
+                data_cache=data_cache
+            )
+
+            if candidates:
+                candidate_symbols = [c['symbol'] for c in candidates]
+
+                # Add top candidates to scanner pool
+                if self.scanner:
+                    self.scanner.add_temporary_symbols(candidate_symbols[:20])
+
+                logger.info(
+                    f"BREAKOUT_SCAN | Found {len(candidates)} setups: "
+                    f"{candidate_symbols[:5]}..."
+                )
+
+                return candidate_symbols
+
+        except Exception as e:
+            logger.error(f"Breakout scan failed: {e}")
+
+        return []
+
+    def refresh_hot_stocks(self) -> List[str]:
+        """
+        Refresh hot stocks feed and merge with breakout candidates.
+
+        Called at start of each trading cycle to catch new movers.
+
+        Returns:
+            List of symbols added to watchlist
+        """
+        new_symbols = []
+
+        try:
+            # Refresh hot stocks
+            if self.hot_stocks_feed and self.hot_stocks_feed.enabled:
+                # Clear cache to get fresh data
+                self.hot_stocks_feed.clear_cache()
+                hot_symbols = self.hot_stocks_feed.fetch()
+
+                if hot_symbols:
+                    logger.info(f"HOT_STOCKS | Fetched {len(hot_symbols)} hot symbols")
+
+                    # Merge with breakout candidates if available
+                    if self.breakout_scanner:
+                        combined = self.breakout_scanner.merge_with_hot_stocks(
+                            hot_symbols, max_total=50
+                        )
+                    else:
+                        combined = hot_symbols
+
+                    # Add to scanner pool
+                    if self.scanner:
+                        self.scanner.add_temporary_symbols(combined)
+
+                    # Track new symbols
+                    new_symbols = [s for s in combined if s not in self.watchlist]
+                    if new_symbols:
+                        logger.info(f"HOT_STOCKS | New symbols: {new_symbols[:10]}...")
+
+        except Exception as e:
+            logger.error(f"Hot stocks refresh failed: {e}")
+
+        return new_symbols
+
     def start(self):
         """Start the trading bot."""
         if not self.watchlist:
@@ -2363,9 +2521,28 @@ def main():
             # Now it waits until the proper candle close time (e.g., :31 past hour)
             now = datetime.now(eastern)
             current_minute = now.minute
+            current_hour = now.hour
+
+            # NEW (Jan 12, 2026): Run pre-market scan if before 9:30 AM
+            # This catches stocks gapping up before market open
+            if current_hour < 9 or (current_hour == 9 and current_minute < 30):
+                # Wait until 9:25 AM for pre-market scan
+                target_premarket = now.replace(hour=9, minute=25, second=0, microsecond=0)
+                if now < target_premarket:
+                    wait_premarket = (target_premarket - now).total_seconds()
+                    if wait_premarket > 0 and wait_premarket < 3600:  # Max 1 hour wait
+                        logger.info(f"PRE_MARKET | Waiting until 9:25 AM for pre-market scan ({wait_premarket/60:.0f} min)")
+                        time.sleep(wait_premarket)
+
+                # Run pre-market scan
+                logger.info("=== Running Pre-Market Gap Scan ===")
+                bot.run_premarket_scan()
 
             # Check if we're NOT at the candle boundary (within 2 min tolerance)
             target_minute = args.candle_delay
+            now = datetime.now(eastern)  # Refresh time after potential pre-market wait
+            current_minute = now.minute
+
             if abs(current_minute - target_minute) > 2 and abs(current_minute - target_minute) < 58:
                 wait_seconds = get_seconds_until_next_hour(buffer_minutes=args.candle_delay)
                 next_run = now + timedelta(seconds=wait_seconds)
