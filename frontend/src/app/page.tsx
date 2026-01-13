@@ -4,6 +4,7 @@ import { useState } from "react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { MetricCard } from "@/components/cards/MetricCard";
 import { BotStatusCard } from "@/components/cards/BotStatusCard";
+import { SignalSummaryCard } from "@/components/cards/SignalSummaryCard";
 import { EquityCurveChart } from "@/components/charts/EquityCurveChart";
 import { MiniPositionsTable } from "@/components/cards/MiniPositionsTable";
 import { DollarSign, TrendingUp, Briefcase, Target, AlertTriangle } from "lucide-react";
@@ -15,12 +16,12 @@ export default function DashboardPage() {
 
   const { data: account, isLoading: accountLoading, error: accountError } = usePolling<AccountData>({
     fetcher: getAccount,
-    interval: 5000,
+    interval: 30000, // 30s - TradeLocker has strict rate limits
   });
 
   const { data: positionsData, isLoading: positionsLoading } = usePolling<PositionsData>({
     fetcher: getPositions,
-    interval: 5000,
+    interval: 30000, // 30s - TradeLocker has strict rate limits
   });
 
   const { data: equityHistoryData } = usePolling<EquityHistoryData>({
@@ -113,17 +114,18 @@ export default function DashboardPage() {
           />
         </div>
 
-        {/* Middle Row - Bot Status + Equity Curve */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* Middle Row - Bot Status + Signal Scanner */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <BotStatusCard />
-          <div className="lg:col-span-2">
-            <EquityCurveChart
-              data={equityData}
-              selectedPeriod={equityPeriod}
-              onPeriodChange={setEquityPeriod}
-            />
-          </div>
+          <SignalSummaryCard />
         </div>
+
+        {/* Equity Curve */}
+        <EquityCurveChart
+          data={equityData}
+          selectedPeriod={equityPeriod}
+          onPeriodChange={setEquityPeriod}
+        />
 
         {/* Bottom Row - Mini Positions Table */}
         <MiniPositionsTable positions={positions} />

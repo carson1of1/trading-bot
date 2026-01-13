@@ -1602,6 +1602,16 @@ class TradeLockerBroker(BrokerInterface):
         self._rate_limit_window = 60.0  # seconds
         self._rate_limit_max = 30  # Very conservative: 30 requests/minute
 
+        # Positions cache - avoid redundant API calls within same cycle
+        self._positions_cache: Optional[List[Position]] = None
+        self._positions_cache_time: float = 0
+        self._positions_cache_ttl: float = 5.0  # Cache for 5 seconds
+
+        # Account cache - similar caching for account data
+        self._account_cache: Optional[Account] = None
+        self._account_cache_time: float = 0
+        self._account_cache_ttl: float = 5.0  # Cache for 5 seconds
+
         # Authenticate on init
         self._authenticate()
         self.logger.info(f"TradeLockerBroker connected to {server} (account: {self._acc_num})")
@@ -1801,7 +1811,14 @@ class TradeLockerBroker(BrokerInterface):
         0=balance, 1=projectedBalance, 2=availableFunds, 3=blockedBalance,
         4=cashBalance, 5=unsettledCash, 6=withdrawalAvailable, 7=stocksValue,
         8=optionValue, 9=initialMarginReq, 10=maintMarginReq, etc.
+
+        Uses 5-second cache to avoid hitting rate limits.
         """
+        # Check cache first
+        now = time.time()
+        if self._account_cache is not None and (now - self._account_cache_time) < self._account_cache_ttl:
+            return self._account_cache
+
         self._check_rate_limit()
         try:
             response = self._requests.get(
@@ -1823,13 +1840,19 @@ class TradeLockerBroker(BrokerInterface):
             available_funds = float(details[2])   # availableFunds (buying power)
             cash_balance = float(details[4])      # cashBalance
 
-            return Account(
+            account = Account(
                 equity=projected_balance,
                 cash=cash_balance,
                 buying_power=available_funds,
                 portfolio_value=projected_balance,
                 last_equity=balance  # Use balance as previous equity approximation
             )
+
+            # Cache the result
+            self._account_cache = account
+            self._account_cache_time = time.time()
+
+            return account
 
         except Exception as e:
             self.logger.error(f"Failed to get account: {e}")
@@ -1841,7 +1864,14 @@ class TradeLockerBroker(BrokerInterface):
 
         TradeLocker returns positions as arrays with format:
         [position_id, ?, instrument_id, side, qty, avg_price, ?, ?, timestamp, unrealized_pl, ?]
+
+        Uses 5-second cache to avoid hitting rate limits (1 req/sec for positions).
         """
+        # Check cache first
+        now = time.time()
+        if self._positions_cache is not None and (now - self._positions_cache_time) < self._positions_cache_ttl:
+            return self._positions_cache
+
         self._check_rate_limit()
         try:
             response = self._requests.get(
@@ -1934,6 +1964,10 @@ class TradeLockerBroker(BrokerInterface):
                 else:
                     seen_symbols[pos.symbol] = i
 
+            # Cache the result
+            self._positions_cache = positions
+            self._positions_cache_time = time.time()
+
             return positions
 
         except Exception as e:
@@ -2010,6 +2044,13 @@ class TradeLockerBroker(BrokerInterface):
             raise BrokerAPIError(f"Failed to list orders: {e}")
 
     @retry_on_failure(max_retries=3, delay=2.0, backoff=2.0)
+    def _invalidate_cache(self):
+        """Invalidate position and account caches after order activity."""
+        self._positions_cache = None
+        self._positions_cache_time = 0
+        self._account_cache = None
+        self._account_cache_time = 0
+
     def submit_order(
         self,
         symbol: str,
@@ -2022,6 +2063,9 @@ class TradeLockerBroker(BrokerInterface):
         **kwargs
     ) -> Order:
         """Submit order to TradeLocker with fill verification for market orders."""
+        # Invalidate cache since positions will change
+        self._invalidate_cache()
+
         self._check_rate_limit()
         symbol = symbol.upper().strip()
         side = side.lower()
