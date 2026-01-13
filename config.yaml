@@ -1,136 +1,136 @@
-mode: PAPER
-timeframe: 1Hour
-purpose: capital
-shorts_only: false
-longs_only: false
+breakout_scanner:
+  enabled: false  # Disabled for TradeLocker - scanned symbols may not exist there
+  lookback_bars: 20
+  max_candidates: 30
+  max_price: 500.0
+  min_atr_pct: 2.0
+  min_price: 5.0
+  proximity_pct: 2.0
+  scan_interval_minutes: 15
 broker:
-  paper_endpoint: https://paper-api.alpaca.markets
   live_endpoint: https://api.alpaca.markets
-trading:
-  watchlist_file: universe.yaml
-  lookback_period: 200
-  warmup_bars: 200
-risk_management:
-  max_position_size_pct: 15      # 15% per position
-  max_portfolio_risk_pct: 30.0
-  stop_loss_pct: 5.0
-  take_profit_pct: 5.0
-  max_daily_loss_pct: 4.0
-  emergency_stop_pct: 8.0
-  max_open_positions: 3
-  max_position_dollars: 999999  # Disabled - use percentage-based sizing only (scales with portfolio)
-  min_position_value: 50        # Force-close dust positions under this dollar value (ODE-123)
-  force_liquidate_on_kill_switch: true  # When kill switch triggers, immediately close all positions
+  paper_endpoint: https://paper-api.alpaca.markets
+capital_allocation:
+  percentage_of_total: 80
+  reserve_cash_pct: 10
 daily_drawdown_guard:
   enabled: true
-  warning_pct: 2.0          # -2.0%: Reduce position sizes
-  soft_limit_pct: 2.5       # -2.5%: Block new entries
-  medium_limit_pct: 3.0     # -3.0%: Partial liquidation
-  hard_limit_pct: 4.0       # -4.0%: Full liquidation + halt (funded challenge buffer)
-  partial_liquidation_pct: 50  # Close 50% at medium tier (ODE-90)
-  warning_size_multiplier: 0.5
-  tighten_stops_at_soft: true
+  hard_limit_pct: 4.0
   liquidation_timeout_sec: 30
+  medium_limit_pct: 3.0
+  partial_liquidation_pct: 50
+  soft_limit_pct: 2.5
+  tighten_stops_at_soft: true
   use_market_orders: true
-losing_streak_guard:
-  enabled: true
-  losing_threshold_r: 0.5      # Trade counts as loss if pnl <= -0.5R
-  lookback_days: 3             # Rolling window
-  min_losing_trades: 2         # Trigger after this many losers
-  throttle_multiplier: 0.5     # Reduce size to 50%
+  warning_pct: 2.0
+  warning_size_multiplier: 0.5
+data_quality:
+  min_bars_required: 200
+  stale_threshold_minutes: 60
+  volume_filter_enabled: true
+debug:
+  log_all_signals: false
+  log_signal_components: false
 entry_gate:
   confidence_threshold: 80
-  max_trades_per_symbol_per_day: 2
-  min_time_between_trades_minutes: 120
   daily_loss_guard:
     enabled: true
     max_losing_trades_per_day: 2
-promotion_requirements:
-  min_profit_factor: 1.2
-  min_win_rate: 0.45
-  min_trade_count: 30
-  min_weeks_observed: 2
+  max_trades_per_symbol_per_day: 2
+  min_time_between_trades_minutes: 120
 exit_manager:
+  eod_close: true
+  max_hold_hours: 48
   tier_0_hard_stop: -0.05
-  tier_1_profit_floor: 0.0125  # 1.25% - actual value used (key mismatch means default is used)
+  tier_1_profit_floor: 0.0125
   tier_2_atr_trailing: 0.02
   tier_3_partial_take: 0.03
-  max_hold_hours: 48
-  eod_close: true  # Close all positions at 3 PM ET (matches backtest)
-trailing_stop:
-  enabled: false  # DISABLED - was killing profits at tight settings (0.15%)
-  activation_pct: 0.15
-  trail_pct: 0.15
-  move_to_breakeven: true
-data_quality:
-  stale_threshold_minutes: 60
-  min_bars_required: 200
-  volume_filter_enabled: true
+hot_stocks:
+  cache_hours: 20
+  enabled: false  # Disabled for TradeLocker - those symbols don't exist there
+  max_price: 1000
+  min_price: 5
+  min_volume: 500000
+  top_n: 50
+logging:
+  database: logs/trades_1hour.db
+  detailed_signals: false
+  track_mfe_mae: true
+longs_only: false
+losing_streak_guard:
+  enabled: true
+  lookback_days: 3
+  losing_threshold_r: 0.5
+  min_losing_trades: 2
+  throttle_multiplier: 0.5
+mode: TRADELOCKER
+parity_capture:
+  enabled: false
+  flush_interval: 1
+  include_bar_data: true
+  include_indicators: true
+  output_path: logs/parity_capture_1hour.jsonl
+premarket_scanner:
+  enabled: false  # Disabled for TradeLocker - scanned symbols may not exist there
+  max_gap_pct: 30.0
+  max_price: 500.0
+  max_symbols: 20
+  min_gap_pct: 3.0
+  min_premarket_volume: 50000
+  min_price: 5.0
+  scan_time: 09:25
+promotion_requirements:
+  min_profit_factor: 1.2
+  min_trade_count: 30
+  min_weeks_observed: 2
+  min_win_rate: 0.45
+purpose: capital
+risk_management:
+  emergency_stop_pct: 8.0
+  force_liquidate_on_kill_switch: true
+  max_daily_loss_pct: 4.0
+  max_open_positions: 3
+  max_portfolio_risk_pct: 30.0
+  max_position_dollars: 999999
+  max_position_size_pct: 8
+  min_position_value: 50
+  stop_loss_pct: 5.0
+  take_profit_pct: 5.0
+shorts_only: false
 strategies:
-  momentum:
-    enabled: false  # Disabled: catches end of moves, only $2 avg P&L
-    weight: 0.0
+  breakout:
+    enabled: true
+    weight: 0.4
   mean_reversion:
     enabled: false
     weight: 0.0
-  breakout:
-    enabled: true
-    weight: 0.4  # Increased: this is the main edge
   ml_ensemble:
+    enabled: false
+    weight: 0.0
+  momentum:
     enabled: false
     weight: 0.0
   vwap:
     enabled: false
     weight: 0.0
-logging:
-  database: logs/trades_1hour.db
-  detailed_signals: false
-  track_mfe_mae: true
-capital_allocation:
-  percentage_of_total: 80
-  reserve_cash_pct: 10
-parity_capture:
+timeframe: 1Hour
+trading:
+  lookback_period: 200
+  warmup_bars: 200
+  watchlist_file: universe_tradelocker.yaml
+trailing_stop:
+  activation_pct: 0.15
   enabled: false
-  output_path: logs/parity_capture_1hour.jsonl
-  include_indicators: true
-  include_bar_data: true
-  flush_interval: 1
+  move_to_breakeven: true
+  trail_pct: 0.15
 volatility_scanner:
-  enabled: true
-  top_n: 10
+  enabled: false  # Disabled for TradeLocker - use fixed symbol list instead
+  min_market_cap: 300000000
   min_price: 5
   min_volume: 500000
-  min_market_cap: 300000000
   refresh_time: 09:00
+  top_n: 10
   weights:
     atr_pct: 0.5
     daily_range_pct: 0.3
     volume_ratio: 0.2
-hot_stocks:
-  enabled: true              # Fetch top weekly movers at startup
-  top_n: 50                  # Number of gainers to fetch
-  min_price: 5               # Minimum stock price
-  max_price: 1000            # Maximum stock price
-  min_volume: 500000         # Minimum average volume
-  cache_hours: 20            # Hours to cache results
-premarket_scanner:
-  enabled: true              # Scan for gap-ups before 9:30 AM
-  scan_time: "09:25"         # Time to run pre-market scan (ET)
-  min_gap_pct: 3.0           # Minimum gap up percentage to consider
-  max_gap_pct: 30.0          # Maximum gap (filter pump & dumps)
-  min_price: 5.0             # Minimum price filter
-  max_price: 500.0           # Maximum price filter
-  min_premarket_volume: 50000   # Minimum pre-market volume
-  max_symbols: 20            # Max symbols to add from pre-market
-breakout_scanner:
-  enabled: true              # Continuous scan for breakout setups
-  scan_interval_minutes: 15  # How often to scan during market hours
-  proximity_pct: 2.0         # Within X% of resistance to consider
-  min_price: 5.0             # Minimum price filter
-  max_price: 500.0           # Maximum price filter
-  min_atr_pct: 2.0           # Minimum ATR as % of price
-  max_candidates: 30         # Max breakout candidates to track
-  lookback_bars: 20          # Bars for resistance calculation
-debug:
-  log_all_signals: false       # Log every signal (not just executed ones)
-  log_signal_components: false # Log indicator values that made up the signal

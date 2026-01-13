@@ -846,13 +846,17 @@ class AlpacaBroker(BrokerInterface):
 
             self.logger.info(f"Bracket order submitted: {alpaca_order.id}")
 
-            # Extract stop order ID from legs
+            # Extract stop and take-profit order IDs from legs
+            # Both must be cancelled before any exit to free locked shares
             stop_order_id = None
+            take_profit_order_id = None
             if hasattr(alpaca_order, 'legs') and alpaca_order.legs:
                 for leg in alpaca_order.legs:
-                    if hasattr(leg, 'type') and leg.type == 'stop':
-                        stop_order_id = leg.id
-                        break
+                    if hasattr(leg, 'type'):
+                        if leg.type == 'stop':
+                            stop_order_id = leg.id
+                        elif leg.type == 'limit':
+                            take_profit_order_id = leg.id
 
             order = Order(
                 id=alpaca_order.id,
@@ -866,8 +870,9 @@ class AlpacaBroker(BrokerInterface):
                 submitted_at=alpaca_order.submitted_at
             )
 
-            # Attach stop order ID for tracking
+            # Attach bracket leg order IDs for tracking
             order.stop_order_id = stop_order_id
+            order.take_profit_order_id = take_profit_order_id
 
             return order
 
@@ -1549,6 +1554,873 @@ class FakeBroker(BrokerInterface):
         self.logger.info(f"FakeBroker: Reset to initial state (cash=${self.initial_cash:,.2f})")
 
 
+class TradeLockerBroker(BrokerInterface):
+    """Broker implementation for TradeLocker API (prop firm trading via DNA Funded, etc.)
+
+    Uses direct REST API calls instead of the tradelocker package (which requires Python 3.11+).
+    """
+
+    def __init__(self, username: str, password: str, server: str,
+                 environment: str = "https://live.tradelocker.com"):
+        """
+        Initialize TradeLocker broker.
+
+        Args:
+            username: TradeLocker account email
+            password: TradeLocker account password
+            server: Server name (e.g., 'PTTSER')
+            environment: API base URL
+        """
+        import requests as req
+        self._requests = req
+
+        self.logger = logging.getLogger(__name__)
+        self.username = username
+        self.password = password
+        self.server = server
+        self.base_url = environment.rstrip('/') + '/backend-api'
+
+        # Auth tokens
+        self._access_token: Optional[str] = None
+        self._refresh_token: Optional[str] = None
+        self._token_expiry: Optional[datetime] = None
+
+        # Account info (populated on first auth)
+        self._account_id: Optional[str] = None
+        self._acc_num: Optional[str] = None
+
+        # Instrument cache: symbol -> {instrument_id, route_id}
+        self._instrument_cache: Dict[str, Dict[str, Any]] = {}
+        self._instrument_id_to_symbol: Dict[int, str] = {}
+        self._route_id_to_symbol: Dict[int, str] = {}  # Route ID -> symbol mapping
+
+        # Order counter for tracking
+        self._order_counter = 0
+
+        # Rate limiting - TradeLocker has strict limits, be conservative
+        self._request_times: List[float] = []
+        self._rate_limit_window = 60.0  # seconds
+        self._rate_limit_max = 30  # Very conservative: 30 requests/minute
+
+        # Authenticate on init
+        self._authenticate()
+        self.logger.info(f"TradeLockerBroker connected to {server} (account: {self._acc_num})")
+
+    def _check_rate_limit(self):
+        """Check if we're approaching rate limit and sleep if necessary."""
+        now = time.time()
+
+        # Remove requests older than the window
+        self._request_times = [t for t in self._request_times if now - t < self._rate_limit_window]
+
+        # Check if we're at the limit
+        if len(self._request_times) >= self._rate_limit_max:
+            oldest = self._request_times[0]
+            sleep_time = self._rate_limit_window - (now - oldest) + 0.5  # Add 500ms buffer
+            if sleep_time > 0:
+                self.logger.warning(f"TradeLocker rate limit approaching ({len(self._request_times)} reqs), sleeping {sleep_time:.1f}s")
+                time.sleep(sleep_time)
+                now = time.time()
+                self._request_times = [t for t in self._request_times if now - t < self._rate_limit_window]
+
+        # Record this request
+        self._request_times.append(now)
+
+    def _authenticate(self):
+        """Authenticate with TradeLocker and get JWT tokens."""
+        try:
+            response = self._requests.post(
+                f"{self.base_url}/auth/jwt/token",
+                json={
+                    "email": self.username,
+                    "password": self.password,
+                    "server": self.server
+                },
+                headers={"Content-Type": "application/json"}
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            self._access_token = data.get('accessToken')
+            self._refresh_token = data.get('refreshToken')
+
+            # Token typically expires in 1 hour, refresh before that
+            self._token_expiry = datetime.now(pytz.UTC) + timedelta(minutes=50)
+
+            # Get account info
+            self._fetch_account_info()
+
+        except Exception as e:
+            raise BrokerAPIError(f"TradeLocker authentication failed: {e}")
+
+    def _fetch_account_info(self):
+        """Fetch account ID and account number after auth."""
+        try:
+            response = self._requests.get(
+                f"{self.base_url}/auth/jwt/all-accounts",
+                headers=self._get_headers()
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            accounts = data.get('accounts', [])
+            if not accounts:
+                raise BrokerAPIError("No trading accounts found on TradeLocker")
+
+            # Use the first account (or could be configured)
+            account = accounts[0]
+            self._account_id = str(account.get('id'))
+            self._acc_num = str(account.get('accNum'))
+
+            self.logger.info(f"TradeLocker account: {self._acc_num} (ID: {self._account_id})")
+
+        except Exception as e:
+            raise BrokerAPIError(f"Failed to fetch TradeLocker account info: {e}")
+
+    def _get_headers(self) -> Dict[str, str]:
+        """Get request headers with auth token."""
+        self._ensure_token_valid()
+        headers = {
+            "Authorization": f"Bearer {self._access_token}",
+            "Content-Type": "application/json"
+        }
+        if self._acc_num:
+            headers["accNum"] = self._acc_num
+        return headers
+
+    def _ensure_token_valid(self):
+        """Refresh token if expired or close to expiry."""
+        if self._token_expiry and datetime.now(pytz.UTC) >= self._token_expiry:
+            self._refresh_auth_token()
+
+    def _refresh_auth_token(self):
+        """Refresh the JWT token."""
+        try:
+            response = self._requests.post(
+                f"{self.base_url}/auth/jwt/refresh",
+                json={"refreshToken": self._refresh_token},
+                headers={"Content-Type": "application/json"}
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            self._access_token = data.get('accessToken')
+            self._refresh_token = data.get('refreshToken')
+            self._token_expiry = datetime.now(pytz.UTC) + timedelta(minutes=50)
+
+            self.logger.debug("TradeLocker token refreshed")
+
+        except Exception as e:
+            # If refresh fails, re-authenticate
+            self.logger.warning(f"Token refresh failed, re-authenticating: {e}")
+            self._authenticate()
+
+    def _get_instrument_id(self, symbol: str) -> Dict[str, Any]:
+        """Get instrument ID and route ID for a symbol.
+
+        Returns dict with 'instrument_id' and 'route_id'.
+        """
+        symbol = symbol.upper().strip()
+
+        if symbol in self._instrument_cache:
+            return self._instrument_cache[symbol]
+
+        # Fetch all instruments if cache is empty
+        if not self._instrument_cache:
+            self._load_instruments()
+
+        if symbol in self._instrument_cache:
+            return self._instrument_cache[symbol]
+
+        raise BrokerAPIError(f"Symbol {symbol} not found on TradeLocker")
+
+    def _load_instruments(self):
+        """Load all tradable instruments into cache."""
+        self._check_rate_limit()
+        try:
+            response = self._requests.get(
+                f"{self.base_url}/trade/accounts/{self._account_id}/instruments",
+                headers=self._get_headers()
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            instruments = data.get('instruments', data.get('d', {}).get('instruments', []))
+            for inst in instruments:
+                name = inst.get('name', '').upper()
+                inst_id = inst.get('tradableInstrumentId')
+                routes = inst.get('routes', [])
+                route_id = routes[0].get('id') if routes else None
+
+                if name and inst_id:
+                    self._instrument_cache[name] = {
+                        'instrument_id': inst_id,
+                        'route_id': route_id
+                    }
+                    self._instrument_id_to_symbol[inst_id] = name
+
+                    # Also map all route IDs to this symbol
+                    for route in routes:
+                        rid = route.get('id')
+                        if rid:
+                            self._route_id_to_symbol[rid] = name
+
+            self.logger.info(f"Loaded {len(self._instrument_cache)} instruments from TradeLocker")
+
+        except Exception as e:
+            self.logger.error(f"Failed to load instruments: {e}")
+            raise BrokerAPIError(f"Failed to load instruments: {e}")
+
+    def _get_symbol_from_id(self, id_value: int) -> str:
+        """Reverse lookup: instrument ID or route ID to symbol."""
+        # Check instrument ID first
+        if id_value in self._instrument_id_to_symbol:
+            return self._instrument_id_to_symbol[id_value]
+
+        # Check route ID
+        if id_value in self._route_id_to_symbol:
+            return self._route_id_to_symbol[id_value]
+
+        # If not in cache, try to load instruments
+        if not self._instrument_id_to_symbol:
+            self._load_instruments()
+
+        # Try again after loading
+        if id_value in self._instrument_id_to_symbol:
+            return self._instrument_id_to_symbol[id_value]
+        if id_value in self._route_id_to_symbol:
+            return self._route_id_to_symbol[id_value]
+
+        return f"UNKNOWN_{id_value}"
+
+    @retry_on_failure(max_retries=3, delay=2.0, backoff=2.0)
+    def get_account(self) -> Account:
+        """Get account information from TradeLocker.
+
+        TradeLocker returns account details as an array. The field order is:
+        0=balance, 1=projectedBalance, 2=availableFunds, 3=blockedBalance,
+        4=cashBalance, 5=unsettledCash, 6=withdrawalAvailable, 7=stocksValue,
+        8=optionValue, 9=initialMarginReq, 10=maintMarginReq, etc.
+        """
+        self._check_rate_limit()
+        try:
+            response = self._requests.get(
+                f"{self.base_url}/trade/accounts/{self._account_id}/state",
+                headers=self._get_headers()
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # TradeLocker returns data in d.accountDetailsData as an array
+            details = data.get('d', {}).get('accountDetailsData', [])
+
+            if not details or len(details) < 5:
+                raise BrokerAPIError("Invalid account state response")
+
+            # Parse array values by index
+            balance = float(details[0])           # balance
+            projected_balance = float(details[1]) # projectedBalance (equity)
+            available_funds = float(details[2])   # availableFunds (buying power)
+            cash_balance = float(details[4])      # cashBalance
+
+            return Account(
+                equity=projected_balance,
+                cash=cash_balance,
+                buying_power=available_funds,
+                portfolio_value=projected_balance,
+                last_equity=balance  # Use balance as previous equity approximation
+            )
+
+        except Exception as e:
+            self.logger.error(f"Failed to get account: {e}")
+            raise BrokerAPIError(f"Failed to get account: {e}")
+
+    @retry_on_failure(max_retries=3, delay=2.0, backoff=2.0)
+    def get_positions(self) -> List[Position]:
+        """Get all open positions from TradeLocker.
+
+        TradeLocker returns positions as arrays with format:
+        [position_id, ?, instrument_id, side, qty, avg_price, ?, ?, timestamp, unrealized_pl, ?]
+        """
+        self._check_rate_limit()
+        try:
+            response = self._requests.get(
+                f"{self.base_url}/trade/accounts/{self._account_id}/positions",
+                headers=self._get_headers()
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # Handle various response formats from TradeLocker API
+            if isinstance(data, list):
+                # API returned positions array directly
+                positions_data = data
+            elif isinstance(data, dict):
+                positions_data = data.get('positions', data.get('d', {}).get('positions', []))
+            else:
+                self.logger.warning(f"Unexpected positions response type: {type(data)}")
+                positions_data = []
+            positions = []
+
+            for pos in positions_data:
+                # Handle array format: [id, ?, route_id, side, qty, avg_price, ?, ?, ts, unrealized_pl, ?]
+                if isinstance(pos, list):
+                    if len(pos) < 10:
+                        continue
+                    position_id = pos[0]
+                    route_id = int(pos[2]) if pos[2] else None
+                    symbol = self._get_symbol_from_id(route_id) if route_id else "UNKNOWN"
+                    # Log position details for debugging symbol mapping
+                    self.logger.info(f"Position parse: id={position_id}, route_id={route_id} -> symbol={symbol}")
+                    qty = abs(float(pos[4])) if pos[4] else 0
+                    side_str = str(pos[3]).lower() if pos[3] else ''
+                    side = 'long' if side_str == 'buy' else 'short'
+                    entry_price = float(pos[5]) if pos[5] else 0
+                    unrealized_pl = float(pos[9]) if pos[9] else 0
+                    # For CFDs/forex, entry_price is not in dollars, so don't derive current_price
+                    # Just use entry_price as placeholder, the unrealized_pl is what matters
+                    current_price = entry_price
+                else:
+                    # Handle dict format (legacy fallback)
+                    inst_id = pos.get('tradableInstrumentId')
+                    symbol = self._get_symbol_from_id(inst_id)
+                    qty = abs(float(pos.get('qty', pos.get('quantity', 0))))
+                    side_str = pos.get('side', '').lower()
+                    side = 'long' if side_str == 'buy' else 'short'
+                    entry_price = float(pos.get('avgPrice', pos.get('openPrice', 0)))
+                    current_price = float(pos.get('currentPrice', entry_price))
+                    unrealized_pl = float(pos.get('unrealizedPl', pos.get('profit', 0)))
+
+                # For TradeLocker CFDs/forex, entry_price isn't in dollars so percentage is meaningless
+                # market_value and unrealized_plpc only make sense for stocks
+                if isinstance(pos, list):
+                    # CFD/forex from TradeLocker - don't calculate percentage
+                    market_value = 0
+                    unrealized_plpc = 0
+                else:
+                    # Stock position - calculate normally
+                    market_value = qty * current_price
+                    unrealized_plpc = unrealized_pl / (entry_price * qty) if entry_price * qty > 0 else 0
+
+                positions.append(Position(
+                    symbol=symbol,
+                    qty=qty,
+                    side=side,
+                    avg_entry_price=entry_price,
+                    current_price=current_price,
+                    market_value=market_value,
+                    unrealized_pl=unrealized_pl,
+                    unrealized_plpc=unrealized_plpc
+                ))
+
+            # Safeguard: ensure unique symbols (append suffix if duplicates found)
+            seen_symbols = {}
+            for i, pos in enumerate(positions):
+                if pos.symbol in seen_symbols:
+                    # Duplicate found - make unique by appending index
+                    original = pos.symbol
+                    unique_symbol = f"{pos.symbol}_{i}"
+                    positions[i] = Position(
+                        symbol=unique_symbol,
+                        qty=pos.qty,
+                        side=pos.side,
+                        avg_entry_price=pos.avg_entry_price,
+                        current_price=pos.current_price,
+                        market_value=pos.market_value,
+                        unrealized_pl=pos.unrealized_pl,
+                        unrealized_plpc=pos.unrealized_plpc
+                    )
+                    self.logger.warning(f"Duplicate symbol {original} renamed to {unique_symbol}")
+                else:
+                    seen_symbols[pos.symbol] = i
+
+            return positions
+
+        except Exception as e:
+            self.logger.error(f"Failed to get positions: {e}")
+            raise BrokerAPIError(f"Failed to get positions: {e}")
+
+    def list_positions(self) -> List[Position]:
+        """Alias for get_positions."""
+        return self.get_positions()
+
+    def get_position(self, symbol: str) -> Optional[Position]:
+        """Get position for specific symbol."""
+        symbol = symbol.upper().strip()
+        positions = self.get_positions()
+        for pos in positions:
+            if pos.symbol == symbol:
+                return pos
+        return None
+
+    def get_open_orders(self) -> List[Order]:
+        """Get all open orders."""
+        return self.list_orders(status='open')
+
+    @retry_on_failure(max_retries=3, delay=2.0, backoff=2.0)
+    def list_orders(self, status: str = 'open') -> List[Order]:
+        """List orders with status filter."""
+        self._check_rate_limit()
+        try:
+            response = self._requests.get(
+                f"{self.base_url}/trade/accounts/{self._account_id}/orders",
+                headers=self._get_headers()
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # Handle various response formats from TradeLocker API
+            if isinstance(data, list):
+                # API returned orders array directly
+                orders_data = data
+            elif isinstance(data, dict):
+                orders_data = data.get('orders', data.get('d', {}).get('orders', []))
+            else:
+                self.logger.warning(f"Unexpected orders response type: {type(data)}")
+                orders_data = []
+            orders = []
+
+            for ord in orders_data:
+                inst_id = ord.get('tradableInstrumentId')
+                symbol = self._get_symbol_from_id(inst_id)
+
+                order_status = ord.get('status', '').lower()
+
+                # Filter by status if needed
+                if status == 'open' and order_status not in ['new', 'pending', 'working']:
+                    continue
+
+                orders.append(Order(
+                    id=str(ord.get('id')),
+                    symbol=symbol,
+                    qty=float(ord.get('qty', ord.get('quantity', 0))),
+                    side=ord.get('side', '').lower(),
+                    type=ord.get('type', 'market').lower(),
+                    status=order_status,
+                    limit_price=float(ord.get('limitPrice')) if ord.get('limitPrice') else None,
+                    stop_price=float(ord.get('stopPrice')) if ord.get('stopPrice') else None,
+                    filled_qty=float(ord.get('filledQty', 0)),
+                    filled_avg_price=float(ord.get('avgFilledPrice')) if ord.get('avgFilledPrice') else None
+                ))
+
+            return orders
+
+        except Exception as e:
+            self.logger.error(f"Failed to list orders: {e}")
+            raise BrokerAPIError(f"Failed to list orders: {e}")
+
+    @retry_on_failure(max_retries=3, delay=2.0, backoff=2.0)
+    def submit_order(
+        self,
+        symbol: str,
+        qty: float,
+        side: str,
+        type: str = 'market',
+        time_in_force: str = 'day',
+        limit_price: Optional[float] = None,
+        stop_price: Optional[float] = None,
+        **kwargs
+    ) -> Order:
+        """Submit order to TradeLocker with fill verification for market orders."""
+        self._check_rate_limit()
+        symbol = symbol.upper().strip()
+        side = side.lower()
+
+        # Get instrument info
+        inst_info = self._get_instrument_id(symbol)
+        instrument_id = inst_info['instrument_id']
+        route_id = inst_info['route_id']
+
+        # Map order type
+        tl_type = type.lower()
+        if tl_type == 'market':
+            validity = 'IOC'  # Immediate or Cancel for market orders
+            price = 0
+        else:
+            validity = 'GTC'  # Good Till Cancel for limit/stop
+            price = limit_price or 0
+
+        # Build order payload
+        order_payload = {
+            "tradableInstrumentId": instrument_id,
+            "qty": int(qty),
+            "side": side,
+            "type": tl_type,
+            "validity": validity,
+            "routeId": route_id,
+            "price": price
+        }
+
+        if stop_price:
+            order_payload["stopPrice"] = stop_price
+
+        try:
+            self.logger.info(f"Submitting order: {side.upper()} {qty} {symbol} @ {type}")
+
+            response = self._requests.post(
+                f"{self.base_url}/trade/accounts/{self._account_id}/orders",
+                headers=self._get_headers(),
+                json=order_payload
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            order_id = data.get('orderId', data.get('d', {}).get('orderId'))
+
+            self.logger.info(f"Order submitted successfully: {order_id}")
+
+            # For market IOC orders, verify fill by checking position
+            # Match by instrument/route ID, not symbol (symbol mapping can be unreliable)
+            if tl_type == 'market':
+                time.sleep(0.5)  # Brief wait for order processing
+
+                filled_qty = 0
+                filled_price = None
+
+                try:
+                    response = self._requests.get(
+                        f"{self.base_url}/trade/accounts/{self._account_id}/positions",
+                        headers=self._get_headers()
+                    )
+                    response.raise_for_status()
+                    pos_data = response.json()
+
+                    if isinstance(pos_data, list):
+                        positions_raw = pos_data
+                    elif isinstance(pos_data, dict):
+                        positions_raw = pos_data.get('positions', pos_data.get('d', {}).get('positions', []))
+                    else:
+                        positions_raw = []
+
+                    for pos in positions_raw:
+                        if isinstance(pos, list) and len(pos) >= 6:
+                            pos_route_id = int(pos[2]) if pos[2] else None
+                            if pos_route_id == route_id:
+                                filled_qty = int(abs(float(pos[4]))) if pos[4] else 0
+                                filled_price = float(pos[5]) if pos[5] else None
+                                self.logger.info(
+                                    f"Market order filled: {filled_qty} {symbol} @ ${filled_price:.2f}"
+                                )
+                                break
+                        elif isinstance(pos, dict):
+                            pos_inst_id = pos.get('tradableInstrumentId')
+                            if pos_inst_id == instrument_id:
+                                filled_qty = int(abs(float(pos.get('qty', pos.get('quantity', 0)))))
+                                filled_price = float(pos.get('avgPrice', pos.get('openPrice', 0)))
+                                self.logger.info(
+                                    f"Market order filled: {filled_qty} {symbol} @ ${filled_price:.2f}"
+                                )
+                                break
+                except Exception as e:
+                    self.logger.warning(f"Could not verify position after order: {e}")
+
+                if filled_qty == 0:
+                    self.logger.error(
+                        f"Market order {order_id} not filled - no position for {symbol}"
+                    )
+                    raise BrokerAPIError(
+                        f"Market order not filled for {symbol}: IOC cancelled"
+                    )
+
+                return Order(
+                    id=str(order_id),
+                    symbol=symbol,
+                    qty=qty,
+                    side=side,
+                    type=type,
+                    status='filled',
+                    filled_qty=filled_qty,
+                    filled_avg_price=filled_price,
+                    limit_price=limit_price,
+                    stop_price=stop_price,
+                    submitted_at=datetime.now(pytz.UTC)
+                )
+
+            # For limit/stop orders, return with 'new' status (fills later)
+            return Order(
+                id=str(order_id),
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                type=type,
+                status='new',
+                limit_price=limit_price,
+                stop_price=stop_price,
+                submitted_at=datetime.now(pytz.UTC)
+            )
+
+        except BrokerAPIError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to submit order: {e}")
+            raise BrokerAPIError(f"Order submission failed for {symbol}: {e}")
+
+    @retry_on_failure(max_retries=2, delay=2.0, backoff=2.0)
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel order by ID."""
+        self._check_rate_limit()
+        try:
+            response = self._requests.delete(
+                f"{self.base_url}/trade/orders/{order_id}",
+                headers=self._get_headers()
+            )
+            response.raise_for_status()
+            self.logger.info(f"Cancelled order {order_id}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to cancel order {order_id}: {e}")
+            return False
+
+    def cancel_all_orders(self) -> int:
+        """Cancel all open orders."""
+        orders = self.get_open_orders()
+        count = 0
+        for order in orders:
+            if self.cancel_order(order.id):
+                count += 1
+        self.logger.info(f"Cancelled {count} orders")
+        return count
+
+    def close_position(self, symbol: str) -> bool:
+        """Close position for symbol."""
+        self._check_rate_limit()
+        try:
+            # Get position to find position ID
+            positions = self.get_positions()
+            position = None
+            for pos in positions:
+                if pos.symbol.upper() == symbol.upper():
+                    position = pos
+                    break
+
+            if not position:
+                self.logger.warning(f"No position found for {symbol}")
+                return False
+
+            # Get position ID from raw API response
+            response = self._requests.get(
+                f"{self.base_url}/trade/accounts/{self._account_id}/positions",
+                headers=self._get_headers()
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # Handle various response formats from TradeLocker API
+            if isinstance(data, list):
+                positions_data = data
+            elif isinstance(data, dict):
+                positions_data = data.get('positions', data.get('d', {}).get('positions', []))
+            else:
+                positions_data = []
+            position_id = None
+
+            inst_info = self._get_instrument_id(symbol)
+            target_inst_id = inst_info['instrument_id']
+
+            for pos in positions_data:
+                # Handle array format: [id, ?, inst_id, ...]
+                if isinstance(pos, list):
+                    if len(pos) >= 3 and int(pos[2]) == target_inst_id:
+                        position_id = str(pos[0])
+                        break
+                else:
+                    # Handle dict format (legacy)
+                    if pos.get('tradableInstrumentId') == target_inst_id:
+                        position_id = pos.get('id')
+                        break
+
+            if not position_id:
+                self.logger.error(f"Could not find position ID for {symbol}")
+                return False
+
+            # Close the position
+            close_response = self._requests.delete(
+                f"{self.base_url}/trade/positions/{position_id}",
+                headers=self._get_headers()
+            )
+            close_response.raise_for_status()
+
+            self.logger.info(f"Closed position: {symbol}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to close position {symbol}: {e}")
+            return False
+
+    def close_all_positions(self) -> int:
+        """Close all positions."""
+        positions = self.get_positions()
+        count = 0
+        for pos in positions:
+            if self.close_position(pos.symbol):
+                count += 1
+        self.logger.info(f"Closed {count} positions")
+        return count
+
+    def get_broker_name(self) -> str:
+        return "TradeLockerBroker"
+
+    def get_portfolio_history(self, period: str = "30D") -> PortfolioHistory:
+        """Get portfolio history.
+
+        Note: TradeLocker may not provide historical equity data.
+        Returns empty history if not available.
+        """
+        # TradeLocker doesn't have a direct portfolio history endpoint
+        # Return empty history
+        return PortfolioHistory(
+            timestamps=[],
+            equity=[],
+            timeframe="1D",
+            base_value=0.0
+        )
+
+    def submit_bracket_order(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,
+        stop_loss_percent: float = 0.05,
+        time_in_force: str = 'gtc',
+        **kwargs
+    ) -> Order:
+        """Submit bracket order with stop-loss and verify fill.
+
+        TradeLocker uses IOC (Immediate-or-Cancel) for market orders,
+        so we verify the fill by checking if a position was created.
+        """
+        price = kwargs.get('price')
+        if price is None:
+            raise BrokerAPIError("price is required for bracket orders")
+
+        symbol = symbol.upper().strip()
+        side = side.lower()
+
+        # Calculate stop price
+        if side == 'buy':
+            stop_price = round(price * (1 - stop_loss_percent), 2)
+        else:
+            stop_price = round(price * (1 + stop_loss_percent), 2)
+
+        # Get instrument info
+        inst_info = self._get_instrument_id(symbol)
+        instrument_id = inst_info['instrument_id']
+        route_id = inst_info['route_id']
+
+        # Build order with stopLoss
+        order_payload = {
+            "tradableInstrumentId": instrument_id,
+            "qty": int(qty),
+            "side": side,
+            "type": "market",
+            "validity": "IOC",
+            "routeId": route_id,
+            "price": 0,
+            "stopLoss": stop_price
+        }
+
+        try:
+            self.logger.info(
+                f"Submitting bracket order: {side.upper()} {qty} {symbol} "
+                f"(stop={stop_price})"
+            )
+
+            response = self._requests.post(
+                f"{self.base_url}/trade/accounts/{self._account_id}/orders",
+                headers=self._get_headers(),
+                json=order_payload
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            order_id = data.get('orderId', data.get('d', {}).get('orderId'))
+
+            self.logger.info(f"Bracket order submitted: {order_id}")
+
+            # Verify fill by checking for position creation
+            # IOC orders fill immediately or get cancelled, so brief wait then verify
+            time.sleep(0.5)  # Brief wait for order processing
+
+            filled_qty = 0
+            filled_price = None
+
+            # Check if position was created - match by instrument/route ID, not symbol
+            # (symbol mapping from TradeLocker can be unreliable)
+            try:
+                response = self._requests.get(
+                    f"{self.base_url}/trade/accounts/{self._account_id}/positions",
+                    headers=self._get_headers()
+                )
+                response.raise_for_status()
+                pos_data = response.json()
+
+                if isinstance(pos_data, list):
+                    positions_raw = pos_data
+                elif isinstance(pos_data, dict):
+                    positions_raw = pos_data.get('positions', pos_data.get('d', {}).get('positions', []))
+                else:
+                    positions_raw = []
+
+                for pos in positions_raw:
+                    if isinstance(pos, list) and len(pos) >= 6:
+                        # Match by route_id (pos[2]) against our order's route_id
+                        pos_route_id = int(pos[2]) if pos[2] else None
+                        if pos_route_id == route_id:
+                            filled_qty = int(abs(float(pos[4]))) if pos[4] else 0
+                            filled_price = float(pos[5]) if pos[5] else None
+                            self.logger.info(
+                                f"Order filled: {filled_qty} {symbol} @ ${filled_price:.2f} (route_id={route_id})"
+                            )
+                            break
+                    elif isinstance(pos, dict):
+                        pos_inst_id = pos.get('tradableInstrumentId')
+                        if pos_inst_id == instrument_id:
+                            filled_qty = int(abs(float(pos.get('qty', pos.get('quantity', 0)))))
+                            filled_price = float(pos.get('avgPrice', pos.get('openPrice', 0)))
+                            self.logger.info(
+                                f"Order filled: {filled_qty} {symbol} @ ${filled_price:.2f}"
+                            )
+                            break
+            except Exception as e:
+                self.logger.warning(f"Could not verify position after order: {e}")
+
+            # If no position found, order was likely cancelled (IOC not filled)
+            if filled_qty == 0:
+                self.logger.error(
+                    f"Order {order_id} not filled - no position created for {symbol}. "
+                    f"IOC order was likely cancelled."
+                )
+                raise BrokerAPIError(
+                    f"Order not filled for {symbol}: IOC market order cancelled (no liquidity or symbol unavailable)"
+                )
+
+            order = Order(
+                id=str(order_id),
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                type='market',
+                status='filled',
+                stop_price=stop_price,
+                filled_qty=filled_qty,
+                filled_avg_price=filled_price,
+                submitted_at=datetime.now(pytz.UTC)
+            )
+
+            # Attach stop order ID (may be same as main order in TradeLocker)
+            order.stop_order_id = str(order_id)
+
+            return order
+
+        except BrokerAPIError:
+            # Re-raise our own errors
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to submit bracket order: {e}")
+            raise BrokerAPIError(f"Bracket order failed for {symbol}: {e}")
+
+
 class BrokerFactory:
     """Factory for creating broker instances based on trading mode"""
 
@@ -1558,13 +2430,42 @@ class BrokerFactory:
         Create appropriate broker based on current mode
 
         Returns:
-            BrokerInterface: AlpacaBroker for PAPER/LIVE, FakeBroker for BACKTEST/DRY_RUN
+            BrokerInterface: AlpacaBroker for PAPER/LIVE, TradeLockerBroker for TRADELOCKER,
+                           FakeBroker for BACKTEST/DRY_RUN
         """
         config = get_global_config()
         mode = config.get_mode()
         logger = logging.getLogger(__name__)
 
-        if config.requires_real_broker():
+        if config.requires_tradelocker_broker():
+            # TRADELOCKER mode - use TradeLockerBroker for prop firm trading
+            username = os.getenv('TRADELOCKER_USERNAME')
+            password = os.getenv('TRADELOCKER_PASSWORD')
+            server = os.getenv('TRADELOCKER_SERVER')
+            environment = os.getenv('TRADELOCKER_ENVIRONMENT', 'https://live.tradelocker.com')
+
+            # Strip whitespace
+            if username:
+                username = username.strip()
+            if password:
+                password = password.strip()
+            if server:
+                server = server.strip()
+            if environment:
+                environment = environment.strip()
+
+            if not all([username, password, server]):
+                raise ValueError(
+                    f"Mode {mode} requires TradeLocker credentials. "
+                    "Please set TRADELOCKER_USERNAME, TRADELOCKER_PASSWORD, "
+                    "TRADELOCKER_SERVER environment variables."
+                )
+
+            logger.info(f"Creating TradeLockerBroker (mode={mode}, server={server})")
+
+            return TradeLockerBroker(username, password, server, environment)
+
+        elif config.requires_real_broker():
             # PAPER or LIVE mode - use AlpacaBroker
             api_key = os.getenv('ALPACA_API_KEY')
             secret_key = os.getenv('ALPACA_SECRET_KEY')
