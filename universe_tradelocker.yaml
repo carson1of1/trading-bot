@@ -1,0 +1,138 @@
+# TradeLocker-Compatible Universe
+# Auto-generated for DNA Funded prop firm trading
+# Only includes symbols available on TradeLocker
+#
+# Original universe had 400 symbols, filtered to 121
+
+scanner_universe:
+  sp500:
+  - AAPL
+  - MSFT
+  - GOOGL
+  - AMZN
+  - NVDA
+  - META
+  - TSLA
+  - UNH
+  - XOM
+  - JNJ
+  - JPM
+  - V
+  - PG
+  - MA
+  - HD
+  - CVX
+  - MRK
+  - ABBV
+  - LLY
+  - PEP
+  - KO
+  - AVGO
+  - COST
+  - TMO
+  - MCD
+  - WMT
+  - CSCO
+  - ABT
+  - ACN
+  - CRM
+  - DHR
+  - BAC
+  - PFE
+  - NKE
+  - CMCSA
+  - ADBE
+  - TXN
+  - WFC
+  - PM
+  - NEE
+  - ORCL
+  - VZ
+  - RTX
+  - AMD
+  - INTC
+  - HON
+  tech_growth:
+  - NFLX
+  - PYPL
+  - SHOP
+  - NOW
+  - SNOW
+  - NET
+  - CRWD
+  - ZM
+  - DOCU
+  - ROKU
+  - WDAY
+  - CDNS
+  - SNPS
+  - KLAC
+  - LRCX
+  - AMAT
+  - ASML
+  - TSM
+  - MRVL
+  - NXPI
+  - SWKS
+  high_volatility:
+  - COIN
+  - PLTR
+  - HOOD
+  - XPEV
+  - BABA
+  - JD
+  - PDD
+  - SE
+  biotech:
+  - MRNA
+  - BNTX
+  - BIIB
+  - VRTX
+  - REGN
+  - GILD
+  - AMGN
+  - ILMN
+  - ISRG
+  - ALGN
+  - IDXX
+  - MDT
+  - INCY
+  finance:
+  - GS
+  - C
+  - BLK
+  - SCHW
+  - AXP
+  - SPGI
+  - CME
+  - USB
+  energy:
+  - APA
+  consumer:
+  - SBUX
+  - TGT
+  - LOW
+  - LULU
+  - DIS
+  - WBD
+  - SPOT
+  - MTCH
+  - BKNG
+  - MAR
+  - TCOM
+  industrial:
+  - CAT
+  - DE
+  - BA
+  - LMT
+  - GE
+  - UPS
+  - FDX
+  - FAST
+  reits:
+  - AMT
+  - PLD
+  - EQIX
+  etfs:
+  - SPY
+  - QQQ

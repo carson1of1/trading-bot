@@ -115,9 +115,9 @@ class GlobalConfig:
     # ========================================================================
 
     def get_mode(self) -> str:
-        """Get current trading mode (BACKTEST, PAPER, DRY_RUN, LIVE)"""
+        """Get current trading mode (BACKTEST, PAPER, DRY_RUN, LIVE, TRADELOCKER)"""
         mode = self.config.get('mode', 'PAPER').upper()
-        valid_modes = ['BACKTEST', 'PAPER', 'DRY_RUN', 'LIVE']
+        valid_modes = ['BACKTEST', 'PAPER', 'DRY_RUN', 'LIVE', 'TRADELOCKER']
         if mode not in valid_modes:
             self.logger.warning(f"Invalid mode '{mode}', defaulting to PAPER")
             return 'PAPER'
@@ -126,7 +126,7 @@ class GlobalConfig:
     def set_mode(self, mode: str):
         """Set trading mode (runtime only, doesn't save to file)"""
         mode = mode.upper()
-        valid_modes = ['BACKTEST', 'PAPER', 'DRY_RUN', 'LIVE']
+        valid_modes = ['BACKTEST', 'PAPER', 'DRY_RUN', 'LIVE', 'TRADELOCKER']
         if mode not in valid_modes:
             raise ValueError(f"Invalid mode '{mode}'. Must be one of: {valid_modes}")
         self.config['mode'] = mode
@@ -144,9 +144,16 @@ class GlobalConfig:
     def is_live_mode(self) -> bool:
         return self.get_mode() == 'LIVE'
 
+    def is_tradelocker_mode(self) -> bool:
+        return self.get_mode() == 'TRADELOCKER'
+
     def requires_real_broker(self) -> bool:
         """Check if mode requires real broker (Alpaca API)"""
         return self.get_mode() in ['PAPER', 'LIVE']
+
+    def requires_tradelocker_broker(self) -> bool:
+        """Check if mode requires TradeLocker broker (prop firm)"""
+        return self.get_mode() == 'TRADELOCKER'
 
     def uses_fake_broker(self) -> bool:
         """Check if mode uses fake broker (simulation)"""
