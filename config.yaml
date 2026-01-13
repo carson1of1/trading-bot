@@ -54,7 +54,7 @@ exit_manager:
   tier_2_atr_trailing: 0.02
   tier_3_partial_take: 0.03
   max_hold_hours: 48
-  eod_close: false
+  eod_close: true
 trailing_stop:
   enabled: true
   activation_pct: 0.15
