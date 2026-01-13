@@ -34,7 +34,7 @@ class TestConfigRequiredKeys:
         """config.yaml should have mode key"""
         cfg = GlobalConfig(CONFIG_PATH)
         mode = cfg.get_mode()
-        assert mode in ['BACKTEST', 'PAPER', 'DRY_RUN', 'LIVE']
+        assert mode in ['BACKTEST', 'PAPER', 'DRY_RUN', 'LIVE', 'TRADELOCKER']
 
     def test_has_risk_management(self):
         """config.yaml should have risk_management section"""
