@@ -735,6 +735,9 @@ proven_symbols:
              patch('bot.TradeLogger') as mock_logger, \
              patch('bot.YFinanceDataFetcher'):
             mock_broker_instance = MagicMock()
+            # close_position returns False to force submit_order fallback path
+            # This is needed to test execute_exit behavior with submit_order
+            mock_broker_instance.close_position.return_value = False
             mock_broker.return_value = mock_broker_instance
             bot = TradingBot(config_path=str(config_path))
             return bot

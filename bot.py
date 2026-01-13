@@ -1290,12 +1290,9 @@ class TradingBot:
                             close_time=datetime.now()
                         )
 
-                    # Clean up position tracking
+                    # Clean up position tracking (use _cleanup_position for consistency)
+                    self._cleanup_position(symbol)
                     del self.open_positions[symbol]
-                    if symbol in self.highest_prices:
-                        del self.highest_prices[symbol]
-                    if symbol in self.lowest_prices:
-                        del self.lowest_prices[symbol]
 
                     return {
                         'filled': True,
