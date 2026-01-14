@@ -190,6 +190,8 @@ class BacktestRequest(BaseModel):
     longs_only: bool = Field(default=False, description="Only take LONG positions")
     shorts_only: bool = Field(default=False, description="Only take SHORT positions")
     initial_capital: float = Field(default=10000.0, ge=500, le=10000000, description="Starting capital")
+    # TradeLocker mode: use all 121 TradeLocker symbols, no scanner
+    use_tradelocker_universe: bool = Field(default=False, description="Use TradeLocker universe (121 symbols, no scanner)")
     # Trailing stop parameters - DISABLED by default (was killing profits at tight settings)
     trailing_stop_enabled: bool = Field(default=False, description="Enable trailing stop loss")
     trailing_activation_pct: float = Field(default=0.15, ge=0.1, le=10.0, description="% profit to activate trailing stop")
@@ -555,9 +557,12 @@ def load_config() -> Dict:
     return {}
 
 
-def load_universe() -> Dict:
-    """Load universe from universe.yaml."""
-    universe_path = Path(__file__).parent.parent / "universe.yaml"
+def load_universe(use_tradelocker: bool = False) -> Dict:
+    """Load universe from universe.yaml or universe_tradelocker.yaml."""
+    if use_tradelocker:
+        universe_path = Path(__file__).parent.parent / "universe_tradelocker.yaml"
+    else:
+        universe_path = Path(__file__).parent.parent / "universe.yaml"
     if universe_path.exists():
         with open(universe_path, "r") as f:
             return yaml.safe_load(f)
@@ -1609,14 +1614,16 @@ def _run_backtest_sync(request: BacktestRequest) -> BacktestResponse:
     Synchronous backtest runner - executed in thread pool with timeout.
     FIX (Jan 7, 2026): Extracted to allow timeout wrapper in async endpoint.
     """
-    # Load config and universe
+    # Load config and universe (use TradeLocker universe if requested)
     config = load_config()
-    universe = load_universe()
+    universe = load_universe(use_tradelocker=request.use_tradelocker_universe)
 
-    # Set scanner enabled with top_n from request
+    # TradeLocker mode: disable scanner, use all symbols directly
+    # Scanner mode: enable scanner with top_n from request
+    scanner_enabled = not request.use_tradelocker_universe
     if "volatility_scanner" not in config:
         config["volatility_scanner"] = {}
-    config["volatility_scanner"]["enabled"] = True
+    config["volatility_scanner"]["enabled"] = scanner_enabled
     config["volatility_scanner"]["top_n"] = request.top_n
 
     # Calculate date range
@@ -1645,7 +1652,7 @@ def _run_backtest_sync(request: BacktestRequest) -> BacktestResponse:
         config=config,
         longs_only=request.longs_only,
         shorts_only=request.shorts_only,
-        scanner_enabled=True
+        scanner_enabled=scanner_enabled
     )
 
     results = backtester.run(symbols, start_date, end_date)

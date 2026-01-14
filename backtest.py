@@ -1078,6 +1078,7 @@ class Backtest1Hour:
             List of trade dicts from all symbols
         """
         self._reset_state()
+        sim_start_time = datetime.now()
 
         all_trades = []
         open_positions = {}  # symbol -> position dict
@@ -1110,6 +1111,11 @@ class Backtest1Hour:
         # Sort by timestamp
         all_events.sort(key=lambda x: (x['timestamp'], x['symbol']))
 
+        total_events = len(all_events)
+        logger.info(f"Trade simulation: processing {total_events:,} events across {len(signals_data)} symbols...")
+        progress_interval = max(1, total_events // 10)  # Log every 10%
+        events_processed = 0
+
         # Track position state per symbol
         position_state = {}  # symbol -> {'direction': 'LONG'/'SHORT', 'entry_price': float, ...}
         last_trade_bar = {}  # symbol -> bar index of last trade
@@ -1133,6 +1139,13 @@ class Backtest1Hour:
             # Skip if price is NaN
             if pd.isna(current_price):
                 continue
+
+            # Progress logging
+            events_processed += 1
+            if events_processed % progress_interval == 0:
+                pct = (events_processed / total_events) * 100
+                elapsed = (datetime.now() - sim_start_time).total_seconds()
+                logger.info(f"  Simulation progress: {pct:.0f}% ({events_processed:,}/{total_events:,}) - {elapsed:.1f}s elapsed")
 
             # Initialize state for this symbol if needed
             if symbol not in position_state:
@@ -1652,6 +1665,12 @@ class Backtest1Hour:
             # Update realized P&L on end-of-backtest exit
             self.cash += pnl
 
+        sim_elapsed = (datetime.now() - sim_start_time).total_seconds()
+        logger.info(
+            f"Trade simulation complete: {len(all_trades)} trades in {sim_elapsed:.1f}s "
+            f"({total_events:,} events, {total_events/sim_elapsed:.0f} events/sec)"
+        )
+
         return all_trades
 
     def calculate_metrics(self, trades: List[Dict]) -> Dict:
@@ -1717,14 +1736,34 @@ class Backtest1Hour:
                     date_str = str(exit_date)[:10]
                 daily_pnl[date_str] += t.get('pnl', 0)
 
-            # Convert to list and calculate % of initial capital
+            # Build map of date -> starting equity from equity curve
+            daily_start_equity = {}
+            if self.equity_curve:
+                for entry in self.equity_curve:
+                    ts = entry.get('timestamp', '')
+                    val = entry.get('portfolio_value', self.initial_capital)
+                    if hasattr(ts, 'strftime'):
+                        date_str = ts.strftime('%Y-%m-%d')
+                    elif hasattr(ts, 'date'):
+                        date_str = str(ts.date())
+                    else:
+                        date_str = str(ts)[:10]
+                    # Keep the first (earliest) entry for each day as the starting equity
+                    if date_str not in daily_start_equity:
+                        daily_start_equity[date_str] = val
+
+            # Convert to list and calculate % of day's starting equity (not initial capital)
             daily_list = []
             for date_str, pnl in daily_pnl.items():
-                pct = (pnl / self.initial_capital) * 100
+                # Use day's starting equity if available, fallback to initial capital
+                day_equity = daily_start_equity.get(date_str, self.initial_capital)
+                if day_equity <= 0:
+                    day_equity = self.initial_capital
+                pct = (pnl / day_equity) * 100
                 daily_list.append({
                     'date': date_str,
-                    'open': 0,  # Not tracked per-day
-                    'close': 0,
+                    'open': day_equity,  # Starting equity for the day
+                    'close': day_equity + pnl,  # Ending equity for the day
                     'high': 0,
                     'low': 0,
                     'change_pct': pct,
@@ -1823,9 +1862,11 @@ class Backtest1Hour:
             Complete backtest results
         """
         self._reset_state()
+        backtest_start_time = datetime.now()
 
-        logger.info(f"Running Backtest")
-        logger.info(f"Symbols: {symbols}")
+        logger.info(f"=" * 60)
+        logger.info(f"BACKTEST STARTED")
+        logger.info(f"Symbols: {len(symbols)} total")
         logger.info(f"Period: {start_date} to {end_date}")
         logger.info(f"Capital: ${self.initial_capital:,.2f}")
         logger.info(f"Scanner enabled: {self.scanner_enabled}")
@@ -1904,7 +1945,12 @@ class Backtest1Hour:
             'max_drawdown': self.max_drawdown,
         }
 
-        logger.info(f"Backtest complete: {len(all_trades)} trades, Total P&L: ${self.total_pnl:,.2f}")
+        backtest_elapsed = (datetime.now() - backtest_start_time).total_seconds()
+        logger.info(f"=" * 60)
+        logger.info(f"BACKTEST COMPLETE")
+        logger.info(f"Total time: {backtest_elapsed:.1f}s ({backtest_elapsed/60:.1f} min)")
+        logger.info(f"Trades: {len(all_trades)}, P&L: ${self.total_pnl:,.2f}")
+        logger.info(f"=" * 60)
 
         return results
 
