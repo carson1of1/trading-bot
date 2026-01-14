@@ -2090,10 +2090,10 @@ class TradeLockerBroker(BrokerInterface):
         instrument_id = inst_info['instrument_id']
         route_id = inst_info['route_id']
 
-        # Map order type
+        # Map order type - use GTC for all orders (IOC cancels if not filled immediately)
         tl_type = type.lower()
         if tl_type == 'market':
-            validity = 'IOC'  # Immediate or Cancel for market orders
+            validity = 'GTC'  # Good Till Cancel (IOC fails on TradeLocker)
             price = 0
         else:
             validity = 'GTC'  # Good Till Cancel for limit/stop
@@ -2128,7 +2128,7 @@ class TradeLockerBroker(BrokerInterface):
 
             self.logger.info(f"Order submitted successfully: {order_id}")
 
-            # For market IOC orders, verify fill by checking position
+            # For market orders, verify fill by checking position
             # Match by instrument/route ID, not symbol (symbol mapping can be unreliable)
             if tl_type == 'market':
                 time.sleep(0.5)  # Brief wait for order processing
@@ -2190,7 +2190,7 @@ class TradeLockerBroker(BrokerInterface):
                         f"Market order {order_id} not filled - no position for {symbol}"
                     )
                     raise BrokerAPIError(
-                        f"Market order not filled for {symbol}: IOC cancelled"
+                        f"Market order not filled for {symbol}: order cancelled or no liquidity"
                     )
 
                 return Order(
@@ -2371,8 +2371,8 @@ class TradeLockerBroker(BrokerInterface):
     ) -> Order:
         """Submit bracket order with stop-loss and take-profit, then verify fill.
 
-        TradeLocker uses IOC (Immediate-or-Cancel) for market orders,
-        so we verify the fill by checking if a position was created.
+        Uses GTC (Good-Till-Cancelled) for market orders with SL/TP attached.
+        Verifies the fill by checking if a position was created.
 
         Args:
             stop_loss_percent: Stop loss percentage (default 5% = 0.05)
@@ -2399,12 +2399,13 @@ class TradeLockerBroker(BrokerInterface):
         route_id = inst_info['route_id']
 
         # Build order with stopLoss and takeProfit (absolute prices)
+        # Use GTC validity for market orders - IOC cancels if not filled immediately
         order_payload = {
             "tradableInstrumentId": instrument_id,
             "qty": int(qty),
             "side": side,
             "type": "market",
-            "validity": "IOC",
+            "validity": "GTC",
             "routeId": route_id,
             "price": 0,
             "stopLoss": stop_price,
@@ -2433,7 +2434,7 @@ class TradeLockerBroker(BrokerInterface):
             self.logger.info(f"Bracket order submitted: {order_id}")
 
             # Verify fill by checking for position creation
-            # IOC orders fill immediately or get cancelled, so wait then verify
+            # Market orders should fill quickly, wait then verify
             time.sleep(2.0)  # Wait for order processing and rate limit
 
             filled_qty = 0
@@ -2505,14 +2506,14 @@ class TradeLockerBroker(BrokerInterface):
             except Exception as e:
                 self.logger.warning(f"Could not verify position after order: {e}")
 
-            # If no position found, order was likely cancelled (IOC not filled)
+            # If no position found, order was not filled
             if filled_qty == 0:
                 self.logger.error(
                     f"Order {order_id} not filled - no position created for {symbol}. "
-                    f"IOC order was likely cancelled."
+                    f"Order may have been cancelled or symbol unavailable."
                 )
                 raise BrokerAPIError(
-                    f"Order not filled for {symbol}: IOC market order cancelled (no liquidity or symbol unavailable)"
+                    f"Order not filled for {symbol}: market order cancelled (no liquidity or symbol unavailable)"
                 )
 
             order = Order(
