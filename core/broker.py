@@ -2090,10 +2090,10 @@ class TradeLockerBroker(BrokerInterface):
         instrument_id = inst_info['instrument_id']
         route_id = inst_info['route_id']
 
-        # Map order type - use GTC for all orders (IOC cancels if not filled immediately)
+        # Map order type - IOC required for market orders (GTC/DAY forbidden on TradeLocker)
         tl_type = type.lower()
         if tl_type == 'market':
-            validity = 'GTC'  # Good Till Cancel (IOC fails on TradeLocker)
+            validity = 'IOC'  # Immediate-Or-Cancel (only allowed for market orders)
             price = 0
         else:
             validity = 'GTC'  # Good Till Cancel for limit/stop
@@ -2399,13 +2399,13 @@ class TradeLockerBroker(BrokerInterface):
         route_id = inst_info['route_id']
 
         # Build order with stopLoss and takeProfit (absolute prices)
-        # Use GTC validity for market orders - IOC cancels if not filled immediately
+        # IOC is required for market orders on TradeLocker (GTC/DAY forbidden)
         order_payload = {
             "tradableInstrumentId": instrument_id,
             "qty": int(qty),
             "side": side,
             "type": "market",
-            "validity": "GTC",
+            "validity": "IOC",
             "routeId": route_id,
             "price": 0,
             "stopLoss": stop_price,
@@ -2428,6 +2428,11 @@ class TradeLockerBroker(BrokerInterface):
             self.logger.info(f"Order API response: status={response.status_code}, body={response.text[:500]}")
             response.raise_for_status()
             data = response.json()
+
+            # Check for TradeLocker error response (returns 200 with s:"error")
+            if data.get('s') == 'error':
+                error_msg = data.get('errmsg', 'Unknown error')
+                raise BrokerAPIError(f"Order rejected by TradeLocker: {error_msg}")
 
             order_id = data.get('orderId', data.get('d', {}).get('orderId'))
 
@@ -2510,21 +2515,28 @@ class TradeLockerBroker(BrokerInterface):
             if filled_qty == 0:
                 self.logger.error(
                     f"Order {order_id} not filled - no position created for {symbol}. "
-                    f"Order may have been cancelled or symbol unavailable."
+                    f"IOC order may have been cancelled (no liquidity or symbol unavailable)."
                 )
                 raise BrokerAPIError(
-                    f"Order not filled for {symbol}: market order cancelled (no liquidity or symbol unavailable)"
+                    f"Order not filled for {symbol}: IOC market order cancelled (no liquidity)"
+                )
+
+            # Log partial fills
+            if filled_qty != qty:
+                self.logger.warning(
+                    f"Partial fill for {symbol}: requested {qty}, filled {filled_qty} "
+                    f"(IOC filled available liquidity)"
                 )
 
             order = Order(
                 id=str(order_id),
                 symbol=symbol,
-                qty=qty,
+                qty=qty,  # Requested qty
                 side=side,
                 type='market',
                 status='filled',
                 stop_price=stop_price,
-                filled_qty=filled_qty,
+                filled_qty=filled_qty,  # Actual filled qty (may be partial)
                 filled_avg_price=filled_price,
                 submitted_at=datetime.now(pytz.UTC)
             )
