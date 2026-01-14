@@ -52,7 +52,8 @@ _SYSTEMD_USER_ENV = {
 
 
 def _is_bot_running() -> bool:
-    """Check if bot is running via systemd service."""
+    """Check if bot is running via systemd service or PID file."""
+    # First try systemd
     try:
         if _IS_AWS:
             # System service on AWS
@@ -71,9 +72,23 @@ def _is_bot_running() -> bool:
                 timeout=5,
                 env=_SYSTEMD_USER_ENV
             )
-        return result.stdout.strip() == "active"
+        if result.stdout.strip() == "active":
+            return True
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        return False
+        pass
+
+    # Fallback: check PID file (for manual bot runs)
+    pid_file = Path(__file__).parent.parent / "logs" / "bot.pid"
+    try:
+        if pid_file.exists():
+            pid = int(pid_file.read_text().strip())
+            # Check if process is actually running
+            os.kill(pid, 0)  # Doesn't kill, just checks if process exists
+            return True
+    except (ValueError, ProcessLookupError, PermissionError):
+        pass
+
+    return False
 
 
 def _start_bot_service() -> bool:

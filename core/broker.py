@@ -10,6 +10,7 @@ Combined from:
 from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
+from pathlib import Path
 import pytz
 import logging
 import math
@@ -1612,6 +1613,13 @@ class TradeLockerBroker(BrokerInterface):
         self._account_cache_time: float = 0
         self._account_cache_ttl: float = 5.0  # Cache for 5 seconds
 
+        # Daily equity tracking (TradeLocker doesn't provide last_equity like Alpaca)
+        # Store start-of-day equity in file to survive bot restarts
+        self._daily_equity_file = Path(__file__).parent.parent / "logs" / "tradelocker_daily_equity.json"
+        self._start_of_day_equity: Optional[float] = None
+        self._current_trading_date: Optional[str] = None
+        self._load_daily_equity()
+
         # Authenticate on init
         self._authenticate()
         self.logger.info(f"TradeLockerBroker connected to {server} (account: {self._acc_num})")
@@ -1635,6 +1643,36 @@ class TradeLockerBroker(BrokerInterface):
 
         # Record this request
         self._request_times.append(now)
+
+    def _load_daily_equity(self):
+        """Load start-of-day equity from file."""
+        try:
+            if self._daily_equity_file.exists():
+                import json
+                data = json.loads(self._daily_equity_file.read_text())
+                self._current_trading_date = data.get('date')
+                self._start_of_day_equity = data.get('equity')
+                self.logger.debug(f"Loaded daily equity: {self._start_of_day_equity} for {self._current_trading_date}")
+        except Exception as e:
+            self.logger.warning(f"Failed to load daily equity file: {e}")
+            self._current_trading_date = None
+            self._start_of_day_equity = None
+
+    def _save_daily_equity(self, date_str: str, equity: float):
+        """Save start-of-day equity to file."""
+        try:
+            import json
+            self._daily_equity_file.parent.mkdir(parents=True, exist_ok=True)
+            self._daily_equity_file.write_text(json.dumps({
+                'date': date_str,
+                'equity': equity,
+                'saved_at': datetime.now().isoformat()
+            }))
+            self._current_trading_date = date_str
+            self._start_of_day_equity = equity
+            self.logger.info(f"Saved start-of-day equity: ${equity:.2f} for {date_str}")
+        except Exception as e:
+            self.logger.error(f"Failed to save daily equity: {e}")
 
     def _authenticate(self):
         """Authenticate with TradeLocker and get JWT tokens."""
@@ -1813,6 +1851,7 @@ class TradeLockerBroker(BrokerInterface):
         8=optionValue, 9=initialMarginReq, 10=maintMarginReq, etc.
 
         Uses 5-second cache to avoid hitting rate limits.
+        Tracks start-of-day equity for daily P&L calculation (kill switch protection).
         """
         # Check cache first
         now = time.time()
@@ -1840,12 +1879,23 @@ class TradeLockerBroker(BrokerInterface):
             available_funds = float(details[2])   # availableFunds (buying power)
             cash_balance = float(details[4])      # cashBalance
 
+            # Track start-of-day equity for daily P&L (kill switch protection)
+            # TradeLocker doesn't provide last_equity like Alpaca, so we track it ourselves
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            if self._current_trading_date != today_str:
+                # New trading day - record current equity as start-of-day
+                # Use balance (not projected_balance) since we want equity without open P&L
+                self._save_daily_equity(today_str, balance)
+
+            # Use tracked start-of-day equity for last_equity (critical for kill switch)
+            last_equity = self._start_of_day_equity if self._start_of_day_equity else balance
+
             account = Account(
                 equity=projected_balance,
                 cash=cash_balance,
                 buying_power=available_funds,
                 portfolio_value=projected_balance,
-                last_equity=balance  # Use balance as previous equity approximation
+                last_equity=last_equity
             )
 
             # Cache the result

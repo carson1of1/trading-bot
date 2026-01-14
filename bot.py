@@ -35,12 +35,20 @@ BOT_STATE_FILE = "/tmp/trading-bot-state.json"
 
 
 def write_bot_state(watchlist: List[str] = None, last_cycle: str = None, next_cycle: str = None, signals: Dict = None):
-    """Write bot state to shared file for API to read."""
+    """Write bot state to shared file for API to read.
+
+    Uses atomic write to prevent corruption from partial writes.
+    """
     try:
         state = {}
+        # Try to read existing state, but don't fail if file is corrupted
         if os.path.exists(BOT_STATE_FILE):
-            with open(BOT_STATE_FILE, 'r') as f:
-                state = json.load(f)
+            try:
+                with open(BOT_STATE_FILE, 'r') as f:
+                    state = json.load(f)
+            except (json.JSONDecodeError, ValueError):
+                state = {}  # Reset if corrupted
+
         if watchlist is not None:
             state['watchlist'] = watchlist
         if last_cycle is not None:
@@ -50,8 +58,12 @@ def write_bot_state(watchlist: List[str] = None, last_cycle: str = None, next_cy
         if signals is not None:
             state['signals'] = signals
         state['updated_at'] = datetime.now().isoformat()
-        with open(BOT_STATE_FILE, 'w') as f:
+
+        # Atomic write: write to temp file, then rename
+        temp_file = BOT_STATE_FILE + '.tmp'
+        with open(temp_file, 'w') as f:
             json.dump(state, f)
+        os.replace(temp_file, BOT_STATE_FILE)  # Atomic on POSIX
     except Exception:
         pass  # Don't let state file errors crash the bot
 
