@@ -2302,9 +2302,9 @@ class TradeLockerBroker(BrokerInterface):
             target_inst_id = inst_info['instrument_id']
 
             for pos in positions_data:
-                # Handle array format: [id, ?, inst_id, ...]
+                # Handle array format: [id, inst_id, route_id, side, qty, price, ...]
                 if isinstance(pos, list):
-                    if len(pos) >= 3 and int(pos[2]) == target_inst_id:
+                    if len(pos) >= 2 and int(pos[1]) == target_inst_id:
                         position_id = str(pos[0])
                         break
                 else:
