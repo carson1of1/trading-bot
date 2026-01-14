@@ -1073,6 +1073,7 @@ class TradingBot:
             # FIX (Jan 2026): Default 5.0% matches backtest.py:151 (was 2.0%, causing mismatch)
             risk_config = self.config.get('risk_management', {})
             stop_loss_pct = risk_config.get('stop_loss_pct', 5.0) / 100
+            take_profit_pct = risk_config.get('take_profit_pct', 5.0) / 100
 
             # FIX (Jan 2026): Apply estimated slippage before position sizing (matches backtest.py:888-894)
             # This ensures position sizing uses realistic entry prices like backtest does
@@ -1119,16 +1120,17 @@ class TradingBot:
             if qty <= 0:
                 return {'filled': False, 'reason': 'Position size too small'}
 
-            # Submit bracket order with broker-level stop-loss for crash protection (ODE-117)
-            # The broker stop at 5% acts as backup - software stops handle normal operation
+            # Submit bracket order with broker-level SL and TP for crash protection
+            # These act as hard limits - software ExitManager handles trailing/partial exits
             side = 'buy' if direction == 'LONG' else 'sell'
             order = self.broker.submit_bracket_order(
                 symbol=symbol,
                 qty=qty,
                 side=side,
                 stop_loss_percent=stop_loss_pct,
-                time_in_force='gtc',  # Stop must persist across sessions
-                price=price  # For stop price calculation
+                take_profit_percent=take_profit_pct,
+                time_in_force='gtc',  # Orders must persist across sessions
+                price=price  # For SL/TP price calculation
             )
 
             # FIX (Jan 2026): Track position immediately after order submission
@@ -1987,6 +1989,10 @@ class TradingBot:
                 else:
                     signal_stats['blocked'] += 1
                     signal_stats['block_reasons']['execution_failed'] = signal_stats['block_reasons'].get('execution_failed', 0) + 1
+
+                # Rate limit delay between trade attempts for TradeLocker
+                import time
+                time.sleep(3.0)
 
             # ODE-97: Log signal summary
             signal_stats['blocked'] = signal_stats['above_threshold'] - signal_stats['executed']

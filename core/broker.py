@@ -1912,8 +1912,9 @@ class TradeLockerBroker(BrokerInterface):
                     if len(pos) < 10:
                         continue
                     position_id = pos[0]
+                    instrument_id = int(pos[1]) if pos[1] else None
                     route_id = int(pos[2]) if pos[2] else None
-                    symbol = self._get_symbol_from_id(route_id) if route_id else "UNKNOWN"
+                    symbol = self._get_symbol_from_id(instrument_id) if instrument_id else "UNKNOWN"
                     # Log position details for debugging symbol mapping
                     self.logger.info(f"Position parse: id={position_id}, route_id={route_id} -> symbol={symbol}")
                     qty = abs(float(pos[4])) if pos[4] else 0
@@ -2164,8 +2165,8 @@ class TradeLockerBroker(BrokerInterface):
 
                     for pos in positions_raw:
                         if isinstance(pos, list) and len(pos) >= 6:
-                            pos_route_id = int(pos[2]) if pos[2] else None
-                            if pos_route_id == route_id:
+                            pos_inst_id = int(pos[1]) if pos[1] else None
+                            if pos_inst_id == instrument_id:
                                 filled_qty = int(abs(float(pos[4]))) if pos[4] else 0
                                 filled_price = float(pos[5]) if pos[5] else None
                                 self.logger.info(
@@ -2364,13 +2365,18 @@ class TradeLockerBroker(BrokerInterface):
         qty: int,
         side: str,
         stop_loss_percent: float = 0.05,
+        take_profit_percent: float = 0.05,
         time_in_force: str = 'gtc',
         **kwargs
     ) -> Order:
-        """Submit bracket order with stop-loss and verify fill.
+        """Submit bracket order with stop-loss and take-profit, then verify fill.
 
         TradeLocker uses IOC (Immediate-or-Cancel) for market orders,
         so we verify the fill by checking if a position was created.
+
+        Args:
+            stop_loss_percent: Stop loss percentage (default 5% = 0.05)
+            take_profit_percent: Take profit percentage (default 5% = 0.05)
         """
         price = kwargs.get('price')
         if price is None:
@@ -2379,18 +2385,20 @@ class TradeLockerBroker(BrokerInterface):
         symbol = symbol.upper().strip()
         side = side.lower()
 
-        # Calculate stop price
+        # Calculate stop and take profit prices
         if side == 'buy':
             stop_price = round(price * (1 - stop_loss_percent), 2)
+            tp_price = round(price * (1 + take_profit_percent), 2)
         else:
             stop_price = round(price * (1 + stop_loss_percent), 2)
+            tp_price = round(price * (1 - take_profit_percent), 2)
 
         # Get instrument info
         inst_info = self._get_instrument_id(symbol)
         instrument_id = inst_info['instrument_id']
         route_id = inst_info['route_id']
 
-        # Build order with stopLoss
+        # Build order with stopLoss and takeProfit (absolute prices)
         order_payload = {
             "tradableInstrumentId": instrument_id,
             "qty": int(qty),
@@ -2399,13 +2407,16 @@ class TradeLockerBroker(BrokerInterface):
             "validity": "IOC",
             "routeId": route_id,
             "price": 0,
-            "stopLoss": stop_price
+            "stopLoss": stop_price,
+            "stopLossType": "absolute",
+            "takeProfit": tp_price,
+            "takeProfitType": "absolute"
         }
 
         try:
             self.logger.info(
                 f"Submitting bracket order: {side.upper()} {qty} {symbol} "
-                f"(stop={stop_price})"
+                f"(SL={stop_price}, TP={tp_price})"
             )
 
             response = self._requests.post(
@@ -2413,6 +2424,7 @@ class TradeLockerBroker(BrokerInterface):
                 headers=self._get_headers(),
                 json=order_payload
             )
+            self.logger.info(f"Order API response: status={response.status_code}, body={response.text[:500]}")
             response.raise_for_status()
             data = response.json()
 
@@ -2421,21 +2433,35 @@ class TradeLockerBroker(BrokerInterface):
             self.logger.info(f"Bracket order submitted: {order_id}")
 
             # Verify fill by checking for position creation
-            # IOC orders fill immediately or get cancelled, so brief wait then verify
-            time.sleep(0.5)  # Brief wait for order processing
+            # IOC orders fill immediately or get cancelled, so wait then verify
+            time.sleep(2.0)  # Wait for order processing and rate limit
 
             filled_qty = 0
             filled_price = None
 
             # Check if position was created - match by instrument/route ID, not symbol
-            # (symbol mapping from TradeLocker can be unreliable)
+            # Retry up to 3 times with delay to handle rate limiting
             try:
-                response = self._requests.get(
-                    f"{self.base_url}/trade/accounts/{self._account_id}/positions",
-                    headers=self._get_headers()
-                )
-                response.raise_for_status()
-                pos_data = response.json()
+                pos_data = None
+                for attempt in range(3):
+                    try:
+                        response = self._requests.get(
+                            f"{self.base_url}/trade/accounts/{self._account_id}/positions",
+                            headers=self._get_headers()
+                        )
+                        response.raise_for_status()
+                        pos_data = response.json()
+                        self.logger.info(f"Position check attempt {attempt+1}: {len(pos_data.get('d', {}).get('positions', []))} positions")
+                        if pos_data.get('d', {}).get('positions'):
+                            break  # Got valid positions data
+                    except Exception as e:
+                        self.logger.warning(f"Position check attempt {attempt+1} failed: {e}")
+                    if attempt < 2:
+                        time.sleep(1.5)  # Rate limit delay before retry
+
+                if pos_data is None:
+                    pos_data = {}
+                    self.logger.warning("All position check attempts failed, using empty data")
 
                 if isinstance(pos_data, list):
                     positions_raw = pos_data
@@ -2458,13 +2484,13 @@ class TradeLockerBroker(BrokerInterface):
 
                 for pos in positions_raw:
                     if isinstance(pos, list) and len(pos) >= 6:
-                        # Match by route_id (pos[2]) against our order's route_id
-                        pos_route_id = int(pos[2]) if pos[2] else None
-                        if pos_route_id == route_id:
+                        # Match by instrument_id (pos[1]) against our order's instrument_id
+                        pos_inst_id = int(pos[1]) if pos[1] else None
+                        if pos_inst_id == instrument_id:
                             filled_qty = int(abs(float(pos[4]))) if pos[4] else 0
                             filled_price = float(pos[5]) if pos[5] else None
                             self.logger.info(
-                                f"Order filled: {filled_qty} {symbol} @ ${filled_price:.2f} (route_id={route_id})"
+                                f"Order filled: {filled_qty} {symbol} @ ${filled_price:.2f} (instrument_id={instrument_id})"
                             )
                             break
                     elif isinstance(pos, dict):
@@ -2513,6 +2539,79 @@ class TradeLockerBroker(BrokerInterface):
         except Exception as e:
             self.logger.error(f"Failed to submit bracket order: {e}")
             raise BrokerAPIError(f"Bracket order failed for {symbol}: {e}")
+
+    def set_position_stop_loss(self, position_id: str, stop_loss_price: float, take_profit_price: float = None) -> bool:
+        """Set stop loss (and optionally take profit) on an existing position.
+
+        Args:
+            position_id: The TradeLocker position ID
+            stop_loss_price: Stop loss price (absolute)
+            take_profit_price: Optional take profit price (absolute)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            payload = {"stopLoss": stop_loss_price}
+            if take_profit_price is not None:
+                payload["takeProfit"] = take_profit_price
+
+            self.logger.info(f"Setting SL on position {position_id}: SL=${stop_loss_price:.2f}")
+
+            response = self._requests.patch(
+                f"{self.base_url}/trade/positions/{position_id}",
+                headers=self._get_headers(),
+                json=payload
+            )
+
+            self.logger.info(f"Modify position response: status={response.status_code}, body={response.text[:200]}")
+            response.raise_for_status()
+
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to set stop loss on position {position_id}: {e}")
+            return False
+
+    def get_positions_with_ids(self) -> list:
+        """Get positions with their TradeLocker position IDs for modification."""
+        try:
+            response = self._requests.get(
+                f"{self.base_url}/trade/accounts/{self._account_id}/positions",
+                headers=self._get_headers()
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            positions_raw = data.get('d', {}).get('positions', [])
+            result = []
+
+            for pos in positions_raw:
+                if isinstance(pos, list) and len(pos) >= 6:
+                    pos_id = str(pos[0])
+                    inst_id = int(pos[1]) if pos[1] else None
+                    qty = float(pos[4]) if pos[4] else 0
+                    entry_price = float(pos[5]) if pos[5] else 0
+
+                    # Get symbol from instrument_id
+                    symbol = None
+                    for sym, info in self._instrument_cache.items():
+                        if info.get('tradable_instrument_id') == inst_id:
+                            symbol = sym
+                            break
+
+                    if symbol and qty != 0:
+                        result.append({
+                            'position_id': pos_id,
+                            'symbol': symbol,
+                            'qty': qty,
+                            'entry_price': entry_price,
+                            'instrument_id': inst_id
+                        })
+
+            return result
+        except Exception as e:
+            self.logger.error(f"Failed to get positions with IDs: {e}")
+            return []
 
 
 class BrokerFactory:
