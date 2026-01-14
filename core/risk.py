@@ -2110,9 +2110,9 @@ class DailyDrawdownGuard:
         # Get current equity from account
         # ODE-90: If we can't get equity, set API error flag and block trading
         if hasattr(account, 'equity'):
-            self.current_equity = float(account.equity)
+            new_equity = float(account.equity)
         elif hasattr(account, 'portfolio_value'):
-            self.current_equity = float(account.portfolio_value)
+            new_equity = float(account.portfolio_value)
         else:
             self.logger.error(
                 "DRAWDOWN_GUARD | API_ERROR | Cannot determine equity from account object - "
@@ -2121,6 +2121,39 @@ class DailyDrawdownGuard:
             self.api_error_occurred = True
             self.entries_allowed = False
             return self.tier
+
+        # Validate equity is plausible - reject $0 or implausible drops
+        # This prevents false 100% drawdown triggers from API errors/rate limits
+        if new_equity <= 0:
+            self.logger.warning(
+                f"DRAWDOWN_GUARD | REJECTED | Equity ${new_equity:.2f} is invalid - "
+                "keeping previous state to avoid false triggers"
+            )
+            self.api_error_occurred = True
+            # Block entries but don't update tier or trigger liquidation
+            self.entries_allowed = False
+            return self.tier
+
+        # Check for implausible single-cycle drop (> 25% without prior liquidation)
+        # Real drawdowns happen gradually; a sudden 25%+ drop is almost certainly API error
+        if self.day_start_equity > 0 and not self.day_halted:
+            apparent_drop = (self.day_start_equity - new_equity) / self.day_start_equity
+            if apparent_drop > 0.25:
+                self.logger.warning(
+                    f"DRAWDOWN_GUARD | REJECTED | Implausible {apparent_drop*100:.1f}% drop "
+                    f"(${self.day_start_equity:,.0f} -> ${new_equity:,.0f}) - "
+                    "keeping previous state to avoid false liquidation"
+                )
+                self.api_error_occurred = True
+                self.entries_allowed = False
+                return self.tier
+
+        # Valid equity received - clear API error flag if it was set
+        if self.api_error_occurred:
+            self.logger.info("DRAWDOWN_GUARD | API_RECOVERED | Valid equity received, resuming normal operation")
+            self.api_error_occurred = False
+
+        self.current_equity = new_equity
 
         # Check for new day (use provided date for backtest, else real time)
         today = current_date if current_date is not None else datetime.now().date()

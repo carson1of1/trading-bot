@@ -743,8 +743,8 @@ class TestAPIErrorFailsafe:
         assert guard.api_error_occurred is True
         assert guard.entries_allowed is False
 
-    def test_api_error_flag_persists(self):
-        """Test that API error flag persists until reset."""
+    def test_api_error_flag_clears_on_valid_equity(self):
+        """Test that API error flag clears when valid equity is received (auto-recovery)."""
         guard = DailyDrawdownGuard()
         guard.reset_day(10000.0)
 
@@ -752,11 +752,13 @@ class TestAPIErrorFailsafe:
         bad_account = MagicMock(spec=[])
         guard.update_equity(bad_account)
         assert guard.api_error_occurred is True
+        assert guard.entries_allowed is False
 
-        # Even with good account, error flag should persist
+        # Valid equity should clear error flag and restore trading
         good_account = MockAccount(10000.0)
         guard.update_equity(good_account)
-        assert guard.api_error_occurred is True
+        assert guard.api_error_occurred is False
+        assert guard.entries_allowed is True
 
     def test_api_error_clears_on_day_reset(self):
         """Test that API error flag clears on new day."""
@@ -772,3 +774,46 @@ class TestAPIErrorFailsafe:
         guard.reset_day(10000.0)
         assert guard.api_error_occurred is False
         assert guard.entries_allowed is True
+
+    def test_zero_equity_rejected(self):
+        """Test that $0 equity from API error is rejected, not treated as 100% drawdown."""
+        guard = DailyDrawdownGuard()
+        guard.reset_day(10000.0)
+
+        # Simulate API returning $0 equity (rate limit or error)
+        zero_account = MockAccount(0.0)
+        tier = guard.update_equity(zero_account)
+
+        # Should NOT trigger hard limit - should preserve previous state
+        assert tier != DrawdownTier.HARD_LIMIT
+        assert guard.api_error_occurred is True
+        assert guard.entries_allowed is False  # Blocked due to API error
+        assert not guard.day_halted  # NOT halted - just blocked
+
+    def test_implausible_drop_rejected(self):
+        """Test that implausible equity drops (> 25%) are rejected as API errors."""
+        guard = DailyDrawdownGuard()
+        guard.reset_day(10000.0)
+
+        # Simulate API returning $5000 (50% drop - impossible in one cycle)
+        implausible_account = MockAccount(5000.0)
+        tier = guard.update_equity(implausible_account)
+
+        # Should NOT trigger hard limit - should preserve previous state
+        assert tier != DrawdownTier.HARD_LIMIT
+        assert guard.api_error_occurred is True
+        assert guard.entries_allowed is False
+        assert not guard.day_halted
+
+    def test_valid_drop_accepted(self):
+        """Test that valid equity drops within 25% are accepted normally."""
+        guard = DailyDrawdownGuard()
+        guard.reset_day(10000.0)
+
+        # 20% drop is plausible (e.g., big losing position)
+        valid_account = MockAccount(8000.0)
+        tier = guard.update_equity(valid_account)
+
+        # Should be processed normally
+        assert guard.api_error_occurred is False
+        assert guard.current_equity == 8000.0

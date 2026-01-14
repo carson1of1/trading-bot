@@ -1882,11 +1882,25 @@ class TradeLockerBroker(BrokerInterface):
             data = response.json()
 
             # Handle various response formats from TradeLocker API
+            # API can return: list directly, {'positions': [...]}, {'d': [...]}, or {'d': {'positions': [...]}}
             if isinstance(data, list):
                 # API returned positions array directly
                 positions_data = data
             elif isinstance(data, dict):
-                positions_data = data.get('positions', data.get('d', {}).get('positions', []))
+                # Try 'positions' key first
+                if 'positions' in data:
+                    positions_data = data['positions']
+                # Then try 'd' key - can be list or dict
+                elif 'd' in data:
+                    d_value = data['d']
+                    if isinstance(d_value, list):
+                        positions_data = d_value
+                    elif isinstance(d_value, dict):
+                        positions_data = d_value.get('positions', [])
+                    else:
+                        positions_data = []
+                else:
+                    positions_data = []
             else:
                 self.logger.warning(f"Unexpected positions response type: {type(data)}")
                 positions_data = []
@@ -2132,7 +2146,19 @@ class TradeLockerBroker(BrokerInterface):
                     if isinstance(pos_data, list):
                         positions_raw = pos_data
                     elif isinstance(pos_data, dict):
-                        positions_raw = pos_data.get('positions', pos_data.get('d', {}).get('positions', []))
+                        # Handle various formats: {'positions': [...]}, {'d': [...]}, {'d': {'positions': [...]}}
+                        if 'positions' in pos_data:
+                            positions_raw = pos_data['positions']
+                        elif 'd' in pos_data:
+                            d_val = pos_data['d']
+                            if isinstance(d_val, list):
+                                positions_raw = d_val
+                            elif isinstance(d_val, dict):
+                                positions_raw = d_val.get('positions', [])
+                            else:
+                                positions_raw = []
+                        else:
+                            positions_raw = []
                     else:
                         positions_raw = []
 
@@ -2254,7 +2280,19 @@ class TradeLockerBroker(BrokerInterface):
             if isinstance(data, list):
                 positions_data = data
             elif isinstance(data, dict):
-                positions_data = data.get('positions', data.get('d', {}).get('positions', []))
+                # Handle various formats: {'positions': [...]}, {'d': [...]}, {'d': {'positions': [...]}}
+                if 'positions' in data:
+                    positions_data = data['positions']
+                elif 'd' in data:
+                    d_val = data['d']
+                    if isinstance(d_val, list):
+                        positions_data = d_val
+                    elif isinstance(d_val, dict):
+                        positions_data = d_val.get('positions', [])
+                    else:
+                        positions_data = []
+                else:
+                    positions_data = []
             else:
                 positions_data = []
             position_id = None
@@ -2402,7 +2440,19 @@ class TradeLockerBroker(BrokerInterface):
                 if isinstance(pos_data, list):
                     positions_raw = pos_data
                 elif isinstance(pos_data, dict):
-                    positions_raw = pos_data.get('positions', pos_data.get('d', {}).get('positions', []))
+                    # Handle various formats: {'positions': [...]}, {'d': [...]}, {'d': {'positions': [...]}}
+                    if 'positions' in pos_data:
+                        positions_raw = pos_data['positions']
+                    elif 'd' in pos_data:
+                        d_val = pos_data['d']
+                        if isinstance(d_val, list):
+                            positions_raw = d_val
+                        elif isinstance(d_val, dict):
+                            positions_raw = d_val.get('positions', [])
+                        else:
+                            positions_raw = []
+                    else:
+                        positions_raw = []
                 else:
                     positions_raw = []
 

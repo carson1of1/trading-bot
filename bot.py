@@ -1702,8 +1702,45 @@ class TradingBot:
 
             # 2. Update drawdown guard (must be done after sync)
             if self.drawdown_guard.enabled:
-                account = self.broker.get_account()
-                tier = self.drawdown_guard.update_equity(account)
+                try:
+                    account = self.broker.get_account()
+
+                    # Validate equity is plausible before updating drawdown guard
+                    # API failures can return $0 which would falsely trigger 100% drawdown
+                    account_equity = getattr(account, 'equity', None) or getattr(account, 'portfolio_value', 0)
+
+                    if account_equity <= 0:
+                        logger.warning(
+                            f"DRAWDOWN_GUARD | SKIPPED | API returned invalid equity: ${account_equity:.2f} - "
+                            "likely rate limit or API error, not updating drawdown state"
+                        )
+                        # Don't update drawdown guard with bad data, but continue cycle
+                        # Entries will still be blocked if previous state was blocking
+                        account = None
+                    elif self.drawdown_guard.day_start_equity > 0:
+                        # Check for implausible drop (> 20% in single cycle is impossible without liquidation)
+                        drop_pct = (self.drawdown_guard.day_start_equity - account_equity) / self.drawdown_guard.day_start_equity
+                        if drop_pct > 0.20 and not self.drawdown_guard.day_halted:
+                            logger.warning(
+                                f"DRAWDOWN_GUARD | SKIPPED | Implausible equity drop: {drop_pct*100:.1f}% "
+                                f"(${self.drawdown_guard.day_start_equity:,.0f} -> ${account_equity:,.0f}) - "
+                                "likely API error, not updating drawdown state"
+                            )
+                            account = None
+
+                except Exception as e:
+                    logger.warning(
+                        f"DRAWDOWN_GUARD | SKIPPED | Failed to get account: {e} - "
+                        "not updating drawdown state to avoid false triggers"
+                    )
+                    account = None
+
+                # Only update drawdown guard if we got valid account data
+                if account is not None:
+                    tier = self.drawdown_guard.update_equity(account)
+                else:
+                    # Use current tier without updating (preserve previous state)
+                    tier = self.drawdown_guard.tier
 
                 # Log current drawdown status
                 if tier != DrawdownTier.NORMAL:
