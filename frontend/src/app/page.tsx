@@ -19,7 +19,7 @@ export default function DashboardPage() {
     interval: 30000, // 30s - TradeLocker has strict rate limits
   });
 
-  const { data: positionsData, isLoading: positionsLoading } = usePolling<PositionsData>({
+  const { data: positionsData } = usePolling<PositionsData>({
     fetcher: getPositions,
     interval: 30000, // 30s - TradeLocker has strict rate limits
   });

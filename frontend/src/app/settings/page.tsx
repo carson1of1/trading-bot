@@ -1,8 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
-import { Settings as SettingsIcon, Shield, Bell, Save, AlertTriangle, CheckCircle } from "lucide-react";
+import { Settings as SettingsIcon, Shield, Bell, AlertTriangle, CheckCircle } from "lucide-react";
 import { usePolling } from "@/hooks/usePolling";
 import { getSettings, Settings } from "@/lib/api";
 

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
-import { Layers, TrendingUp, TrendingDown, Activity } from "lucide-react";
+import { Layers } from "lucide-react";
 
 interface Strategy {
   id: string;

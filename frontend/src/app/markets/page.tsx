@@ -1,7 +1,7 @@
 "use client";
 
 import { PageWrapper } from "@/components/layout/PageWrapper";
-import { Globe, TrendingUp, TrendingDown, AlertTriangle } from "lucide-react";
+import { TrendingUp, TrendingDown, AlertTriangle } from "lucide-react";
 import {
   AreaChart,
   Area,

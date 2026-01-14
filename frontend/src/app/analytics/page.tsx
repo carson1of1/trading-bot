@@ -26,11 +26,33 @@ const equityData = [
   { date: "Dec 30", value: 125432 },
 ];
 
-const hourlyData = Array.from({ length: 24 }, (_, i) => ({
-  hour: `${i.toString().padStart(2, "0")}:00`,
-  trades: Math.floor(Math.random() * 20) + 5,
-  winRate: Math.random() * 40 + 40,
-}));
+// Generate static data to avoid Math.random() during render
+const hourlyData = [
+  { hour: "00:00", trades: 8, winRate: 52 },
+  { hour: "01:00", trades: 6, winRate: 48 },
+  { hour: "02:00", trades: 5, winRate: 55 },
+  { hour: "03:00", trades: 7, winRate: 61 },
+  { hour: "04:00", trades: 9, winRate: 58 },
+  { hour: "05:00", trades: 12, winRate: 65 },
+  { hour: "06:00", trades: 15, winRate: 62 },
+  { hour: "07:00", trades: 18, winRate: 68 },
+  { hour: "08:00", trades: 22, winRate: 72 },
+  { hour: "09:00", trades: 24, winRate: 75 },
+  { hour: "10:00", trades: 20, winRate: 70 },
+  { hour: "11:00", trades: 18, winRate: 65 },
+  { hour: "12:00", trades: 14, winRate: 58 },
+  { hour: "13:00", trades: 16, winRate: 62 },
+  { hour: "14:00", trades: 19, winRate: 68 },
+  { hour: "15:00", trades: 21, winRate: 71 },
+  { hour: "16:00", trades: 17, winRate: 64 },
+  { hour: "17:00", trades: 12, winRate: 55 },
+  { hour: "18:00", trades: 9, winRate: 50 },
+  { hour: "19:00", trades: 7, winRate: 45 },
+  { hour: "20:00", trades: 6, winRate: 48 },
+  { hour: "21:00", trades: 5, winRate: 52 },
+  { hour: "22:00", trades: 6, winRate: 49 },
+  { hour: "23:00", trades: 7, winRate: 51 },
+];
 
 const drawdownData = [
   { date: "Nov 01", drawdown: 0 },
@@ -46,31 +68,32 @@ const drawdownData = [
 
 const maxDrawdown = Math.min(...drawdownData.map((d) => d.drawdown));
 
+// Define tooltip component outside to avoid recreating on each render
+function EquityTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: Array<{ value: number }>;
+  label?: string;
+}) {
+  if (active && payload && payload.length) {
+    return (
+      <div className="glass px-3 py-2 border border-border">
+        <p className="text-xs text-text-muted">{label}</p>
+        <p className="text-sm font-semibold text-emerald mono">
+          ${payload[0].value.toLocaleString()}
+        </p>
+      </div>
+    );
+  }
+  return null;
+}
+
 export default function AnalyticsPage() {
   const [selectedRange, setSelectedRange] = useState<TimeRange>("30D");
   const mounted = useMounted();
-
-  const CustomTooltip = ({
-    active,
-    payload,
-    label,
-  }: {
-    active?: boolean;
-    payload?: Array<{ value: number }>;
-    label?: string;
-  }) => {
-    if (active && payload && payload.length) {
-      return (
-        <div className="glass px-3 py-2 border border-border">
-          <p className="text-xs text-text-muted">{label}</p>
-          <p className="text-sm font-semibold text-emerald mono">
-            ${payload[0].value.toLocaleString()}
-          </p>
-        </div>
-      );
-    }
-    return null;
-  };
 
   return (
     <PageWrapper title="Analytics" subtitle="Analyze your trading performance">
@@ -120,7 +143,7 @@ export default function AnalyticsPage() {
                     tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`}
                     width={60}
                   />
-                  <Tooltip content={<CustomTooltip />} />
+                  <Tooltip content={<EquityTooltip />} />
                   <Area
                     type="monotone"
                     dataKey="value"

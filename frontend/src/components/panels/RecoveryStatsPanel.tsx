@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { X, TrendingUp, TrendingDown, AlertTriangle, Target, Clock, BarChart3, Zap } from "lucide-react";
+import { useEffect, useState, useCallback } from "react";
+import { X, TrendingDown, AlertTriangle, Target, Clock, BarChart3, Zap } from "lucide-react";
 import { getRecoveryStats, RecoveryStats, Position } from "@/lib/api";
 
 interface RecoveryStatsPanelProps {
@@ -15,16 +15,24 @@ export function RecoveryStatsPanel({ position, isOpen, onClose }: RecoveryStatsP
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const fetchStats = useCallback(async (symbol: string) => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const data = await getRecoveryStats(symbol);
+      setStats(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch stats");
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (isOpen && position) {
-      setIsLoading(true);
-      setError(null);
-      getRecoveryStats(position.symbol)
-        .then(setStats)
-        .catch((err) => setError(err.message))
-        .finally(() => setIsLoading(false));
+      fetchStats(position.symbol);
     }
-  }, [isOpen, position]);
+  }, [isOpen, position, fetchStats]);
 
   if (!isOpen) return null;
 

@@ -24,38 +24,35 @@ interface EquityCurveChartProps {
 
 const timeRanges: EquityPeriod[] = ["7D", "30D", "90D", "ALL"];
 
+// Define tooltip component outside to avoid recreating on each render
+function ChartTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: Array<{ value: number }>;
+  label?: string;
+}) {
+  if (active && payload && payload.length) {
+    return (
+      <div className="chart-tooltip glass px-3 py-2 border border-border">
+        <p className="text-xs text-text-muted">{label}</p>
+        <p className="text-sm font-semibold text-emerald mono">
+          ${payload[0].value.toLocaleString()}
+        </p>
+      </div>
+    );
+  }
+  return null;
+}
+
 export function EquityCurveChart({
   data,
   selectedPeriod = "30D",
   onPeriodChange,
 }: EquityCurveChartProps) {
   const mounted = useMounted();
-
-  const formatValue = (value: number) => {
-    return `$${value.toLocaleString()}`;
-  };
-
-  const CustomTooltip = ({
-    active,
-    payload,
-    label,
-  }: {
-    active?: boolean;
-    payload?: Array<{ value: number }>;
-    label?: string;
-  }) => {
-    if (active && payload && payload.length) {
-      return (
-        <div className="chart-tooltip glass px-3 py-2 border border-border">
-          <p className="text-xs text-text-muted">{label}</p>
-          <p className="text-sm font-semibold text-emerald mono">
-            {formatValue(payload[0].value)}
-          </p>
-        </div>
-      );
-    }
-    return null;
-  };
 
   return (
     <div className="glass-gradient p-5 opacity-0 animate-slide-up stagger-4 h-full">
@@ -108,7 +105,7 @@ export function EquityCurveChart({
                 dx={-10}
                 width={50}
               />
-              <Tooltip content={<CustomTooltip />} />
+              <Tooltip content={<ChartTooltip />} />
               <Area
                 type="monotone"
                 dataKey="value"
