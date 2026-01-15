@@ -20,6 +20,16 @@
 # Scanner universe - 469 stocks across all sectors
 # The volatility scanner will pick top 10 each day
 scanner_universe:
+  # Major Crypto (24/7 trading) - Alpaca format
+  crypto:
+    - BTC/USD    # Bitcoin
+    - ETH/USD    # Ethereum
+    - SOL/USD    # Solana
+    - LTC/USD    # Litecoin
+    - AVAX/USD   # Avalanche
+    - LINK/USD   # Chainlink
+    - DOGE/USD   # Dogecoin
+
   # S&P 500 Top Holdings (50)
   sp500:
     - AAPL

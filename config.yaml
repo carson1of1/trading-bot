@@ -39,7 +39,7 @@ entry_gate:
   max_trades_per_symbol_per_day: 2
   min_time_between_trades_minutes: 120
 exit_manager:
-  eod_close: true
+  eod_close: false  # Crypto trades 24/7 - no EOD close
   max_hold_hours: 168  # 7 days - let crypto positions run
   tier_0_hard_stop: -0.05
   tier_1_profit_floor: 0.0125
@@ -76,7 +76,7 @@ mode: PAPER
 
 # Crypto mode: true = 24/7 trading, false = market hours only
 # Set true for TRADELOCKER, false for Alpaca stocks
-crypto_mode: false
+crypto_mode: true
 parity_capture:
   enabled: false
   flush_interval: 1

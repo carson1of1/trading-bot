@@ -208,6 +208,14 @@ class TradingBot:
             else:
                 self.watchlist = static_watchlist
                 logger.warning("Scanner returned no symbols, falling back to static universe")
+
+            # Always add ALL crypto symbols - no scanner filtering for crypto
+            # Crypto trades 24/7, evaluate all of them every cycle
+            crypto_symbols = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'LTC/USD', 'AVAX/USD', 'LINK/USD', 'DOGE/USD']
+            for crypto in crypto_symbols:
+                if crypto not in self.watchlist:
+                    self.watchlist.append(crypto)
+            logger.info(f"Added ALL crypto (no scanner): {crypto_symbols}")
         else:
             self.scanner = None
             self.watchlist = static_watchlist
