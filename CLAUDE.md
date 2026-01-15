@@ -16,11 +16,12 @@ python3 bot.py --config custom.yaml      # Run with custom config
 
 ### Running Backtests
 ```bash
-python3 backtest.py                                    # Uses universe.yaml symbols
+python3 backtest.py                                    # Uses config.yaml watchlist_file (universe_original.yaml)
 python3 backtest.py --symbols AAPL MSFT SPY            # Specific symbols
 python3 backtest.py --symbols SPY --start 2025-11-01 --end 2025-12-15
 python3 backtest.py --longs-only                       # Only LONG positions
 python3 backtest.py --shorts-only                      # Only SHORT positions
+python3 backtest.py --trailing-stop --trailing-activation-pct 2.0  # Test trailing stop options
 ```
 
 ### Running Tests
@@ -63,9 +64,12 @@ python3 -m pytest -k "test_check_exit"   # Run tests matching pattern
 7. `ExitManager.evaluate_exit()` checks exit conditions each cycle
 
 ### Configuration
-- **config.yaml**: Main config (mode, risk params, strategy weights, exit thresholds)
-- **universe.yaml**: Stock watchlist (`scanner_universe` with 400 symbols across categories)
+- **config.yaml**: Main config (mode, risk params, strategy weights, exit thresholds). Set `watchlist_file` to choose universe.
+- **universe_original.yaml**: Full universe with 469 symbols INCLUDING crypto (BTC-USD, ETH-USD, etc.) - DEFAULT for live trading
+- **universe.yaml**: Smaller 121-symbol TradeLocker-compatible universe (no crypto) - for TradeLocker mode only
 - **.env**: Alpaca API keys (`ALPACA_API_KEY`, `ALPACA_SECRET_KEY`)
+
+**IMPORTANT**: Both bot.py and backtest.py read `watchlist_file` from config.yaml. Always use `universe_original.yaml` for consistent backtest vs live results.
 
 ### Trading Modes (set in config.yaml `mode:`)
 - `PAPER`: Paper trading via Alpaca paper API
@@ -78,11 +82,31 @@ python3 -m pytest -k "test_check_exit"   # Run tests matching pattern
 ### Signal Format
 Strategies return: `{'action': 'BUY'|'SELL'|'HOLD', 'confidence': 0-100, 'strategy': str, 'reasoning': str, 'components': dict}`
 
-### Exit Tiers (ExitManager)
-1. **Hard Stop**: -2% from entry (always active)
+### Exit Tiers (ExitManager) - Current Live Config
+1. **Hard Stop**: -5% from entry (always active)
 2. **Profit Floor**: Locks +0.5% profit after reaching +1.25%
-3. **ATR Trailing**: Activates at +1.75%, trails by ATR × 2.0
-4. **Partial Take-Profit**: Closes 50% at +2%
+3. **ATR Trailing**: Activates at +2.0%, trails by ATR × 2.0
+4. **Partial Take-Profit**: Disabled (100%@50%, 100%@100%)
+5. **EOD Close**: DISABLED (stocks hold overnight)
+6. **Trailing Stop at Break-Even**: DISABLED (tested, worse performance)
+
+### Daily Drawdown Guard
+Tiered system to protect capital:
+- **Warning (2.0%)**: Position sizes reduced to 50%
+- **Soft Limit (2.5%)**: New entries blocked, move stops to breakeven
+- **Medium (3.0%)**: Partial liquidation (close 50% of positions)
+- **Hard Limit (4.0%)**: Full liquidation, trading halted for day
+
+### Backtest Performance (Jan 2025 - Jan 2026)
+With current config: 362% return, 78% win rate, 2.19 profit factor, 10% max drawdown.
+Top symbols: APLD, RGTI, MNTS, CIFR, QS, SEDG, SOXL.
 
 ### Broker Abstraction
 Tests mock `create_broker()` to inject `FakeBroker`. Real code uses `BrokerFactory.create_broker()` which reads mode from config.
+
+## Critical Notes for Future Sessions
+
+1. **Backtest/Live Parity**: backtest.py now reads universe from `config.yaml` (same as bot.py). Never hardcode universe paths.
+2. **EOD Close Default**: Both bot.py and backtest.py default to `eod_close: false`. Stocks hold overnight.
+3. **Crypto Support**: Crypto symbols (BTC-USD, etc.) trade 24/7 with no EOD close. Include them in universe_original.yaml.
+4. **Trailing Stop**: The break-even trailing stop was tested and REJECTED due to worse backtest performance. Keep disabled.

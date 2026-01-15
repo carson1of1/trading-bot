@@ -44,6 +44,7 @@ from core import (
     YFinanceDataFetcher,
 )
 from core.risk import DailyDrawdownGuard, DrawdownTier
+from core.symbol_mapping import is_crypto
 from strategies import StrategyManager
 
 logging.basicConfig(
@@ -83,7 +84,9 @@ class Backtest1Hour:
         longs_only: bool = False,
         shorts_only: bool = False,
         scanner_enabled: bool = None,
-        kill_switch_trace: bool = False
+        kill_switch_trace: bool = False,
+        crypto_intrabar_entry: bool = False,
+        timeframe: str = '1Hour'
     ):
         """
         Initialize the backtester.
@@ -94,12 +97,16 @@ class Backtest1Hour:
             longs_only: Only take LONG positions
             shorts_only: Only take SHORT positions
             scanner_enabled: Override scanner enabled setting
+            crypto_intrabar_entry: If True, crypto enters at signal bar close (not next bar open)
+            timeframe: Bar timeframe - '1Hour', '15Min', '5Min', '1Min'
         """
         self.initial_capital = initial_capital
         self.config = config or self._load_config()
         self.longs_only = longs_only
         self.shorts_only = shorts_only
         self.kill_switch_trace = kill_switch_trace
+        self.crypto_intrabar_entry = crypto_intrabar_entry
+        self.timeframe = timeframe
         self._kill_switch_trace_log = []
 
         # Initialize volatility scanner if enabled
@@ -181,7 +188,7 @@ class Backtest1Hour:
 
         # EOD close simulation
         self.eod_close_bar_hour = 15  # Close on bars starting at 3 PM or later
-        self.eod_close_enabled = True
+        self.eod_close_enabled = exit_config.get('eod_close', False)  # Default False to match bot.py
 
         # Trailing stop configuration
         trailing_config = self.config.get('trailing_stop', {})
@@ -321,7 +328,7 @@ class Backtest1Hour:
 
     def fetch_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
-        Fetch 1-hour historical data for a symbol with warmup for SMA200.
+        Fetch historical data for a symbol with warmup for SMA200.
 
         Args:
             symbol: Stock ticker symbol
@@ -332,15 +339,26 @@ class Backtest1Hour:
             DataFrame with OHLCV data and indicators, or None if unavailable
         """
         try:
-            # Add 40 days warmup for SMA200 calculation
-            warmup_days = 40
+            # Dynamic warmup based on timeframe
+            # Need ~200 bars for SMA200. Convert to days:
+            # 1Hour: 200 bars * 1hr / 24hr = 8.3 days -> use 40 days for safety
+            # 15Min: 200 bars * 15min / 1440min/day = 2.1 days -> use 5 days
+            # 5Min: 200 bars * 5min / 1440min/day = 0.7 days -> use 3 days
+            # 1Min: 200 bars * 1min / 1440min/day = 0.14 days -> use 2 days
+            warmup_map = {
+                '1Hour': 40,
+                '15Min': 5,
+                '5Min': 3,
+                '1Min': 2,
+            }
+            warmup_days = warmup_map.get(self.timeframe, 40)
             warmup_start = (
                 datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=warmup_days)
             ).strftime('%Y-%m-%d')
 
             df = self.data_fetcher.get_historical_data_range(
                 symbol=symbol,
-                timeframe='1Hour',
+                timeframe=self.timeframe,
                 start_date=warmup_start,
                 end_date=end_date
             )
@@ -352,7 +370,7 @@ class Backtest1Hour:
             # Add indicators
             df = self.indicators.add_all_indicators(df)
 
-            logger.info(f"Fetched {len(df)} 1-hour bars for {symbol}")
+            logger.info(f"Fetched {len(df)} {self.timeframe} bars for {symbol}")
             return df
 
         except Exception as e:
@@ -979,24 +997,86 @@ class Backtest1Hour:
                                     self._diag_entry_blocks[symbol]['other'] += 1
 
                         if entry_allowed:
+                            # Determine direction
                             if signal == 1:  # BUY -> LONG
                                 if self.shorts_only:
                                     continue
-
-                                pending_entry = {
-                                    'direction': 'LONG',
-                                    'signal_price': current_price,
-                                    'strategy': row.get('strategy', 'Unknown'),
-                                    'reasoning': row.get('reasoning', '')
-                                }
+                                direction = 'LONG'
+                                strategy_name = row.get('strategy', 'Unknown')
                             elif signal == -1:  # SELL -> SHORT
                                 if self.longs_only:
                                     continue
+                                direction = 'SHORT'
+                                strategy_name = row.get('strategy', 'Unknown') + '_SHORT'
+                            else:
+                                continue
 
+                            # Crypto intrabar: enter immediately at close price
+                            if self.crypto_intrabar_entry and is_crypto(symbol):
+                                # Enter at current bar's close (intrabar entry)
+                                if direction == 'LONG':
+                                    realistic_entry_price = current_price * (1 + self.ENTRY_SLIPPAGE + self.BID_ASK_SPREAD)
+                                    stop_loss_price = realistic_entry_price * (1 - self.default_stop_loss_pct)
+                                    take_profit_price = realistic_entry_price * (1 + self.default_take_profit_pct)
+                                else:
+                                    realistic_entry_price = current_price * (1 - self.ENTRY_SLIPPAGE - self.BID_ASK_SPREAD)
+                                    stop_loss_price = realistic_entry_price * (1 + self.default_stop_loss_pct)
+                                    take_profit_price = realistic_entry_price * (1 - self.default_take_profit_pct)
+
+                                # Calculate position size
+                                intra_shares = self.risk_manager.calculate_position_size(
+                                    self.portfolio_value, realistic_entry_price, stop_loss_price
+                                )
+
+                                # Execute entry
+                                entry_executed = False
+                                if direction == 'LONG':
+                                    cost = intra_shares * realistic_entry_price * (1 + self.COMMISSION)
+                                    if cost <= self.cash and intra_shares > 0:
+                                        self.cash -= cost
+                                        position_direction = 'LONG'
+                                        entry_executed = True
+                                else:
+                                    margin_required = intra_shares * realistic_entry_price * 0.5
+                                    if margin_required <= self.cash and intra_shares > 0:
+                                        self.cash += intra_shares * realistic_entry_price * (1 - self.COMMISSION)
+                                        position_direction = 'SHORT'
+                                        entry_executed = True
+
+                                if entry_executed:
+                                    entry_price = realistic_entry_price
+                                    shares = intra_shares
+                                    entry_index = i
+                                    entry_time = bar_datetime
+                                    highest_price = realistic_entry_price
+                                    lowest_price = realistic_entry_price
+                                    last_trade_bar = i
+                                    entry_strategy = strategy_name
+                                    entry_reasoning = row.get('reasoning', '')
+
+                                    # Reset trailing stop state
+                                    trailing_activated = False
+                                    trailing_stop_price = 0.0
+
+                                    # Register with exit manager
+                                    if self.use_tiered_exits and self.exit_manager:
+                                        self.exit_manager.register_position(
+                                            symbol=symbol,
+                                            entry_price=entry_price,
+                                            quantity=shares,
+                                            entry_time=timestamp if isinstance(timestamp, datetime) else None,
+                                            direction=direction
+                                        )
+
+                                    # Record entry for gate
+                                    if self.entry_gate:
+                                        self.entry_gate.record_entry(symbol, timestamp)
+                            else:
+                                # Standard behavior: queue for next bar's open
                                 pending_entry = {
-                                    'direction': 'SHORT',
+                                    'direction': direction,
                                     'signal_price': current_price,
-                                    'strategy': row.get('strategy', 'Unknown') + '_SHORT',
+                                    'strategy': strategy_name,
                                     'reasoning': row.get('reasoning', '')
                                 }
 
@@ -1525,13 +1605,19 @@ class Backtest1Hour:
                     continue
 
                 # Calculate entry price with slippage
-                open_price = row.get('open', current_price)
+                # Crypto intrabar: use close price (catch early movement)
+                # Standard: use open price (next bar entry simulation)
+                if self.crypto_intrabar_entry and is_crypto(symbol):
+                    base_price = current_price  # Enter at signal bar close
+                else:
+                    base_price = row.get('open', current_price)  # Enter at bar open
+
                 if direction == 'LONG':
-                    entry_price = open_price * (1 + self.ENTRY_SLIPPAGE)
+                    entry_price = base_price * (1 + self.ENTRY_SLIPPAGE)
                     stop_loss = entry_price * (1 - self.default_stop_loss_pct)
                     take_profit = entry_price * (1 + self.default_take_profit_pct)
                 else:
-                    entry_price = open_price * (1 - self.ENTRY_SLIPPAGE)
+                    entry_price = base_price * (1 - self.ENTRY_SLIPPAGE)
                     stop_loss = entry_price * (1 + self.default_stop_loss_pct)
                     take_profit = entry_price * (1 - self.default_take_profit_pct)
 
@@ -1980,7 +2066,7 @@ class Backtest1Hour:
         metrics = self.calculate_metrics(all_trades)
 
         results = {
-            'timeframe': '1Hour',
+            'timeframe': self.timeframe,
             'symbols': symbols,
             'start_date': start_date,
             'end_date': end_date,
@@ -2010,6 +2096,7 @@ def run_backtest(
     initial_capital: float = 100000.0,
     longs_only: bool = False,
     shorts_only: bool = False,
+    trailing_stop_overrides: Dict = None,
 ) -> Dict:
     """
     Run backtest with configuration from config.yaml.
@@ -2021,15 +2108,25 @@ def run_backtest(
         initial_capital: Starting capital
         longs_only: Only take LONG positions
         shorts_only: Only take SHORT positions
+        trailing_stop_overrides: Optional dict to override trailing_stop config (won't affect live config)
 
     Returns:
         dict: Backtest results including P&L, trades, metrics
     """
     bot_dir = Path(__file__).parent
 
+    # Load config first (needed for universe selection)
+    config_path = bot_dir / 'config.yaml'
+    config = {}
+    if config_path.exists():
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+
     # Load universe if no symbols provided
     if symbols is None:
-        universe_path = bot_dir / 'universe.yaml'
+        # Use same universe loading as bot.py - read from config
+        universe_file = config.get('trading', {}).get('watchlist_file', 'universe_original.yaml')
+        universe_path = bot_dir / universe_file
         if universe_path.exists():
             with open(universe_path, 'r') as f:
                 universe = yaml.safe_load(f)
@@ -2061,12 +2158,12 @@ def run_backtest(
     if start_date is None:
         start_date = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
 
-    # Load config and run backtest
-    config_path = bot_dir / 'config.yaml'
-    config = {}
-    if config_path.exists():
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
+    # Apply trailing stop overrides (for testing without modifying config.yaml)
+    if trailing_stop_overrides:
+        if 'trailing_stop' not in config:
+            config['trailing_stop'] = {}
+        config['trailing_stop'].update(trailing_stop_overrides)
+        logger.info(f"Trailing stop overrides applied: {trailing_stop_overrides}")
 
     backtester = Backtest1Hour(
         initial_capital=initial_capital,
@@ -2087,8 +2184,24 @@ def main():
     parser.add_argument('--capital', type=float, default=100000, help='Initial capital')
     parser.add_argument('--longs-only', action='store_true', help='Only take LONG positions')
     parser.add_argument('--shorts-only', action='store_true', help='Only take SHORT positions')
+    # Trailing stop overrides (test without affecting live config.yaml)
+    parser.add_argument('--trailing-stop', action='store_true', help='Enable trailing stop (overrides config)')
+    parser.add_argument('--trailing-activation-pct', type=float, help='Trailing stop activation %% (e.g., 2.0 for 2%%)')
+    parser.add_argument('--trailing-breakeven', action='store_true', default=True, help='Move stop to breakeven when activated')
+    parser.add_argument('--trailing-trail-pct', type=float, help='Trailing stop trail %% (e.g., 0.5 for 0.5%%)')
 
     args = parser.parse_args()
+
+    # Build trailing stop overrides if provided
+    trailing_overrides = {}
+    if args.trailing_stop:
+        trailing_overrides['enabled'] = True
+    if args.trailing_activation_pct is not None:
+        trailing_overrides['activation_pct'] = args.trailing_activation_pct
+    if args.trailing_breakeven:
+        trailing_overrides['move_to_breakeven'] = True
+    if args.trailing_trail_pct is not None:
+        trailing_overrides['trail_pct'] = args.trailing_trail_pct
 
     results = run_backtest(
         symbols=args.symbols,
@@ -2097,6 +2210,7 @@ def main():
         initial_capital=args.capital,
         longs_only=args.longs_only,
         shorts_only=args.shorts_only,
+        trailing_stop_overrides=trailing_overrides if trailing_overrides else None,
     )
 
     if results:
