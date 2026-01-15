@@ -1703,27 +1703,57 @@ class TradeLockerBroker(BrokerInterface):
 
     def _fetch_account_info(self):
         """Fetch account ID and account number after auth."""
-        try:
-            response = self._requests.get(
-                f"{self.base_url}/auth/jwt/all-accounts",
-                headers=self._get_headers()
-            )
-            response.raise_for_status()
-            data = response.json()
+        import time
+        for attempt in range(3):
+            try:
+                response = self._requests.get(
+                    f"{self.base_url}/auth/jwt/all-accounts",
+                    headers=self._get_headers()
+                )
+                response.raise_for_status()
+                data = response.json()
 
-            accounts = data.get('accounts', [])
-            if not accounts:
-                raise BrokerAPIError("No trading accounts found on TradeLocker")
+                # Handle different response formats
+                accounts = data.get('accounts', [])
+                if not accounts:
+                    # Check if data itself is the accounts list
+                    if isinstance(data, list):
+                        accounts = data
+                    # Check for 'd' wrapper
+                    elif 'd' in data:
+                        accounts = data.get('d', {}).get('accounts', [])
+                        if not accounts and isinstance(data.get('d'), list):
+                            accounts = data.get('d')
 
-            # Use the first account (or could be configured)
-            account = accounts[0]
-            self._account_id = str(account.get('id'))
-            self._acc_num = str(account.get('accNum'))
+                if not accounts:
+                    self.logger.warning(f"No accounts in response (attempt {attempt+1}/3): {str(data)[:200]}")
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s
+                        continue
+                    raise BrokerAPIError("No trading accounts found on TradeLocker")
 
-            self.logger.info(f"TradeLocker account: {self._acc_num} (ID: {self._account_id})")
+                # Use the first account (or could be configured)
+                account = accounts[0]
+                # Handle both dict and list account formats
+                if isinstance(account, dict):
+                    self._account_id = str(account.get('id'))
+                    self._acc_num = str(account.get('accNum'))
+                elif isinstance(account, list) and len(account) >= 2:
+                    # Array format: [id, accNum, ...]
+                    self._account_id = str(account[0])
+                    self._acc_num = str(account[1])
+                else:
+                    raise BrokerAPIError(f"Unknown account format: {account}")
 
-        except Exception as e:
-            raise BrokerAPIError(f"Failed to fetch TradeLocker account info: {e}")
+                self.logger.info(f"TradeLocker account: {self._acc_num} (ID: {self._account_id})")
+                break  # Success, exit retry loop
+
+            except Exception as e:
+                if attempt < 2:
+                    self.logger.warning(f"Auth attempt {attempt+1}/3 failed: {e}")
+                    time.sleep(2 ** attempt)
+                else:
+                    raise BrokerAPIError(f"Failed to fetch TradeLocker account info: {e}")
 
     def _get_headers(self) -> Dict[str, str]:
         """Get request headers with auth token."""
@@ -2084,28 +2114,99 @@ class TradeLockerBroker(BrokerInterface):
                 orders_data = []
             orders = []
 
+            # Log raw orders data for debugging
+            if orders_data:
+                self.logger.debug(f"Raw orders data (first 3): {orders_data[:3] if len(orders_data) > 3 else orders_data}")
+
             for ord in orders_data:
-                inst_id = ord.get('tradableInstrumentId')
-                symbol = self._get_symbol_from_id(inst_id)
+                # Handle array format from TradeLocker
+                # Based on error analysis, format appears to be:
+                # [id, inst_id, route_id, ?, side, qty, type, status, ...]
+                if isinstance(ord, list):
+                    if len(ord) < 6:
+                        self.logger.debug(f"Skipping short order array: {ord}")
+                        continue
 
-                order_status = ord.get('status', '').lower()
+                    try:
+                        order_id = str(ord[0]) if ord[0] else None
+                        inst_id = int(ord[1]) if ord[1] else None
+                        symbol = self._get_symbol_from_id(inst_id) if inst_id else "UNKNOWN"
 
-                # Filter by status if needed
-                if status == 'open' and order_status not in ['new', 'pending', 'working']:
-                    continue
+                        # Detect side position by finding 'buy' or 'sell' string
+                        side = 'buy'
+                        side_idx = -1
+                        for i, val in enumerate(ord):
+                            if isinstance(val, str) and val.lower() in ('buy', 'sell'):
+                                side = val.lower()
+                                side_idx = i
+                                break
 
-                orders.append(Order(
-                    id=str(ord.get('id')),
-                    symbol=symbol,
-                    qty=float(ord.get('qty', ord.get('quantity', 0))),
-                    side=ord.get('side', '').lower(),
-                    type=ord.get('type', 'market').lower(),
-                    status=order_status,
-                    limit_price=float(ord.get('limitPrice')) if ord.get('limitPrice') else None,
-                    stop_price=float(ord.get('stopPrice')) if ord.get('stopPrice') else None,
-                    filled_qty=float(ord.get('filledQty', 0)),
-                    filled_avg_price=float(ord.get('avgFilledPrice')) if ord.get('avgFilledPrice') else None
-                ))
+                        # Qty should be numeric, find first numeric after inst_id that isn't tiny
+                        qty = 0
+                        for i in range(2, min(len(ord), 8)):
+                            if i == side_idx:
+                                continue
+                            try:
+                                val = float(ord[i]) if ord[i] else 0
+                                if val > 0 and val != inst_id:
+                                    qty = val
+                                    break
+                            except (ValueError, TypeError):
+                                continue
+
+                        # Get type and status from remaining fields
+                        order_type = 'market'
+                        order_status = 'unknown'
+                        for i, val in enumerate(ord):
+                            if isinstance(val, str):
+                                val_lower = val.lower()
+                                if val_lower in ('market', 'limit', 'stop'):
+                                    order_type = val_lower
+                                elif val_lower in ('new', 'pending', 'working', 'filled', 'cancelled', 'rejected'):
+                                    order_status = val_lower
+
+                        # Filter by status if needed
+                        if status == 'open' and order_status not in ['new', 'pending', 'working']:
+                            continue
+
+                        orders.append(Order(
+                            id=order_id,
+                            symbol=symbol,
+                            qty=qty,
+                            side=side,
+                            type=order_type,
+                            status=order_status,
+                            limit_price=None,
+                            stop_price=None,
+                            filled_qty=0,
+                            filled_avg_price=None
+                        ))
+                    except Exception as e:
+                        self.logger.warning(f"Failed to parse order array: {ord}, error: {e}")
+                        continue
+                else:
+                    # Handle dict format
+                    inst_id = ord.get('tradableInstrumentId')
+                    symbol = self._get_symbol_from_id(inst_id)
+
+                    order_status = ord.get('status', '').lower()
+
+                    # Filter by status if needed
+                    if status == 'open' and order_status not in ['new', 'pending', 'working']:
+                        continue
+
+                    orders.append(Order(
+                        id=str(ord.get('id')),
+                        symbol=symbol,
+                        qty=float(ord.get('qty', ord.get('quantity', 0))),
+                        side=ord.get('side', '').lower(),
+                        type=ord.get('type', 'market').lower(),
+                        status=order_status,
+                        limit_price=float(ord.get('limitPrice')) if ord.get('limitPrice') else None,
+                        stop_price=float(ord.get('stopPrice')) if ord.get('stopPrice') else None,
+                        filled_qty=float(ord.get('filledQty', 0)),
+                        filled_avg_price=float(ord.get('avgFilledPrice')) if ord.get('avgFilledPrice') else None
+                    ))
 
             return orders
 
@@ -2447,23 +2548,29 @@ class TradeLockerBroker(BrokerInterface):
         if price is None:
             raise BrokerAPIError("price is required for bracket orders")
 
-        symbol = symbol.upper().strip()
+        # Translate yfinance crypto symbols to TradeLocker format (FIL-USD -> FILUSD)
+        from core.symbol_mapping import to_tradelocker
+        symbol = to_tradelocker(symbol.upper().strip())
         side = side.lower()
 
         # Calculate stop and take profit prices
+        # Use 4 decimal precision for crypto, 2 for stocks
+        from core.symbol_mapping import is_crypto
+        decimals = 4 if is_crypto(symbol) else 2
+
         if side == 'buy':
-            stop_price = round(price * (1 - stop_loss_percent), 2)
-            tp_price = round(price * (1 + take_profit_percent), 2)
+            stop_price = round(price * (1 - stop_loss_percent), decimals)
+            tp_price = round(price * (1 + take_profit_percent), decimals)
         else:
-            stop_price = round(price * (1 + stop_loss_percent), 2)
-            tp_price = round(price * (1 - take_profit_percent), 2)
+            stop_price = round(price * (1 + stop_loss_percent), decimals)
+            tp_price = round(price * (1 - take_profit_percent), decimals)
 
         # Get instrument info
         inst_info = self._get_instrument_id(symbol)
         instrument_id = inst_info['instrument_id']
         route_id = inst_info['route_id']
 
-        # Build order with stopLoss and takeProfit (absolute prices)
+        # Build order with stopLoss only (TP handled by ExitManager for better control)
         # IOC is required for market orders on TradeLocker (GTC/DAY forbidden)
         order_payload = {
             "tradableInstrumentId": instrument_id,
@@ -2474,15 +2581,14 @@ class TradeLockerBroker(BrokerInterface):
             "routeId": route_id,
             "price": 0,
             "stopLoss": stop_price,
-            "stopLossType": "absolute",
-            "takeProfit": tp_price,
-            "takeProfitType": "absolute"
+            "stopLossType": "absolute"
+            # Note: TP removed - ExitManager handles take profit with trailing/partial exits
         }
 
         try:
             self.logger.info(
-                f"Submitting bracket order: {side.upper()} {qty} {symbol} "
-                f"(SL={stop_price}, TP={tp_price})"
+                f"Submitting bracket order: {side.upper()} {qty} {symbol} @ ~${price:.4f} "
+                f"(SL={stop_price})"
             )
 
             response = self._requests.post(

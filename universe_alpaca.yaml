@@ -1,0 +1,35 @@
+# Alpaca Universe - Stocks + Major Crypto
+# For use with Alpaca broker (LIVE or PAPER mode)
+
+scanner_universe:
+  # Major Crypto (tight spreads on Alpaca)
+  crypto:
+    - BTC/USD    # Bitcoin
+    - ETH/USD    # Ethereum
+    - SOL/USD    # Solana
+    - LTC/USD    # Litecoin
+    - AVAX/USD   # Avalanche
+    - LINK/USD   # Chainlink
+
+  # Top Volatile Stocks (from backtest top performers)
+  stocks:
+    - MAXN    # Solar - top performer
+    - RGTI    # Quantum computing
+    - IONQ    # Quantum computing
+    - MNTS    # Space
+    - BTDR    # BTC Mining
+    - APLD    # BTC Data Center
+    - IREN    # BTC Mining
+    - ACHR    # Air Taxi
+    - MARA    # BTC Mining
+    - RIOT    # BTC Mining
+    - COIN    # Crypto exchange
+    - HOOD    # Trading platform
+    - TSLA    # EV
+    - NVDA    # AI/GPU
+    - AMD     # Semiconductors
+    - PLTR    # AI/Data
+    - SMCI    # AI Servers
+    - ARM     # Semiconductors
+    - MSTR    # BTC Treasury
+    - SOFI    # Fintech

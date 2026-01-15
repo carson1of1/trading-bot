@@ -1826,7 +1826,10 @@ class TradingBot:
                 try:
                     # FIX (Jan 2026): Use 100 bars to ensure sufficient data for ATR and indicators
                     # Previously 50 bars could cause insufficient warmup for some calculations
-                    data = self.fetch_data(symbol, bars=100)
+                    # FIX (Jan 15, 2026): Convert TradeLocker symbols to yfinance format for data fetch
+                    from core.symbol_mapping import to_yfinance
+                    data_symbol = to_yfinance(symbol)
+                    data = self.fetch_data(data_symbol, bars=100)
                     if data is None:
                         logger.warning(f"EXIT_CHECK | {symbol} | No data available")
                         continue

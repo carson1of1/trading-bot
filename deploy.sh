@@ -4,8 +4,8 @@
 
 set -e
 
-AWS_HOST="ubuntu@18.220.234.234"
-KEY="~/Downloads/*.pem"
+AWS_HOST="ubuntu@13.58.138.4"
+KEY="$HOME/Downloads/trading-bot-key.pem"
 REMOTE_DIR="~/trading-bot"
 
 echo "Deploying to AWS..."
@@ -21,7 +21,7 @@ rsync -avz --delete \
   --exclude 'venv/' \
   --exclude 'frontend/node_modules/' \
   --exclude 'frontend/.next/' \
-  /home/carsonodell/trading-bot/ $AWS_HOST:$REMOTE_DIR/
+  /home/carsonodell/projects/trading-bot/ $AWS_HOST:$REMOTE_DIR/
 
 echo "Restarting services..."
 

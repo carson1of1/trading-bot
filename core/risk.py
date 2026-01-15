@@ -2340,13 +2340,19 @@ class DailyDrawdownGuard:
 
             # Close each position
             for pos in positions:
-                symbol = pos.get('symbol') or (pos.symbol if hasattr(pos, 'symbol') else None)
-                qty = pos.get('qty') or (int(pos.qty) if hasattr(pos, 'qty') else 0)
-                direction = pos.get('direction', 'LONG')
-
-                # Handle position object or dict
-                if hasattr(pos, 'side'):
-                    direction = 'LONG' if pos.side == 'long' else 'SHORT'
+                # Handle both Position dataclass and dict formats
+                if hasattr(pos, 'symbol'):
+                    # Position dataclass
+                    symbol = pos.symbol
+                    qty = int(pos.qty) if hasattr(pos, 'qty') else 0
+                    direction = 'LONG' if getattr(pos, 'side', 'long') == 'long' else 'SHORT'
+                elif isinstance(pos, dict):
+                    # Dict format
+                    symbol = pos.get('symbol')
+                    qty = int(pos.get('qty', 0))
+                    direction = pos.get('direction', 'LONG')
+                else:
+                    continue
 
                 if not symbol or qty <= 0:
                     continue

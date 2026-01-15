@@ -1,5 +1,5 @@
 breakout_scanner:
-  enabled: false  # Disabled for TradeLocker - scanned symbols may not exist there
+  enabled: true  # Scans for breakout candidates
   lookback_bars: 20
   max_candidates: 30
   max_price: 500.0
@@ -39,7 +39,7 @@ entry_gate:
   max_trades_per_symbol_per_day: 2
   min_time_between_trades_minutes: 120
 exit_manager:
-  eod_close: false  # Crypto trades 24/7 - no EOD close
+  eod_close: true
   max_hold_hours: 168  # 7 days - let crypto positions run
   tier_0_hard_stop: -0.05
   tier_1_profit_floor: 0.0125
@@ -48,7 +48,7 @@ exit_manager:
   tier_4_partial_take2: 1.0  # Disabled
 hot_stocks:
   cache_hours: 20
-  enabled: false  # Disabled for TradeLocker - those symbols don't exist there
+  enabled: true  # Daily gainers/losers scanner
   max_price: 1000
   min_price: 5
   min_volume: 500000
@@ -64,8 +64,19 @@ losing_streak_guard:
   losing_threshold_r: 0.5
   min_losing_trades: 2
   throttle_multiplier: 0.5
-mode: TRADELOCKER
-crypto_mode: true  # 24/7 trading, bypass market hours checks
+# ============================================================
+# BROKER MODE SWITCH - Change this to switch brokers
+# ============================================================
+# Options:
+#   PAPER      - Alpaca paper trading (stocks + crypto)
+#   LIVE       - Alpaca live trading (stocks + crypto)
+#   TRADELOCKER - TradeLocker prop firm (crypto CFDs)
+# ============================================================
+mode: PAPER
+
+# Crypto mode: true = 24/7 trading, false = market hours only
+# Set true for TRADELOCKER, false for Alpaca stocks
+crypto_mode: false
 parity_capture:
   enabled: false
   flush_interval: 1
@@ -73,7 +84,7 @@ parity_capture:
   include_indicators: true
   output_path: logs/parity_capture_1hour.jsonl
 premarket_scanner:
-  enabled: false  # Disabled for TradeLocker - scanned symbols may not exist there
+  enabled: true  # Scans for premarket gaps
   max_gap_pct: 30.0
   max_price: 500.0
   max_symbols: 20
@@ -120,14 +131,20 @@ timeframe: 1Hour
 trading:
   lookback_period: 200
   warmup_bars: 200
-  watchlist_file: universe_tradelocker_crypto.yaml  # Crypto focus for 423% returns
+  # ============================================================
+  # WATCHLIST - Change based on mode above
+  # ============================================================
+  # For TRADELOCKER: universe_tradelocker_crypto.yaml
+  # For ALPACA:      universe_original.yaml (full scanner universe)
+  # ============================================================
+  watchlist_file: universe_original.yaml
 trailing_stop:
   activation_pct: 0.15
   enabled: false
   move_to_breakeven: true
   trail_pct: 0.15
 volatility_scanner:
-  enabled: false  # Disabled for TradeLocker - use fixed symbol list instead
+  enabled: true  # Scans for volatile stocks daily
   min_market_cap: 300000000
   min_price: 5
   min_volume: 500000

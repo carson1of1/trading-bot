@@ -5,7 +5,7 @@ yfinance uses: BTC-USD, ETH-USD, etc.
 TradeLocker uses: BTCUSD, ETHUSD, etc.
 """
 
-# yfinance -> TradeLocker mapping
+# Known crypto symbols for explicit mapping (optional overrides)
 YFINANCE_TO_TRADELOCKER = {
     'BTC-USD': 'BTCUSD',
     'ETH-USD': 'ETHUSD',
@@ -29,15 +29,51 @@ TRADELOCKER_TO_YFINANCE = {v: k for k, v in YFINANCE_TO_TRADELOCKER.items()}
 
 
 def to_tradelocker(symbol: str) -> str:
-    """Convert yfinance symbol to TradeLocker format."""
-    return YFINANCE_TO_TRADELOCKER.get(symbol, symbol)
+    """Convert yfinance symbol to TradeLocker format.
+
+    Handles both explicit mappings and auto-conversion of XXX-USD to XXXUSD.
+    """
+    # Check explicit mapping first
+    if symbol in YFINANCE_TO_TRADELOCKER:
+        return YFINANCE_TO_TRADELOCKER[symbol]
+
+    # Auto-convert XXX-USD to XXXUSD for crypto
+    if symbol.endswith('-USD'):
+        return symbol.replace('-USD', 'USD')
+
+    # Return as-is for stocks and other symbols
+    return symbol
 
 
 def to_yfinance(symbol: str) -> str:
-    """Convert TradeLocker symbol to yfinance format."""
-    return TRADELOCKER_TO_YFINANCE.get(symbol, symbol)
+    """Convert TradeLocker symbol to yfinance format.
+
+    Handles both explicit mappings and auto-conversion of XXXUSD to XXX-USD.
+    """
+    # Check explicit mapping first
+    if symbol in TRADELOCKER_TO_YFINANCE:
+        return TRADELOCKER_TO_YFINANCE[symbol]
+
+    # Auto-convert XXXUSD to XXX-USD for crypto
+    # Only for symbols ending in USD that look like crypto (e.g., BTCUSD, ETHUSD)
+    if symbol.endswith('USD') and len(symbol) > 3:
+        base = symbol[:-3]  # Remove 'USD'
+        # Avoid converting stock symbols like 'NVDA' that happen to... wait, NVDA doesn't end in USD
+        # This should be safe for crypto symbols
+        return f"{base}-USD"
+
+    # Return as-is for stocks and other symbols
+    return symbol
 
 
 def is_crypto(symbol: str) -> bool:
     """Check if symbol is a crypto pair."""
-    return symbol in YFINANCE_TO_TRADELOCKER or symbol in TRADELOCKER_TO_YFINANCE
+    # Check explicit mappings
+    if symbol in YFINANCE_TO_TRADELOCKER or symbol in TRADELOCKER_TO_YFINANCE:
+        return True
+
+    # Check pattern: XXX-USD (yfinance) or XXXUSD (TradeLocker)
+    if symbol.endswith('-USD') or (symbol.endswith('USD') and len(symbol) > 3):
+        return True
+
+    return False
