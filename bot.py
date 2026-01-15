@@ -85,6 +85,7 @@ from core import (
     LosingStreakGuard,
 )
 from strategies import StrategyManager
+from core.symbol_mapping import is_crypto  # Crypto 24/7 trading support
 
 # Configure logging with both console and file output
 log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -211,7 +212,7 @@ class TradingBot:
 
             # Always add ALL crypto symbols - no scanner filtering for crypto
             # Crypto trades 24/7, evaluate all of them every cycle
-            crypto_symbols = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'LTC/USD', 'AVAX/USD', 'LINK/USD', 'DOGE/USD']
+            crypto_symbols = ['BTC-USD', 'ETH-USD', 'SOL-USD', 'LTC-USD', 'AVAX-USD', 'LINK-USD', 'DOGE-USD']
             for crypto in crypto_symbols:
                 if crypto not in self.watchlist:
                     self.watchlist.append(crypto)
@@ -1113,6 +1114,19 @@ class TradingBot:
                 self.portfolio_value, realistic_entry_price, stop_price
             )
 
+            # FIX (Jan 2026): Crypto supports fractional shares - recalculate if qty=0 for crypto
+            if qty == 0 and is_crypto(symbol):
+                # Calculate fractional position size for crypto
+                risk_per_share = abs(realistic_entry_price - stop_price)
+                if risk_per_share > 0:
+                    max_dollar_risk = self.portfolio_value * 0.15  # 15% risk per trade
+                    max_position_value = self.portfolio_value * 0.15  # 15% max position
+                    qty_by_risk = max_dollar_risk / risk_per_share
+                    qty_by_value = max_position_value / realistic_entry_price
+                    qty = min(qty_by_risk, qty_by_value)
+                    qty = round(qty, 6)  # 6 decimal places for crypto
+                    logger.info(f"CRYPTO | {symbol} | Using fractional qty: {qty}")
+
             # Apply drawdown guard position size multiplier
             if self.drawdown_guard.enabled and self.drawdown_guard.position_size_multiplier < 1.0:
                 original_qty = qty
@@ -1909,6 +1923,7 @@ class TradingBot:
             qualifying_signals = []
             first_candle_logged = False  # FIX (Jan 2026): Log first candle for verification
             bar_validated = False  # FIX (Jan 2026): Track if we've validated the bar
+            stock_entries_blocked = False  # FIX (Jan 2026): Track if stock entries are blocked
             candle_timestamp = None  # FIX (Jan 2026): Track candle timestamp for signal display
 
             for symbol in self.watchlist:
@@ -1938,13 +1953,19 @@ class TradingBot:
                 if candle_timestamp is None and 'timestamp' in data.columns:
                     candle_timestamp = data['timestamp'].iloc[-1]
 
-                # FIX (Jan 2026): Validate bar is COMPLETE before ANY entries
-                # This prevents trading on incomplete forming bars
-                if not bar_validated and 'timestamp' in data.columns:
+                # FIX (Jan 2026): Validate bar is COMPLETE before ANY stock entries
+                # Crypto trades 24/7 and does not need bar validation
+                if is_crypto(symbol):
+                    pass  # Crypto: skip bar validation, always allow entries
+                elif not bar_validated and 'timestamp' in data.columns:
                     if not validate_candle_timestamp(data, expected_candle_hour):
-                        logger.warning("ENTRY_BLOCKED | Bar validation failed - skipping all entries this cycle")
-                        break  # Exit the loop entirely, no entries this cycle
+                        logger.warning("ENTRY_BLOCKED | Stock bar validation failed - skipping stock entries")
+                        stock_entries_blocked = True
                     bar_validated = True
+
+                # Skip stock entries if bar validation failed (crypto continues)
+                if stock_entries_blocked and not is_crypto(symbol):
+                    continue
 
                 current_price = data['close'].iloc[-1]
                 entry_signal = self.check_entry(symbol, data, current_price)

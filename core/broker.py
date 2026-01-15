@@ -834,16 +834,33 @@ class AlpacaBroker(BrokerInterface):
                 f"(stop={stop_price}, tp={take_profit_price})"
             )
 
-            alpaca_order = self.api.submit_order(
-                symbol=symbol,
-                qty=int(qty),
-                side=side,
-                type='market',
-                time_in_force=time_in_force,
-                order_class='bracket',
-                stop_loss={'stop_price': stop_price},
-                take_profit={'limit_price': take_profit_price}
-            )
+            # FIX (Jan 2026): Crypto fractional shares don't work with bracket orders
+            # Use simple market order for crypto, bracket for stocks
+            from core.symbol_mapping import is_crypto
+            if is_crypto(symbol):
+                # Crypto: use simple market order with fractional qty
+                # Convert symbol format: BTC-USD -> BTCUSD for Alpaca
+                alpaca_symbol = symbol.replace('-', '') if '-' in symbol else symbol
+                self.logger.info(f"CRYPTO ORDER | {alpaca_symbol} | qty={qty}")
+                alpaca_order = self.api.submit_order(
+                    symbol=alpaca_symbol,
+                    qty=qty,  # Keep fractional for crypto
+                    side=side,
+                    type='market',
+                    time_in_force='gtc'
+                )
+            else:
+                # Stocks: use bracket order with integer qty
+                alpaca_order = self.api.submit_order(
+                    symbol=symbol,
+                    qty=int(qty),
+                    side=side,
+                    type='market',
+                    time_in_force=time_in_force,
+                    order_class='bracket',
+                    stop_loss={'stop_price': stop_price},
+                    take_profit={'limit_price': take_profit_price}
+                )
 
             self.logger.info(f"Bracket order submitted: {alpaca_order.id}")
 

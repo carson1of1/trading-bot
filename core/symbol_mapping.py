@@ -38,7 +38,7 @@ def to_tradelocker(symbol: str) -> str:
         return YFINANCE_TO_TRADELOCKER[symbol]
 
     # Auto-convert XXX-USD to XXXUSD for crypto
-    if symbol.endswith('-USD'):
+    if symbol.endswith('-USD') or symbol.endswith('/USD'):
         return symbol.replace('-USD', 'USD')
 
     # Return as-is for stocks and other symbols
@@ -73,7 +73,7 @@ def is_crypto(symbol: str) -> bool:
         return True
 
     # Check pattern: XXX-USD (yfinance) or XXXUSD (TradeLocker)
-    if symbol.endswith('-USD') or (symbol.endswith('USD') and len(symbol) > 3):
+    if symbol.endswith('-USD') or symbol.endswith('/USD') or (symbol.endswith('USD') and len(symbol) > 3):
         return True
 
     return False
