@@ -1,0 +1,19 @@
+# TradeLocker Crypto Universe
+# Uses yfinance format for data fetching
+# Bot will translate to TradeLocker format (BTCUSD) for order execution
+
+scanner_universe:
+  crypto:
+    - BTC-USD    # Bitcoin -> BTCUSD on TradeLocker
+    - ETH-USD    # Ethereum -> ETHUSD
+    - SOL-USD    # Solana -> SOLUSD
+    - ADA-USD    # Cardano - TOP PERFORMER $68k -> ADAUSD
+    - NEAR-USD   # NEAR Protocol - TOP PERFORMER $53k -> NEARUSD
+    - ATOM-USD   # Cosmos - TOP PERFORMER $57k -> ATOMUSD
+    - AVAX-USD   # Avalanche - TOP PERFORMER $55k -> AVAXUSD
+    - LINK-USD   # Chainlink - TOP PERFORMER $43k -> LINKUSD
+    - LTC-USD    # Litecoin -> LTCUSD
+    - DOT-USD    # Polkadot -> DOTUSD
+    - XRP-USD    # Ripple -> XRPUSD
+    - UNI-USD    # Uniswap -> UNIUSD
+    - APT-USD    # Aptos -> APTUSD

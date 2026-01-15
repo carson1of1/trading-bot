@@ -2046,6 +2046,11 @@ class TradeLockerBroker(BrokerInterface):
     def get_position(self, symbol: str) -> Optional[Position]:
         """Get position for specific symbol."""
         symbol = symbol.upper().strip()
+
+        # Translate yfinance crypto symbols to TradeLocker format (BTC-USD -> BTCUSD)
+        from core.symbol_mapping import to_tradelocker
+        symbol = to_tradelocker(symbol)
+
         positions = self.get_positions()
         for pos in positions:
             if pos.symbol == symbol:
@@ -2133,6 +2138,11 @@ class TradeLockerBroker(BrokerInterface):
 
         self._check_rate_limit()
         symbol = symbol.upper().strip()
+
+        # Translate yfinance crypto symbols to TradeLocker format (BTC-USD -> BTCUSD)
+        from core.symbol_mapping import to_tradelocker
+        symbol = to_tradelocker(symbol)
+
         side = side.lower()
 
         # Get instrument info
@@ -2306,6 +2316,11 @@ class TradeLockerBroker(BrokerInterface):
     def close_position(self, symbol: str) -> bool:
         """Close position for symbol."""
         self._check_rate_limit()
+
+        # Translate yfinance crypto symbols to TradeLocker format (BTC-USD -> BTCUSD)
+        from core.symbol_mapping import to_tradelocker
+        symbol = to_tradelocker(symbol.upper().strip())
+
         try:
             # Get position to find position ID
             positions = self.get_positions()

@@ -1,0 +1,19 @@
+# TradeLocker Crypto Universe
+# Top performers from backtest analysis
+
+scanner_universe:
+  crypto:
+    - BTC-USD    # Bitcoin
+    - ETH-USD    # Ethereum  
+    - SOL-USD    # Solana
+    - ADA-USD    # Cardano - TOP PERFORMER
+    - NEAR-USD   # NEAR Protocol - TOP PERFORMER
+    - ATOM-USD   # Cosmos
+    - AVAX-USD   # Avalanche
+    - LINK-USD   # Chainlink
+    - LTC-USD    # Litecoin
+    - DOT-USD    # Polkadot
+    - XRP-USD    # Ripple
+    - MATIC-USD  # Polygon
+    - UNI-USD    # Uniswap
+    - APT-USD    # Aptos

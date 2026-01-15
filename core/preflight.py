@@ -173,6 +173,14 @@ class PreflightChecklist:
 
     def check_market_status(self) -> CheckResult:
         """Check that market is open or opens within 10 minutes."""
+        # Crypto mode: 24/7 trading, bypass market hours
+        if self.config.get('crypto_mode', False):
+            return CheckResult(
+                name="market_status",
+                passed=True,
+                message="Crypto mode: 24/7 trading enabled"
+            )
+
         from core.market_hours import MarketHours
 
         market_hours = MarketHours()

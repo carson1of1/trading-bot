@@ -39,12 +39,13 @@ entry_gate:
   max_trades_per_symbol_per_day: 2
   min_time_between_trades_minutes: 120
 exit_manager:
-  eod_close: true
-  max_hold_hours: 48
+  eod_close: false  # Crypto trades 24/7 - no EOD close
+  max_hold_hours: 168  # 7 days - let crypto positions run
   tier_0_hard_stop: -0.05
   tier_1_profit_floor: 0.0125
   tier_2_atr_trailing: 0.02
-  tier_3_partial_take: 0.03
+  tier_3_partial_take: 1.0  # Disabled (100% = never triggers)
+  tier_4_partial_take2: 1.0  # Disabled
 hot_stocks:
   cache_hours: 20
   enabled: false  # Disabled for TradeLocker - those symbols don't exist there
@@ -64,6 +65,7 @@ losing_streak_guard:
   min_losing_trades: 2
   throttle_multiplier: 0.5
 mode: TRADELOCKER
+crypto_mode: true  # 24/7 trading, bypass market hours checks
 parity_capture:
   enabled: false
   flush_interval: 1
@@ -91,8 +93,9 @@ risk_management:
   max_daily_loss_pct: 4.0
   max_open_positions: 3
   max_portfolio_risk_pct: 30.0
-  max_position_dollars: 999999
-  max_position_size_pct: 8
+  max_position_dollars: 999999  # No cap
+  max_position_size_pct: 15
+  max_shares: 999999  # No cap
   min_position_value: 50
   stop_loss_pct: 5.0
   take_profit_pct: 5.0
@@ -117,7 +120,7 @@ timeframe: 1Hour
 trading:
   lookback_period: 200
   warmup_bars: 200
-  watchlist_file: universe_tradelocker.yaml
+  watchlist_file: universe_tradelocker_crypto.yaml  # Crypto focus for 423% returns
 trailing_stop:
   activation_pct: 0.15
   enabled: false

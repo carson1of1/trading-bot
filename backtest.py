@@ -1244,6 +1244,9 @@ class Backtest1Hour:
                     self.cash += pnl
                     del open_positions[liq_symbol]
                     position_state[liq_symbol] = None
+                    # Unregister from ExitManager (FIX Jan 2026)
+                    if self.use_tiered_exits and self.exit_manager:
+                        self.exit_manager.unregister_position(liq_symbol)
 
                 # Skip to next event after full liquidation
                 continue
@@ -1297,6 +1300,13 @@ class Backtest1Hour:
                     if pos['shares'] <= 0:
                         del open_positions[liq_symbol]
                         position_state[liq_symbol] = None
+                        # Unregister from ExitManager (FIX Jan 2026)
+                        if self.use_tiered_exits and self.exit_manager:
+                            self.exit_manager.unregister_position(liq_symbol)
+                    else:
+                        # Update quantity in ExitManager (FIX Jan 2026)
+                        if self.use_tiered_exits and self.exit_manager:
+                            self.exit_manager.update_quantity(liq_symbol, pos['shares'])
 
             # ============ EXIT LOGIC ============
             if position_state[symbol] is not None:
@@ -1313,7 +1323,31 @@ class Backtest1Hour:
                 exit_reason = ''
                 exit_price = current_price
 
-                # Check stop loss and take profit FIRST to determine effective high/low
+                # Tiered exit logic via ExitManager (FIX Jan 2026 - was missing from interleaved!)
+                if self.use_tiered_exits and self.exit_manager:
+                    current_atr = self._calculate_atr(df, bar_index, period=14)
+                    exit_action = self.exit_manager.evaluate_exit(
+                        symbol, current_price, current_atr,
+                        bar_high=bar_high, bar_low=bar_low
+                    )
+
+                    if exit_action:
+                        exit_triggered = True
+                        exit_reason = exit_action['reason']
+
+                        # Apply slippage based on position direction
+                        if direction == 'LONG':
+                            if exit_reason in ['hard_stop', 'profit_floor', 'atr_trailing']:
+                                exit_price = exit_action.get('stop_price', current_price) * (1 - self.STOP_SLIPPAGE - self.BID_ASK_SPREAD)
+                            else:
+                                exit_price = current_price * (1 - self.EXIT_SLIPPAGE - self.BID_ASK_SPREAD)
+                        else:  # SHORT
+                            if exit_reason in ['hard_stop', 'profit_floor', 'atr_trailing']:
+                                exit_price = exit_action.get('stop_price', current_price) * (1 + self.STOP_SLIPPAGE + self.BID_ASK_SPREAD)
+                            else:
+                                exit_price = current_price * (1 + self.EXIT_SLIPPAGE + self.BID_ASK_SPREAD)
+
+                # Fallback: Check stop loss and take profit (legacy logic when tiered exits disabled or didn't trigger)
                 stop_loss = pos.get('stop_loss', 0)
                 take_profit = pos.get('take_profit', 0)
 
@@ -1427,6 +1461,10 @@ class Backtest1Hour:
                     position_state[symbol] = None
                     last_trade_bar[symbol] = bar_index
 
+                    # Unregister from ExitManager (FIX Jan 2026)
+                    if self.use_tiered_exits and self.exit_manager:
+                        self.exit_manager.unregister_position(symbol)
+
             # ============ ENTRY LOGIC ============
             if position_state[symbol] is None and signal != 0:
                 # Check cooldown
@@ -1531,6 +1569,16 @@ class Backtest1Hour:
                 }
                 open_positions[symbol] = position_state[symbol]
                 last_trade_bar[symbol] = bar_index
+
+                # Register with ExitManager for tiered exits (FIX Jan 2026)
+                if self.use_tiered_exits and self.exit_manager:
+                    self.exit_manager.register_position(
+                        symbol=symbol,
+                        entry_price=entry_price,
+                        quantity=shares,
+                        entry_time=timestamp if isinstance(timestamp, datetime) else None,
+                        direction=direction
+                    )
 
                 # Track risk analytics after entry
                 num_positions = len(open_positions)

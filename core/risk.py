@@ -406,6 +406,12 @@ class RiskManager:
                                   f"reduced from {position_size} shares)")
                 position_size = max_shares_by_dollars
 
+            # TradeLocker max lot size limit
+            max_shares_limit = self.settings.get('max_shares', 100)
+            if position_size > max_shares_limit:
+                self.logger.warning(f"Position size capped at {max_shares_limit} shares (TradeLocker limit)")
+                position_size = max_shares_limit
+
             # Adjust for volatility if provided
             # BUG FIX (Dec 4, 2025): Added pd.notna() check to handle NaN volatility values
             # Without this check, NaN volatility would pass the > 0 check and cause division issues
