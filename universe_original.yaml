@@ -1,507 +1,460 @@
-# 1-Hour Bot Universe - Capital Symbols
-# Updated: 2026-01-01 - Added 469-stock scanner universe
-#
-# VOLATILITY SCANNER BACKTEST (Oct 2024 - Jan 2025):
-#   - Universe: 469 stocks, scanner picks top 10 volatile daily
-#   - Return: +52.03% (vs -10.24% with boring blue chips)
-#   - Win Rate: 61.6%
-#   - Only 37 of 469 actually traded (scanner filters the rest)
-#
-# TOP PERFORMERS FOUND BY SCANNER:
-#   MAXN: +$12,042 (PF=11.65) - Solar
-#   RGTI: +$8,164 (PF=2965) - Quantum
-#   MNTS: +$5,783 (PF=9.70) - Space
-#   IONQ: +$4,792 (PF=2.01) - Quantum
-#   BTDR: +$3,863 (PF=2.94) - BTC Mining
-#   APLD: +$3,293 (PF=3.45) - BTC Data Center
-#   IREN: +$2,834 (PF=2.74) - BTC Mining
-#   ACHR: +$2,405 (PF=6.17) - Air Taxi
-
-# Scanner universe - 469 stocks across all sectors
-# The volatility scanner will pick top 10 each day
 scanner_universe:
-  # Major Crypto (24/7 trading) - Alpaca format
   crypto:
-    - BTC/USD    # Bitcoin
-    - ETH/USD    # Ethereum
-    - SOL/USD    # Solana
-    - LTC/USD    # Litecoin
-    - AVAX/USD   # Avalanche
-    - LINK/USD   # Chainlink
-    - DOGE/USD   # Dogecoin
-
-  # S&P 500 Top Holdings (50)
+  - BTC/USD
+  - ETH/USD
+  - SOL/USD
+  - LTC/USD
+  - AVAX/USD
+  - LINK/USD
+  - DOGE/USD
   sp500:
-    - AAPL
-    - MSFT
-    - GOOGL
-    - GOOG
-    - AMZN
-    - NVDA
-    - META
-    - TSLA
-    - UNH
-    - XOM
-    - JNJ
-    - JPM
-    - V
-    - PG
-    - MA
-    - HD
-    - CVX
-    - MRK
-    - ABBV
-    - LLY
-    - PEP
-    - KO
-    - AVGO
-    - COST
-    - TMO
-    - MCD
-    - WMT
-    - CSCO
-    - ABT
-    - ACN
-    - CRM
-    - DHR
-    - BAC
-    - PFE
-    - LIN
-    - NKE
-    - CMCSA
-    - ADBE
-    - TXN
-    - WFC
-    - PM
-    - NEE
-    - ORCL
-    - VZ
-    - RTX
-    - AMD
-    - COP
-    - INTC
-    - HON
-
-  # Tech/Growth (50)
-  tech_growth:
-    - NFLX
-    - PYPL
-    - SHOP
-    - UBER
-    - ABNB
-    - NOW
-    - SNOW
-    - DDOG
-    - NET
-    - ZS
-    - CRWD
-    - PANW
-    - OKTA
-    - MDB
-    - TWLO
-    - ZM
-    - DOCU
-    - ROKU
-    - SNAP
-    - PINS
-    - RBLX
-    - U
-    - PATH
-    - BILL
-    - HUBS
-    - ESTC
-    - CFLT
-    - DOCN
-    - GTLB
-    - MNDY
-    - VEEV
-    - WDAY
-    - TEAM
-    - CDNS
-    - SNPS
-    - KLAC
-    - LRCX
-    - AMAT
-    - ASML
-    - TSM
-    - MRVL
-    - "ON"  # ON Semiconductor - quoted to avoid YAML boolean parsing
-    - NXPI
-    - SWKS
-
-  # High Volatility / Crypto / Meme (60) - PRIMARY PROFIT SOURCE
-  high_volatility:
-    - RGTI    # Quantum - TOP PERFORMER +$8,164
-    - IONQ    # Quantum - PROVEN +$4,792
-    - MARA    # BTC Mining - PROVEN
-    - RIOT    # BTC Mining
-    - HUT     # BTC Mining
-    - COIN    # Crypto Exchange
-    - SMCI    # AI Hardware
-    - ARM     # Semiconductors
-    - PLTR    # AI/Data
-    - SOFI    # Fintech
-    - HOOD    # Trading App
-    - LCID    # EV
-    - RIVN    # EV
-    - NIO     # EV China
-    - XPEV    # EV China
-    - LI      # EV China
-    - GOEV    # EV
-    - NKLA    # EV
-    - WKHS    # EV
-    - MSTR    # BTC Treasury - PROVEN +$1,771
-    - CLSK    # BTC Mining - PROVEN +$1,037
-    - BTBT    # BTC Mining
-    - CIFR    # BTC Mining
-    - BITF    # BTC Mining
-    - BTDR    # BTC Mining - TOP PERFORMER +$3,863
-    - CORZ    # BTC Mining
-    - IREN    # BTC Mining - TOP PERFORMER +$2,834
-    - APLD    # BTC Data Center - TOP PERFORMER +$3,293
-    - GME     # Meme
-    - AMC     # Meme
-    - BB      # Meme
-    - NOK     # Meme
-    - CLOV    # Meme
-    - SKLZ    # Gaming
-    - SPCE    # Space
-    - DKNG    # Sports Betting
-    - PENN    # Casino
-    - WYNN    # Casino
-    - LVS     # Casino
-    - MGM     # Casino
-    - CZR     # Casino
-    - BABA    # China Tech
-    - JD      # China Tech
-    - PDD     # China Tech
-    - SE      # SEA Tech
-    - GRAB    # SEA Tech
-    - AFRM    # BNPL
-    - UPST    # AI Lending
-    - LMND    # Insurtech
-    - ROOT    # Insurtech
-    - OSCR    # Insurtech
-    - OPEN    # Real Estate Tech
-    - CVNA    # Auto
-
-  # Biotech / Pharma (50)
-  biotech:
-    - MRNA
-    - BNTX
-    - NVAX
-    - BIIB
-    - VRTX
-    - REGN
-    - GILD
-    - AMGN
-    - ILMN
-    - ISRG
-    - DXCM
-    - ALGN
-    - IDXX
-    - MTD
-    - IQV
-    - ZBH
-    - SYK
-    - BSX
-    - EW
-    - BDX
-    - MDT
-    - HOLX
-    - A
-    - WAT
-    - TFX
-    - TECH
-    - BIO
-    - QGEN
-    - EXAS
-    - NTRA
-    - GH
-    - TWST
-    - CDNA
-    - VCYT
-    - MYGN
-    - NEO
-    - CERS
-    - RCUS
-    - IMVT
-    - ARWR
-    - ALNY
-    - SRPT
-    - BMRN
-    - INCY
-    - EXEL
-    - UTHR
-    - NBIX
-
-  # Finance (40)
-  finance:
-    - GS
-    - MS
-    - C
-    - BLK
-    - SCHW
-    - AXP
-    - SPGI
-    - CME
-    - ICE
-    - MCO
-    - MSCI
-    - NDAQ
-    - CBOE
-    - TFC
-    - USB
-    - PNC
-    - COF
-    - SYF
-    - ALLY
-    - KEY
-    - CFG
-    - RF
-    - HBAN
-    - ZION
-    - FHN
-    - CMA
-    - FITB
-    - MTB
-    - WAL
-    - EWBC
-    - FNB
-    - GBCI
-    - UMBF
-    - BOKF
-
-  # Energy (30)
-  energy:
-    - OXY
-    - SLB
-    - HAL
-    - BKR
-    - EOG
-    - DVN
-    - FANG
-    - APA
-    - VLO
-    - PSX
-    - MPC
-    - TRGP
-    - KMI
-    - WMB
-    - OKE
-    - ET
-    - EPD
-    - ENPH
-    - SEDG
-    - FSLR
-    - RUN
-    - ARRY
-    - MAXN    # TOP PERFORMER +$12,042 (PF=11.65)
-    - JKS
-    - DQ
-    - CSIQ
-
-  # Clean Energy / EV (25)
-  clean_energy:
-    - PLUG
-    - BLDP
-    - BE
-    - CHPT
-    - BLNK
-    - QS
-    - EVGO
-    - REE
-    - GWH
-    - OUST
-    - LAZR
-    - INVZ
-    - AEVA
-    - HYLN
-
-  # Consumer / Retail (35)
-  consumer:
-    - SBUX
-    - CMG
-    - DPZ
-    - YUM
-    - QSR
-    - WING
-    - SHAK
-    - CAVA
-    - BROS
-    - TGT
-    - LOW
-    - LULU
-    - ANF
-    - AEO
-    - URBN
-    - BBWI
-    - VSCO
-    - DIS
-    - WBD
-    - FOXA
-    - NWSA
-    - LYV
-    - SPOT
-    - MTCH
-    - BMBL
-    - IAC
-    - BKNG
-    - EXPE
-    - MAR
-    - HLT
-    - H
-    - RCL
-    - CCL
-    - NCLH
-    - TCOM
-
-  # Industrial / Defense (30)
-  industrial:
-    - CAT
-    - DE
-    - BA
-    - LMT
-    - GE
-    - GD
-    - NOC
-    - HII
-    - TDG
-    - HWM
-    - UPS
-    - FDX
-    - XPO
-    - JBHT
-    - ODFL
-    - SAIA
-    - KNX
-    - SNDR
-    - CHRW
-    - EXPD
-    - URI
-    - WAB
-    - GWW
-    - FAST
-    - ITW
-    - EMR
-    - ROK
-    - PH
-    - ETN
-    - AME
-
-  # REITs (20)
-  reits:
-    - AMT
-    - PLD
-    - CCI
-    - EQIX
-    - SPG
-    - O
-    - DLR
-    - WELL
-    - AVB
-    - EQR
-    - VTR
-    - ARE
-    - BXP
-    - SLG
-    - VNO
-    - KIM
-    - REG
-    - FRT
-    - HST
-    - RHP
-
-  # ETFs (20)
-  etfs:
-    - SPY
-    - QQQ
-    - IWM
-    - DIA
-    - ARKK
-    - ARKW
-    - ARKG
-    - ARKF
-    - XLF
-    - XLE
-    - XLK
-    - XLV
-    - XLI
-    - XLY
-    - XLP
-    - SOXL
-    - TQQQ
-    - UVXY
-    - LABU
-    - NUGT
-
-  # Cannabis (10)
-  cannabis:
-    - TLRY
-    - CGC
-    - ACB
-    - SNDL
-    - CRON
-    - OGI
-    - VFF
-    - GRWG
-    - IIPR
-
-  # SPACs / Recent IPOs (20)
-  spacs_ipos:
-    - RKLB
-    - ASTS
-    - BKSY
-    - RDW
-    - MNTS    # TOP PERFORMER +$5,783 (PF=9.70)
-    - SPIR
-    - PL
-    - LILM
-    - JOBY
-    - ACHR    # TOP PERFORMER +$2,405 (PF=6.17)
-    - EVTL
-    - TALK
-    - GENI
-    - MAPS
-    - HIMS
-    - CHWY
-    - DUOL
-    - BIRD
-    - PTON
-
-# Legacy proven symbols (from Dec 31, 2025 testing)
-proven_symbols:
-  - RIVN
+  - AAPL
+  - MSFT
+  - GOOGL
+  - GOOG
+  - AMZN
+  - NVDA
+  - META
   - TSLA
-  - RKLB
-  - SMCI
-  - HUT
-  - IONQ
+  - UNH
+  - XOM
+  - JNJ
+  - JPM
+  - V
+  - PG
+  - MA
+  - HD
+  - CVX
+  - MRK
+  - ABBV
+  - LLY
+  - PEP
+  - KO
+  - AVGO
+  - COST
+  - TMO
+  - MCD
+  - WMT
+  - CSCO
+  - ABT
+  - ACN
+  - CRM
+  - DHR
+  - BAC
+  - PFE
+  - LIN
+  - NKE
+  - CMCSA
+  - ADBE
+  - TXN
+  - WFC
+  - PM
+  - NEE
+  - ORCL
+  - VZ
+  - RTX
+  - AMD
+  - COP
+  - INTC
+  - HON
+  tech_growth:
+  - NFLX
+  - PYPL
+  - SHOP
+  - UBER
+  - ABNB
+  - NOW
+  - SNOW
+  - DDOG
+  - NET
+  - ZS
+  - CRWD
+  - PANW
+  - OKTA
+  - MDB
+  - TWLO
+  - ZM
+  - DOCU
+  - ROKU
+  - SNAP
+  - PINS
+  - RBLX
+  - U
+  - PATH
+  - BILL
+  - HUBS
+  - ESTC
+  - CFLT
+  - DOCN
+  - GTLB
+  - MNDY
+  - VEEV
+  - WDAY
+  - TEAM
+  - CDNS
+  - SNPS
+  - KLAC
+  - LRCX
+  - AMAT
+  - ASML
+  - TSM
+  - MRVL
+  - 'ON'
+  - NXPI
+  - SWKS
+  high_volatility:
   - RGTI
+  - IONQ
+  - MARA
+  - RIOT
+  - HUT
+  - COIN
+  - SMCI
+  - ARM
+  - PLTR
+  - SOFI
   - HOOD
+  - LCID
+  - RIVN
+  - NIO
+  - XPEV
+  - LI
+  - GOEV
+  - NKLA
+  - WKHS
   - MSTR
+  - CLSK
+  - BTBT
+  - CIFR
+  - BITF
+  - BTDR
+  - CORZ
+  - IREN
+  - APLD
+  - GME
+  - AMC
+  - BB
+  - NOK
+  - CLOV
+  - SKLZ
+  - SPCE
+  - DKNG
+  - PENN
+  - WYNN
+  - LVS
+  - MGM
+  - CZR
+  - BABA
+  - JD
+  - PDD
+  - SE
+  - GRAB
+  - AFRM
+  - UPST
+  - LMND
+  - ROOT
+  - OSCR
+  - OPEN
+  - CVNA
+  biotech:
+  - MRNA
+  - BNTX
+  - NVAX
+  - BIIB
+  - VRTX
+  - REGN
+  - GILD
+  - AMGN
+  - ILMN
+  - ISRG
+  - DXCM
+  - ALGN
+  - IDXX
+  - MTD
+  - IQV
+  - ZBH
+  - SYK
+  - BSX
+  - EW
+  - BDX
+  - MDT
+  - HOLX
+  - A
+  - WAT
+  - TFX
+  - TECH
+  - BIO
+  - QGEN
+  - EXAS
+  - NTRA
+  - GH
+  - TWST
+  - CDNA
+  - VCYT
+  - MYGN
+  - NEO
+  - CERS
+  - RCUS
+  - IMVT
+  - ARWR
+  - ALNY
+  - SRPT
+  - BMRN
+  - INCY
+  - EXEL
+  - UTHR
+  - NBIX
+  finance:
+  - GS
+  - MS
+  - C
+  - BLK
+  - SCHW
+  - AXP
+  - SPGI
+  - CME
+  - ICE
+  - MCO
+  - MSCI
+  - NDAQ
+  - CBOE
+  - TFC
+  - USB
+  - PNC
+  - COF
+  - SYF
+  - ALLY
+  - KEY
+  - CFG
+  - RF
+  - HBAN
+  - ZION
+  - FHN
+  - CMA
+  - FITB
+  - MTB
+  - WAL
+  - EWBC
+  - FNB
+  - GBCI
+  - UMBF
+  - BOKF
+  energy:
+  - OXY
+  - SLB
+  - HAL
+  - BKR
+  - EOG
+  - DVN
+  - FANG
+  - APA
+  - VLO
+  - PSX
+  - MPC
+  - TRGP
+  - KMI
+  - WMB
+  - OKE
+  - ET
+  - EPD
   - ENPH
-
-# Blacklist (symbols that failed validation)
+  - SEDG
+  - FSLR
+  - RUN
+  - ARRY
+  - MAXN
+  - JKS
+  - DQ
+  - CSIQ
+  clean_energy:
+  - PLUG
+  - BLDP
+  - BE
+  - CHPT
+  - BLNK
+  - QS
+  - EVGO
+  - REE
+  - GWH
+  - OUST
+  - LAZR
+  - INVZ
+  - AEVA
+  - HYLN
+  consumer:
+  - SBUX
+  - CMG
+  - DPZ
+  - YUM
+  - QSR
+  - WING
+  - SHAK
+  - CAVA
+  - BROS
+  - TGT
+  - LOW
+  - LULU
+  - ANF
+  - AEO
+  - URBN
+  - BBWI
+  - VSCO
+  - DIS
+  - WBD
+  - FOXA
+  - NWSA
+  - LYV
+  - SPOT
+  - MTCH
+  - BMBL
+  - IAC
+  - BKNG
+  - EXPE
+  - MAR
+  - HLT
+  - H
+  - RCL
+  - CCL
+  - NCLH
+  - TCOM
+  industrial:
+  - CAT
+  - DE
+  - BA
+  - LMT
+  - GE
+  - GD
+  - NOC
+  - HII
+  - TDG
+  - HWM
+  - UPS
+  - FDX
+  - XPO
+  - JBHT
+  - ODFL
+  - SAIA
+  - KNX
+  - SNDR
+  - CHRW
+  - EXPD
+  - URI
+  - WAB
+  - GWW
+  - FAST
+  - ITW
+  - EMR
+  - ROK
+  - PH
+  - ETN
+  - AME
+  reits:
+  - AMT
+  - PLD
+  - CCI
+  - EQIX
+  - SPG
+  - O
+  - DLR
+  - WELL
+  - AVB
+  - EQR
+  - VTR
+  - ARE
+  - BXP
+  - SLG
+  - VNO
+  - KIM
+  - REG
+  - FRT
+  - HST
+  - RHP
+  etfs:
+  - SPY
+  - QQQ
+  - IWM
+  - DIA
+  - ARKK
+  - ARKW
+  - ARKG
+  - ARKF
+  - XLF
+  - XLE
+  - XLK
+  - XLV
+  - XLI
+  - XLY
+  - XLP
+  - SOXL
+  - TQQQ
+  - UVXY
+  - LABU
+  - NUGT
+  cannabis:
+  - TLRY
+  - CGC
+  - ACB
+  - SNDL
+  - CRON
+  - OGI
+  - VFF
+  - GRWG
+  - IIPR
+  spacs_ipos:
+  - RKLB
+  - ASTS
+  - BKSY
+  - RDW
+  - MNTS
+  - SPIR
+  - PL
+  - LILM
+  - JOBY
+  - ACHR
+  - EVTL
+  - TALK
+  - GENI
+  - MAPS
+  - HIMS
+  - CHWY
+  - DUOL
+  - BIRD
+  - PTON
+proven_symbols:
+- RIVN
+- TSLA
+- RKLB
+- SMCI
+- HUT
+- IONQ
+- RGTI
+- HOOD
+- MSTR
+- ENPH
 blacklist:
-  - AAPL   # PF 0.14, WR 23.1% - Too boring for our strategies
-  - MSFT   # PF 0.14, WR 23.1% - Too boring
-  - SPY    # PF 0.30, WR 31.2% - Low volatility
-
-# Promotion history
+- AAPL
+- BE
+- SPY
+- OPEN
+- CLSK
+- QS
+- HUT
+- CIFR
+- MSFT
+- APLD
 promotion_history:
-  - symbol: NVDA
-    date: 2025-12-25
-    reason: "PF 2.18, WR 57.9%, Momentum+Breakout profitable"
-  - symbol: TSLA
-    date: 2025-12-25
-    reason: "PF 2.08, WR 60%, Breakout PF 8.82"
-  - symbol: MAXN
-    date: 2026-01-01
-    reason: "PF 11.65, WR 68.2%, +$12,042 - Scanner discovered"
-  - symbol: MNTS
-    date: 2026-01-01
-    reason: "PF 9.70, WR 76.9%, +$5,783 - Scanner discovered"
-  - symbol: ACHR
-    date: 2026-01-01
-    reason: "PF 6.17, WR 82.4%, +$2,405 - Scanner discovered"
+- symbol: NVDA
+  date: 2025-12-25
+  reason: PF 2.18, WR 57.9%, Momentum+Breakout profitable
+- symbol: TSLA
+  date: 2025-12-25
+  reason: PF 2.08, WR 60%, Breakout PF 8.82
+- symbol: MAXN
+  date: 2026-01-01
+  reason: PF 11.65, WR 68.2%, +$12,042 - Scanner discovered
+- symbol: MNTS
+  date: 2026-01-01
+  reason: PF 9.70, WR 76.9%, +$5,783 - Scanner discovered
+- symbol: ACHR
+  date: 2026-01-01
+  reason: PF 6.17, WR 82.4%, +$2,405 - Scanner discovered

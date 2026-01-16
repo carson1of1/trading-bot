@@ -40,6 +40,9 @@ class VolatilityScanner:
             'volume_ratio': 0.2
         },
         'lookback_days': 14,  # Days for ATR calculation
+        'trend_filter': True,  # Only trade stocks in favorable trend
+        'trend_sma_fast': 20,  # Fast SMA period (hourly bars)
+        'trend_sma_slow': 50,  # Slow SMA period (hourly bars)
     }
 
     def __init__(self, config: Dict = None):
@@ -71,13 +74,18 @@ class VolatilityScanner:
 
         self.market_tz = pytz.timezone('America/New_York')
 
+        # Trend filter settings
+        self.trend_filter = self.config.get('trend_filter', True)
+        self.trend_sma_fast = self.config.get('trend_sma_fast', 20)
+        self.trend_sma_slow = self.config.get('trend_sma_slow', 50)
+
         # Temporary symbols from hot stocks feed (cleared daily)
         self._temporary_symbols: List[str] = []
 
         self.logger.info(
             f"VolatilityScanner initialized: "
             f"top_n={self.top_n}, min_price=${self.min_price}, "
-            f"min_volume={self.min_volume:,}"
+            f"min_volume={self.min_volume:,}, trend_filter={self.trend_filter}"
         )
 
     def scan_historical(self, date: str, symbols: List[str],
@@ -147,11 +155,19 @@ class VolatilityScanner:
                 if avg_volume < self.min_volume:
                     continue
 
+                # Apply trend filter - only trade stocks in uptrend for longs
+                trend = self._get_trend_direction(df_lookback)
+                if self.trend_filter:
+                    if trend == 'down':
+                        self.logger.debug(f"Filtered {symbol}: downtrend (20 SMA < 50 SMA)")
+                        continue
+
                 scored_symbols.append({
                     'symbol': symbol,
                     'vol_score': score,
                     'price': last_price,
-                    'avg_volume': avg_volume
+                    'avg_volume': avg_volume,
+                    'trend': trend
                 })
 
             except Exception as e:
@@ -234,6 +250,40 @@ class VolatilityScanner:
             self.logger.debug(f"Error calculating volatility score: {e}")
             return 0.0
 
+    def _get_trend_direction(self, df: pd.DataFrame) -> str:
+        """
+        Determine trend direction using SMA crossover.
+
+        Returns:
+            'up': 20 SMA > 50 SMA (uptrend - good for longs)
+            'down': 20 SMA < 50 SMA (downtrend - good for shorts)
+            'neutral': SMAs are within 0.5% of each other
+        """
+        try:
+            if len(df) < self.trend_sma_slow:
+                return 'neutral'
+
+            close = df['close']
+            sma_fast = close.rolling(self.trend_sma_fast).mean().iloc[-1]
+            sma_slow = close.rolling(self.trend_sma_slow).mean().iloc[-1]
+
+            if pd.isna(sma_fast) or pd.isna(sma_slow) or sma_slow == 0:
+                return 'neutral'
+
+            # Calculate difference as percentage
+            diff_pct = (sma_fast - sma_slow) / sma_slow * 100
+
+            if diff_pct > 0.5:
+                return 'up'
+            elif diff_pct < -0.5:
+                return 'down'
+            else:
+                return 'neutral'
+
+        except Exception as e:
+            self.logger.debug(f"Error calculating trend: {e}")
+            return 'neutral'
+
     def _apply_filters(self, candidates: List[Dict]) -> List[Dict]:
         """
         Apply price, volume, and other filters to candidates.
@@ -286,7 +336,10 @@ class VolatilityScanner:
             'max_price': self.max_price,
             'min_volume': self.min_volume,
             'weights': self.weights,
-            'lookback_days': self.lookback_days
+            'lookback_days': self.lookback_days,
+            'trend_filter': self.trend_filter,
+            'trend_sma_fast': self.trend_sma_fast,
+            'trend_sma_slow': self.trend_sma_slow
         }
 
     def add_temporary_symbols(self, symbols: List[str]) -> None:
@@ -386,8 +439,12 @@ class VolatilityScanner:
 
         for symbol in symbols:
             try:
+                # FIX (Jan 15, 2026): Convert symbol to yfinance format for data fetch
+                from core.symbol_mapping import to_yfinance
+                data_symbol = to_yfinance(symbol)
+
                 df = fetcher.get_historical_data_range(
-                    symbol=symbol,
+                    symbol=data_symbol,
                     timeframe='1Hour',
                     start_date=start_date.strftime('%Y-%m-%d'),
                     end_date=end_date.strftime('%Y-%m-%d')
@@ -409,11 +466,19 @@ class VolatilityScanner:
                 if avg_volume < self.min_volume:
                     continue
 
+                # Apply trend filter - only trade stocks in uptrend for longs
+                trend = self._get_trend_direction(df)
+                if self.trend_filter:
+                    if trend == 'down':
+                        self.logger.debug(f"Filtered {symbol}: downtrend (20 SMA < 50 SMA)")
+                        continue
+
                 scored_symbols.append({
                     'symbol': symbol,
                     'vol_score': score,
                     'price': last_price,
-                    'avg_volume': avg_volume
+                    'avg_volume': avg_volume,
+                    'trend': trend
                 })
 
             except Exception as e:

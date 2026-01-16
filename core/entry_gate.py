@@ -3,6 +3,7 @@ Entry Gate - Trade frequency controls to reduce overtrading on 1-minute ML signa
 
 Created: December 18, 2025
 Updated: December 19, 2025 - Added daily loss safety guard
+Updated: January 15, 2026 - Added trend alignment filter (direction-aware)
 
 This module provides shared entry gating logic for both live trading (trading_bot_ml.py)
 and backtesting (backtester.py). It implements:
@@ -10,6 +11,7 @@ and backtesting (backtester.py). It implements:
 1. Per-Symbol Daily Trade Cap: Limits entries per symbol per day
 2. Time-of-Day Filter: Restricts entries to specific trading sessions
 3. Daily Loss Safety Guard: Blocks entries after N losing trades in a day
+4. Trend Alignment Filter: Blocks entries against the trend (LONG in downtrend, SHORT in uptrend)
 
 CRITICAL DESIGN NOTES:
 - These controls ONLY gate NEW ENTRIES
@@ -20,6 +22,8 @@ CRITICAL DESIGN NOTES:
 import logging
 from datetime import datetime, date
 from typing import Dict, Tuple, Optional
+import pandas as pd
+import numpy as np
 import pytz
 
 
@@ -71,6 +75,13 @@ class EntryGate:
         self.daily_loss_guard_enabled = daily_loss_guard_config.get('enabled', True)
         self.max_losing_trades_per_day = daily_loss_guard_config.get('max_losing_trades_per_day', 2)
 
+        # Trend alignment filter settings (Jan 15, 2026)
+        # Prevents LONG entries in downtrends and SHORT entries in uptrends
+        trend_config = config.get('trend_alignment', {})
+        self.trend_alignment_enabled = trend_config.get('enabled', True)
+        self.trend_sma_fast = trend_config.get('sma_fast', 20)  # Using hourly bars
+        self.trend_sma_slow = trend_config.get('sma_slow', 50)
+
         # Track trades per symbol per day: {(symbol, 'YYYY-MM-DD'): count}
         self.trades_today: Dict[Tuple[str, str], int] = {}
 
@@ -86,10 +97,16 @@ class EntryGate:
             if self.daily_loss_guard_enabled
             else "disabled"
         )
+        trend_status = (
+            f"enabled (fast={self.trend_sma_fast}, slow={self.trend_sma_slow})"
+            if self.trend_alignment_enabled
+            else "disabled"
+        )
         self.logger.info(
             f"EntryGate initialized: max_trades_per_symbol={self.max_trades_per_symbol_per_day}, "
             f"time_filter={'enabled (' + self.allowed_sessions + ')' if self.enable_time_filter else 'disabled'}, "
-            f"daily_loss_guard={loss_guard_status}"
+            f"daily_loss_guard={loss_guard_status}, "
+            f"trend_alignment={trend_status}"
         )
 
     def _get_market_date(self, timestamp: Optional[datetime] = None) -> str:
@@ -388,5 +405,86 @@ class EntryGate:
             'daily_loss_guard_enabled': self.daily_loss_guard_enabled,
             'max_losing_trades_per_day': self.max_losing_trades_per_day,
             'losses_today': self.losses_today.get(market_date, 0),
-            'daily_loss_limit_reached': self.is_daily_loss_limit_reached()
+            'daily_loss_limit_reached': self.is_daily_loss_limit_reached(),
+            # Trend alignment status
+            'trend_alignment_enabled': self.trend_alignment_enabled,
+            'trend_sma_fast': self.trend_sma_fast,
+            'trend_sma_slow': self.trend_sma_slow
         }
+
+    def check_trend_alignment(
+        self,
+        symbol: str,
+        direction: str,
+        price_data: pd.DataFrame
+    ) -> Tuple[bool, str]:
+        """
+        Check if trade direction aligns with the current trend.
+
+        This prevents:
+        - LONG entries when stock is in a downtrend (20 SMA < 50 SMA)
+        - SHORT entries when stock is in an uptrend (20 SMA > 50 SMA)
+
+        Added: January 15, 2026 - To prevent disasters like RUN, MNTS, OPEN
+
+        Args:
+            symbol: Stock symbol
+            direction: 'LONG' or 'SHORT'
+            price_data: DataFrame with 'close' column, at least 50 bars
+
+        Returns:
+            Tuple of (allowed: bool, reason: str)
+        """
+        if not self.trend_alignment_enabled:
+            return True, ""
+
+        if price_data is None or len(price_data) < self.trend_sma_slow:
+            # Not enough data to calculate trend, allow entry
+            return True, ""
+
+        try:
+            close = price_data['close']
+
+            # Calculate SMAs
+            sma_fast = close.rolling(self.trend_sma_fast).mean().iloc[-1]
+            sma_slow = close.rolling(self.trend_sma_slow).mean().iloc[-1]
+
+            if pd.isna(sma_fast) or pd.isna(sma_slow) or sma_slow == 0:
+                return True, ""
+
+            # Calculate difference as percentage
+            diff_pct = (sma_fast - sma_slow) / sma_slow * 100
+
+            # Determine trend direction
+            if diff_pct > 0.5:
+                trend = 'up'
+            elif diff_pct < -0.5:
+                trend = 'down'
+            else:
+                trend = 'neutral'
+
+            # Check alignment
+            direction_upper = direction.upper()
+
+            if direction_upper == 'LONG' and trend == 'down':
+                reason = (
+                    f"ENTRY_BLOCKED | reason=trend_misalignment | symbol={symbol} | "
+                    f"direction=LONG | trend=DOWN | sma_fast={sma_fast:.2f} | "
+                    f"sma_slow={sma_slow:.2f} | diff={diff_pct:.1f}%"
+                )
+                return False, reason
+
+            if direction_upper == 'SHORT' and trend == 'up':
+                reason = (
+                    f"ENTRY_BLOCKED | reason=trend_misalignment | symbol={symbol} | "
+                    f"direction=SHORT | trend=UP | sma_fast={sma_fast:.2f} | "
+                    f"sma_slow={sma_slow:.2f} | diff={diff_pct:.1f}%"
+                )
+                return False, reason
+
+            # Trend alignment OK
+            return True, ""
+
+        except Exception as e:
+            self.logger.debug(f"Error checking trend alignment for {symbol}: {e}")
+            return True, ""  # Allow on error

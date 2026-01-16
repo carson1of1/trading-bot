@@ -152,12 +152,17 @@ class BreakoutScanner:
 
         for symbol in symbols_to_scan:
             try:
+                # FIX (Jan 15, 2026): Convert symbol to yfinance format for data fetch
+                # Universe uses Alpaca format (BTC/USD), yfinance needs BTC-USD
+                from core.symbol_mapping import to_yfinance
+                data_symbol = to_yfinance(symbol)
+
                 # Get data from cache or fetch
                 if data_cache and symbol in data_cache:
                     df = data_cache[symbol]
                 elif self.data_fetcher:
                     # Use get_historical_data with 1Hour timeframe, ~200 bars for lookback
-                    df = self.data_fetcher.get_historical_data(symbol, timeframe='1Hour', limit=200)
+                    df = self.data_fetcher.get_historical_data(data_symbol, timeframe='1Hour', limit=200)
                 else:
                     continue
 

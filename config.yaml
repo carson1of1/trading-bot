@@ -1,5 +1,5 @@
 breakout_scanner:
-  enabled: true  # Scans for breakout candidates
+  enabled: true
   lookback_bars: 20
   max_candidates: 30
   max_price: 500.0
@@ -13,13 +13,14 @@ broker:
 capital_allocation:
   percentage_of_total: 80
   reserve_cash_pct: 10
+crypto_mode: true
 daily_drawdown_guard:
   enabled: true
-  hard_limit_pct: 4.0
+  hard_limit_pct: 6.0
   liquidation_timeout_sec: 30
-  medium_limit_pct: 3.0
+  medium_limit_pct: 5.0
   partial_liquidation_pct: 50
-  soft_limit_pct: 2.5
+  soft_limit_pct: 4.0
   tighten_stops_at_soft: true
   use_market_orders: true
   warning_pct: 2.0
@@ -32,23 +33,28 @@ debug:
   log_all_signals: false
   log_signal_components: false
 entry_gate:
-  confidence_threshold: 80
+  confidence_threshold: 85
   daily_loss_guard:
     enabled: true
     max_losing_trades_per_day: 2
   max_trades_per_symbol_per_day: 2
   min_time_between_trades_minutes: 120
+  trend_alignment:
+    enabled: true
+    sma_fast: 20
+    sma_slow: 50
 exit_manager:
-  eod_close: false  # Crypto trades 24/7 - no EOD close
-  max_hold_hours: 168  # 7 days - let crypto positions run
+  enabled: true
+  eod_close: false
+  max_hold_hours: 168
   tier_0_hard_stop: -0.05
-  tier_1_profit_floor: 0.0125
-  tier_2_atr_trailing: 0.02
-  tier_3_partial_take: 1.0  # Disabled (100% = never triggers)
-  tier_4_partial_take2: 1.0  # Disabled
+  tier_1_profit_floor: 0.5
+  tier_2_atr_trailing: 1.0
+  tier_3_partial_take: 1.0
+  tier_4_partial_take2: 1.0
 hot_stocks:
   cache_hours: 20
-  enabled: true  # Daily gainers/losers scanner
+  enabled: true
   max_price: 1000
   min_price: 5
   min_volume: 500000
@@ -57,26 +63,14 @@ logging:
   database: logs/trades_1hour.db
   detailed_signals: false
   track_mfe_mae: true
-longs_only: false
+longs_only: false  # Strategy now handles direction filtering internally based on trend
 losing_streak_guard:
   enabled: true
   lookback_days: 3
   losing_threshold_r: 0.5
   min_losing_trades: 2
   throttle_multiplier: 0.5
-# ============================================================
-# BROKER MODE SWITCH - Change this to switch brokers
-# ============================================================
-# Options:
-#   PAPER      - Alpaca paper trading (stocks + crypto)
-#   LIVE       - Alpaca live trading (stocks + crypto)
-#   TRADELOCKER - TradeLocker prop firm (crypto CFDs)
-# ============================================================
 mode: PAPER
-
-# Crypto mode: true = 24/7 trading, false = market hours only
-# Set true for TRADELOCKER, false for Alpaca stocks
-crypto_mode: true
 parity_capture:
   enabled: false
   flush_interval: 1
@@ -84,7 +78,7 @@ parity_capture:
   include_indicators: true
   output_path: logs/parity_capture_1hour.jsonl
 premarket_scanner:
-  enabled: true  # Scans for premarket gaps
+  enabled: true
   max_gap_pct: 30.0
   max_price: 500.0
   max_symbols: 20
@@ -102,11 +96,11 @@ risk_management:
   emergency_stop_pct: 8.0
   force_liquidate_on_kill_switch: true
   max_daily_loss_pct: 4.0
-  max_open_positions: 3
+  max_open_positions: 999999
   max_portfolio_risk_pct: 30.0
-  max_position_dollars: 999999  # No cap
+  max_position_dollars: 999999
   max_position_size_pct: 15
-  max_shares: 999999  # No cap
+  max_shares: 999999
   min_position_value: 50
   stop_loss_pct: 5.0
   take_profit_pct: 5.0
@@ -116,14 +110,14 @@ strategies:
     enabled: true
     weight: 0.4
   mean_reversion:
-    enabled: false
-    weight: 0.0
+    enabled: true
+    weight: 0.3
   ml_ensemble:
     enabled: false
     weight: 0.0
   momentum:
-    enabled: false
-    weight: 0.0
+    enabled: true
+    weight: 0.3
   vwap:
     enabled: false
     weight: 0.0
@@ -131,12 +125,6 @@ timeframe: 1Hour
 trading:
   lookback_period: 200
   warmup_bars: 200
-  # ============================================================
-  # WATCHLIST - Change based on mode above
-  # ============================================================
-  # For TRADELOCKER: universe_tradelocker_crypto.yaml
-  # For ALPACA:      universe_original.yaml (full scanner universe)
-  # ============================================================
   watchlist_file: universe_original.yaml
 trailing_stop:
   activation_pct: 0.15
@@ -144,12 +132,15 @@ trailing_stop:
   move_to_breakeven: true
   trail_pct: 0.15
 volatility_scanner:
-  enabled: true  # Scans for volatile stocks daily
+  enabled: true
   min_market_cap: 300000000
   min_price: 5
   min_volume: 500000
   refresh_time: 09:00
   top_n: 10
+  trend_filter: false  # Disabled for baseline test
+  trend_sma_fast: 20
+  trend_sma_slow: 50
   weights:
     atr_pct: 0.5
     daily_range_pct: 0.3

@@ -69,7 +69,9 @@ class Backtest1Hour:
     """
 
     # Default cost parameters
-    DEFAULT_ENTRY_SLIPPAGE = 0.0005   # 0.05%
+    # Entry slippage set to 0.15% to simulate next-bar-open gap
+    # (signal known at bar close, entry at next bar open can gap)
+    DEFAULT_ENTRY_SLIPPAGE = 0.0015   # 0.15%
     DEFAULT_EXIT_SLIPPAGE = 0.0005    # 0.05%
     DEFAULT_STOP_SLIPPAGE = 0.002     # 0.20% - worse fills on stop losses
     DEFAULT_BID_ASK_SPREAD = 0.0002   # 0.02%
@@ -86,7 +88,9 @@ class Backtest1Hour:
         scanner_enabled: bool = None,
         kill_switch_trace: bool = False,
         crypto_intrabar_entry: bool = False,
-        timeframe: str = '1Hour'
+        timeframe: str = '1Hour',
+        pullback_pct: float = None,
+        enter_at_open: bool = False
     ):
         """
         Initialize the backtester.
@@ -99,6 +103,7 @@ class Backtest1Hour:
             scanner_enabled: Override scanner enabled setting
             crypto_intrabar_entry: If True, crypto enters at signal bar close (not next bar open)
             timeframe: Bar timeframe - '1Hour', '15Min', '5Min', '1Min'
+            pullback_pct: Pullback entry percentage (default 1.5%)
         """
         self.initial_capital = initial_capital
         self.config = config or self._load_config()
@@ -107,6 +112,9 @@ class Backtest1Hour:
         self.kill_switch_trace = kill_switch_trace
         self.crypto_intrabar_entry = crypto_intrabar_entry
         self.timeframe = timeframe
+        self.pullback_pct = pullback_pct if pullback_pct is not None else 0.015  # Default 1.5%
+        self.order_validity_bars = 1  # How many bars a limit order stays valid
+        self.enter_at_open = enter_at_open  # If True, enter at next bar open instead of limit order
         self._kill_switch_trace_log = []
 
         # Initialize volatility scanner if enabled
@@ -1011,6 +1019,20 @@ class Backtest1Hour:
                             else:
                                 continue
 
+                            # Check trend alignment (Jan 15, 2026)
+                            # Prevents LONG in downtrend, SHORT in uptrend
+                            if self.entry_gate:
+                                # Get price data up to current bar
+                                df_for_trend = df.iloc[:i+1].tail(60)  # Last 60 bars for SMA
+                                trend_ok, trend_reason = self.entry_gate.check_trend_alignment(
+                                    symbol, direction, df_for_trend
+                                )
+                                if not trend_ok:
+                                    self._diag_entry_blocks[symbol]['trend_misalignment'] = \
+                                        self._diag_entry_blocks[symbol].get('trend_misalignment', 0) + 1
+                                    logger.debug(trend_reason)
+                                    continue
+
                             # Crypto intrabar: enter immediately at close price
                             if self.crypto_intrabar_entry and is_crypto(symbol):
                                 # Enter at current bar's close (intrabar entry)
@@ -1202,6 +1224,9 @@ class Backtest1Hour:
         last_recorded_ts = None  # For equity curve recording
         latest_prices = {}  # symbol -> latest price for portfolio valuation
 
+        # Pending limit orders (FIX Jan 2026 - no look-ahead bias)
+        pending_orders = {}  # symbol -> {'direction': str, 'limit_price': float, 'signal_bar': int, ...}
+
         # Daily tracking for drawdown guard (ODE-118)
         current_day = None
         partial_liquidation_done_today = False
@@ -1232,6 +1257,96 @@ class Backtest1Hour:
                 position_state[symbol] = None
             if symbol not in last_trade_bar:
                 last_trade_bar[symbol] = -999
+
+            # ============ PENDING ORDER FILL CHECK (FIX Jan 2026) ============
+            # Check if this bar fills any pending limit orders for this symbol
+            bar_open = row.get('open', current_price)
+            bar_high = row.get('high', current_price)
+            bar_low = row.get('low', current_price)
+
+            if symbol in pending_orders and position_state[symbol] is None:
+                pend = pending_orders[symbol]
+                limit_price = pend['limit_price']
+                direction = pend['direction']
+                filled = False
+
+                if self.enter_at_open:
+                    # Market order at next bar open (most conservative)
+                    if direction == 'LONG':
+                        entry_price = bar_open * (1 + self.ENTRY_SLIPPAGE)
+                    else:
+                        entry_price = bar_open * (1 - self.ENTRY_SLIPPAGE)
+                    filled = True
+                elif direction == 'LONG':
+                    # LONG limit order fills if bar low reaches limit price
+                    if bar_low <= limit_price:
+                        entry_price = limit_price * (1 + self.ENTRY_SLIPPAGE)
+                        filled = True
+                    elif bar_open < limit_price:
+                        # Gap down through limit - fill at open
+                        entry_price = bar_open * (1 + self.ENTRY_SLIPPAGE)
+                        filled = True
+                else:  # SHORT
+                    # SHORT limit order fills if bar high reaches limit price
+                    if bar_high >= limit_price:
+                        entry_price = limit_price * (1 - self.ENTRY_SLIPPAGE)
+                        filled = True
+                    elif bar_open > limit_price:
+                        # Gap up through limit - fill at open
+                        entry_price = bar_open * (1 - self.ENTRY_SLIPPAGE)
+                        filled = True
+
+                if filled:
+                    # Calculate position size using entry price
+                    if direction == 'LONG':
+                        stop_loss = entry_price * (1 - self.default_stop_loss_pct)
+                        take_profit = entry_price * (1 + self.default_take_profit_pct)
+                    else:
+                        stop_loss = entry_price * (1 + self.default_stop_loss_pct)
+                        take_profit = entry_price * (1 - self.default_take_profit_pct)
+
+                    shares = self.risk_manager.calculate_position_size(
+                        self.portfolio_value, entry_price, stop_loss
+                    )
+
+                    # Apply drawdown guard position size multiplier
+                    size_multiplier = self.drawdown_guard.position_size_multiplier
+                    if size_multiplier < 1.0:
+                        shares = int(shares * size_multiplier)
+
+                    if shares > 0:
+                        position_state[symbol] = {
+                            'direction': direction,
+                            'entry_price': entry_price,
+                            'entry_bar': bar_index,
+                            'entry_time': timestamp,
+                            'shares': shares,
+                            'stop_loss': stop_loss,
+                            'take_profit': take_profit,
+                            'highest_price': entry_price,
+                            'lowest_price': entry_price,
+                            'strategy': pend.get('strategy', 'Unknown'),
+                            'reasoning': pend.get('reasoning', '')
+                        }
+                        open_positions[symbol] = position_state[symbol]
+                        last_trade_bar[symbol] = bar_index
+
+                        # Register with ExitManager
+                        if self.use_tiered_exits and self.exit_manager:
+                            self.exit_manager.register_position(
+                                symbol=symbol,
+                                entry_price=entry_price,
+                                quantity=shares,
+                                entry_time=timestamp if isinstance(timestamp, datetime) else None,
+                                direction=direction
+                            )
+
+                    del pending_orders[symbol]
+                else:
+                    # Order expired - cancel after N bars (configurable via order_validity_bars)
+                    order_validity_bars = getattr(self, 'order_validity_bars', 1)
+                    if bar_index > pend['signal_bar'] + order_validity_bars:
+                        del pending_orders[symbol]
 
             # ============ DRAWDOWN GUARD (ODE-118) ============
             # Extract date from timestamp
@@ -1604,67 +1719,85 @@ class Backtest1Hour:
                 else:
                     continue
 
-                # Calculate entry price with slippage
-                # Crypto intrabar: use close price (catch early movement)
-                # Standard: use open price (next bar entry simulation)
-                if self.crypto_intrabar_entry and is_crypto(symbol):
-                    base_price = current_price  # Enter at signal bar close
-                else:
-                    base_price = row.get('open', current_price)  # Enter at bar open
-
-                if direction == 'LONG':
-                    entry_price = base_price * (1 + self.ENTRY_SLIPPAGE)
-                    stop_loss = entry_price * (1 - self.default_stop_loss_pct)
-                    take_profit = entry_price * (1 + self.default_take_profit_pct)
-                else:
-                    entry_price = base_price * (1 - self.ENTRY_SLIPPAGE)
-                    stop_loss = entry_price * (1 + self.default_stop_loss_pct)
-                    take_profit = entry_price * (1 - self.default_take_profit_pct)
-
-                # Calculate position size
-                shares = self.risk_manager.calculate_position_size(
-                    self.portfolio_value, entry_price, stop_loss
-                )
-
-                # Apply drawdown guard position size multiplier (ODE-118)
-                # WARNING tier reduces size to 50%
-                size_multiplier = self.drawdown_guard.position_size_multiplier
-                if size_multiplier < 1.0:
-                    shares = int(shares * size_multiplier)
-
-                if shares <= 0:
-                    continue
-
-                # Track position cost for portfolio calculation
-                # Note: We don't modify self.cash here - portfolio value is calculated
-                # as initial_capital + realized_pnl + unrealized_pnl
-
-                # Open position
-                position_state[symbol] = {
-                    'direction': direction,
-                    'entry_price': entry_price,
-                    'entry_bar': bar_index,
-                    'entry_time': timestamp,
-                    'shares': shares,
-                    'stop_loss': stop_loss,
-                    'take_profit': take_profit,
-                    'highest_price': entry_price,
-                    'lowest_price': entry_price,
-                    'strategy': row.get('strategy', 'Unknown'),
-                    'reasoning': row.get('reasoning', '')
-                }
-                open_positions[symbol] = position_state[symbol]
-                last_trade_bar[symbol] = bar_index
-
-                # Register with ExitManager for tiered exits (FIX Jan 2026)
-                if self.use_tiered_exits and self.exit_manager:
-                    self.exit_manager.register_position(
-                        symbol=symbol,
-                        entry_price=entry_price,
-                        quantity=shares,
-                        entry_time=timestamp if isinstance(timestamp, datetime) else None,
-                        direction=direction
+                # Check trend alignment (Jan 15, 2026)
+                # Prevents LONG in downtrend, SHORT in uptrend
+                if self.entry_gate:
+                    # Get price data up to current bar
+                    df_for_trend = df.iloc[:bar_index+1].tail(60)  # Last 60 bars for SMA
+                    trend_ok, trend_reason = self.entry_gate.check_trend_alignment(
+                        symbol, direction, df_for_trend
                     )
+                    if not trend_ok:
+                        self._diag_entry_blocks[symbol]['trend_misalignment'] = \
+                            self._diag_entry_blocks[symbol].get('trend_misalignment', 0) + 1
+                        logger.debug(trend_reason)
+                        continue
+
+                # FIX (Jan 2026): Realistic entry timing - NO LOOK-AHEAD
+                # Signal fires at bar N close. Create pending limit order for next bar.
+                # Order fill is checked at the START of each subsequent bar's processing.
+
+                if self.crypto_intrabar_entry and is_crypto(symbol):
+                    # Crypto intrabar: enter immediately at signal bar close (for 24/7 markets)
+                    base_price = current_price
+                    if direction == 'LONG':
+                        entry_price = base_price * (1 + self.ENTRY_SLIPPAGE)
+                        stop_loss = entry_price * (1 - self.default_stop_loss_pct)
+                        take_profit = entry_price * (1 + self.default_take_profit_pct)
+                    else:
+                        entry_price = base_price * (1 - self.ENTRY_SLIPPAGE)
+                        stop_loss = entry_price * (1 + self.default_stop_loss_pct)
+                        take_profit = entry_price * (1 - self.default_take_profit_pct)
+
+                    shares = self.risk_manager.calculate_position_size(
+                        self.portfolio_value, entry_price, stop_loss
+                    )
+                    size_multiplier = self.drawdown_guard.position_size_multiplier
+                    if size_multiplier < 1.0:
+                        shares = int(shares * size_multiplier)
+                    if shares <= 0:
+                        continue
+
+                    position_state[symbol] = {
+                        'direction': direction,
+                        'entry_price': entry_price,
+                        'entry_bar': bar_index,
+                        'entry_time': timestamp,
+                        'shares': shares,
+                        'stop_loss': stop_loss,
+                        'take_profit': take_profit,
+                        'highest_price': entry_price,
+                        'lowest_price': entry_price,
+                        'strategy': row.get('strategy', 'Unknown'),
+                        'reasoning': row.get('reasoning', '')
+                    }
+                    open_positions[symbol] = position_state[symbol]
+                    last_trade_bar[symbol] = bar_index
+
+                    if self.use_tiered_exits and self.exit_manager:
+                        self.exit_manager.register_position(
+                            symbol=symbol,
+                            entry_price=entry_price,
+                            quantity=shares,
+                            entry_time=timestamp if isinstance(timestamp, datetime) else None,
+                            direction=direction
+                        )
+                else:
+                    # Standard: Create pending limit order (fills checked on next bars)
+                    if signal == 1:  # LONG - limit below close
+                        limit_price = current_price * (1 - self.pullback_pct)
+                    else:  # SHORT - limit above close
+                        limit_price = current_price * (1 + self.pullback_pct)
+
+                    pending_orders[symbol] = {
+                        'direction': direction,
+                        'limit_price': limit_price,
+                        'signal_bar': bar_index,
+                        'signal_price': current_price,
+                        'strategy': row.get('strategy', 'Unknown'),
+                        'reasoning': row.get('reasoning', '')
+                    }
+                    continue  # Don't open position yet - wait for fill
 
                 # Track risk analytics after entry
                 num_positions = len(open_positions)
@@ -2097,6 +2230,9 @@ def run_backtest(
     longs_only: bool = False,
     shorts_only: bool = False,
     trailing_stop_overrides: Dict = None,
+    crypto_intrabar_entry: bool = False,
+    pullback_pct: float = None,
+    enter_at_open: bool = False,
 ) -> Dict:
     """
     Run backtest with configuration from config.yaml.
@@ -2145,6 +2281,15 @@ def run_backtest(
                 symbols = universe.get('proven_symbols', [])
             if not symbols:
                 symbols = universe.get('candidates', ['SPY', 'AAPL', 'MSFT'])
+
+            # Apply blacklist - remove chronic losers
+            blacklist = universe.get('blacklist', [])
+            if blacklist:
+                original_count = len(symbols)
+                symbols = [s for s in symbols if s not in blacklist]
+                filtered_count = original_count - len(symbols)
+                if filtered_count > 0:
+                    logger.info(f"Blacklist filtered out {filtered_count} symbols: {blacklist}")
         else:
             symbols = ['SPY', 'AAPL', 'MSFT']
 
@@ -2170,6 +2315,9 @@ def run_backtest(
         config=config,
         longs_only=longs_only,
         shorts_only=shorts_only,
+        crypto_intrabar_entry=crypto_intrabar_entry,
+        pullback_pct=pullback_pct,
+        enter_at_open=enter_at_open,
     )
 
     return backtester.run(symbols, start_date, end_date)
@@ -2189,6 +2337,9 @@ def main():
     parser.add_argument('--trailing-activation-pct', type=float, help='Trailing stop activation %% (e.g., 2.0 for 2%%)')
     parser.add_argument('--trailing-breakeven', action='store_true', default=True, help='Move stop to breakeven when activated')
     parser.add_argument('--trailing-trail-pct', type=float, help='Trailing stop trail %% (e.g., 0.5 for 0.5%%)')
+    parser.add_argument('--crypto-intrabar', action='store_true', help='Crypto enters at signal bar close (no pullback)')
+    parser.add_argument('--pullback-pct', type=float, help='Pullback entry %% (e.g., 1.5 for 1.5%%, default)')
+    parser.add_argument('--enter-at-open', action='store_true', help='Enter at next bar open (most conservative, no pullback waiting)')
 
     args = parser.parse_args()
 
@@ -2211,6 +2362,9 @@ def main():
         longs_only=args.longs_only,
         shorts_only=args.shorts_only,
         trailing_stop_overrides=trailing_overrides if trailing_overrides else None,
+        crypto_intrabar_entry=args.crypto_intrabar,
+        pullback_pct=args.pullback_pct / 100.0 if args.pullback_pct else None,
+        enter_at_open=args.enter_at_open,
     )
 
     if results:
