@@ -7,6 +7,34 @@ scanner_universe:
   - AVAX/USD
   - LINK/USD
   - DOGE/USD
+  - XRP/USD
+  - ADA/USD
+  - DOT/USD
+  - MATIC/USD
+  - ATOM/USD
+  - NEAR/USD
+  # High-beta growth stocks similar to winners (ASTS, IREN, RGTI, RDW, MNTS)
+  high_beta_growth:
+  # Additional space/defense
+  - SPIR     # Satellite data analytics
+  - BKSY     # Satellite imagery
+  - ASTR     # Rocket Lab competitor
+  - LUNR     # Lunar lander
+  - GILT     # Satellite comms
+  # Quantum computing
+  - QBTS     # D-Wave quantum
+  - QUBT     # Quantum Computing Inc
+  # AI/Data centers
+  - BBAI     # BigBear AI
+  - AI       # C3.ai
+  - PLTR     # Palantir (if not already)
+  - SNOW     # Snowflake
+  # Additional crypto miners (avoid blacklisted: CLSK, HUT)
+  - WULF     # TeraWulf
+  # High-growth fintech
+  - NU       # Nubank
+  - SQ       # Block
+  - AFRM     # Affirm
   sp500:
   - AAPL
   - MSFT

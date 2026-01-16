@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as
 from .market_hours import MarketHours  # FIX (Dec 9, 2025): Check market hours for stale threshold
 from .config import get_global_config  # FIX (Dec 9, 2025): Load configurable stale thresholds
 from .cache import get_cache  # Disk cache for backtest data
+from .symbol_mapping import to_yfinance  # FIX (Jan 16, 2026): Convert crypto symbols for yfinance
 
 # FIX (Jan 7, 2026): Timeout for individual yfinance API calls to prevent hanging
 YFINANCE_TIMEOUT_SECONDS = 30
@@ -117,7 +118,9 @@ class YFinanceDataFetcher:
                 period = '7d'  # Default
 
             # Fetch data from Yahoo Finance
-            ticker = yf.Ticker(symbol)
+            # FIX (Jan 16, 2026): Convert symbol to yfinance format (BTC/USD -> BTC-USD)
+            yf_symbol = to_yfinance(symbol)
+            ticker = yf.Ticker(yf_symbol)
 
             # BUG FIX (Dec 2025): Record API call time for rate limiting
             self.last_api_call[symbol] = time.time()
@@ -393,7 +396,9 @@ class YFinanceDataFetcher:
                     return self._fetch_chunked_1min_data(symbol, start_date, end_date)
 
             # Fetch data from Yahoo Finance
-            ticker = yf.Ticker(symbol)
+            # FIX (Jan 16, 2026): Convert symbol to yfinance format (BTC/USD -> BTC-USD)
+            yf_symbol = to_yfinance(symbol)
+            ticker = yf.Ticker(yf_symbol)
 
             try:
                 df = ticker.history(
@@ -471,7 +476,9 @@ class YFinanceDataFetcher:
         current_start = start_date
         chunk_size = timedelta(days=7)  # 7 days per chunk (within 8-day limit)
 
-        ticker = yf.Ticker(symbol)
+        # FIX (Jan 16, 2026): Convert symbol to yfinance format (BTC/USD -> BTC-USD)
+        yf_symbol = to_yfinance(symbol)
+        ticker = yf.Ticker(yf_symbol)
 
         while current_start < end_date:
             current_end = min(current_start + chunk_size, end_date)

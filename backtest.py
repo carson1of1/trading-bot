@@ -2186,6 +2186,23 @@ class Backtest1Hour:
             for sym, sym_trades in trades_by_symbol.items():
                 logger.info(f"{sym}: {len(sym_trades)} trades, P&L: ${sum(t['pnl'] for t in sym_trades):,.2f}")
 
+            # Log per-strategy summary
+            trades_by_strategy = {}
+            for t in all_trades:
+                strat = t.get('strategy', 'Unknown')
+                if strat not in trades_by_strategy:
+                    trades_by_strategy[strat] = []
+                trades_by_strategy[strat].append(t)
+
+            logger.info("=" * 40)
+            logger.info("STRATEGY PERFORMANCE:")
+            for strat, strat_trades in sorted(trades_by_strategy.items(), key=lambda x: sum(t['pnl'] for t in x[1]), reverse=True):
+                total_pnl = sum(t['pnl'] for t in strat_trades)
+                wins = sum(1 for t in strat_trades if t['pnl'] > 0)
+                win_rate = wins / len(strat_trades) * 100 if strat_trades else 0
+                logger.info(f"  {strat}: {len(strat_trades)} trades, P&L: ${total_pnl:,.2f}, Win Rate: {win_rate:.1f}%")
+            logger.info("=" * 40)
+
             # Update instance state from trades (simulate_trades_interleaved doesn't update these)
             self.total_pnl = sum(t['pnl'] for t in all_trades)
             self.cash = self.initial_capital + self.total_pnl
