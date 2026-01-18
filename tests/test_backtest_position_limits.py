@@ -73,7 +73,8 @@ class TestBacktestPositionLimits:
         bt = Backtest1Hour(
             initial_capital=10000,
             config=sample_config,
-            kill_switch_trace=True
+            kill_switch_trace=True,
+            enter_at_open=True  # Use market orders for simpler test
         )
 
         # Create mock data with signals for 4 symbols
@@ -217,7 +218,8 @@ class TestBacktestShortPositions:
         bt = Backtest1Hour(
             initial_capital=10000,
             config=shorts_config,
-            shorts_only=True
+            shorts_only=True,
+            enter_at_open=True  # Use market orders for simpler test
         )
 
         base_date = pd.Timestamp('2025-01-01 09:30:00', tz='America/New_York')
@@ -264,7 +266,8 @@ class TestBacktestShortPositions:
         bt = Backtest1Hour(
             initial_capital=10000,
             config=shorts_config,
-            shorts_only=True
+            shorts_only=True,
+            enter_at_open=True  # Use market orders for simpler test
         )
 
         base_date = pd.Timestamp('2025-01-01 09:30:00', tz='America/New_York')

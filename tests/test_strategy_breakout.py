@@ -132,7 +132,7 @@ class TestBreakoutSignalGeneration:
         assert signal['confidence'] >= 55
         assert signal['confidence'] <= 80
         assert 'below' in signal['reasoning'].lower()
-        assert 'breakout' in signal['reasoning'].lower()
+        assert 'breakdown' in signal['reasoning'].lower()
 
     def test_breakout_components_included(self, base_data, strategy):
         """Signal should include expected components."""
@@ -482,6 +482,8 @@ class TestBreakoutPercentageCalculation:
             'low': [95] * n,
             'close': [100] * n,
             'volume': [1000000] * n,
+            'SMA_20': [100] * n,  # SMA above breakdown price establishes downtrend
+            'SMA_50': [102] * n,
         })
 
         breakdown_price = 90.0

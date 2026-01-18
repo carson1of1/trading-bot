@@ -659,7 +659,7 @@ class TestStrategyManager:
         manager = StrategyManager(config)
 
         assert manager.confidence_threshold == 70
-        assert len(manager.strategies) == 3  # All 3 strategies created
+        assert len(manager.strategies) == 4  # All 4 strategies created
 
     def test_evaluate_all_strategies(self):
         """evaluate_all_strategies returns list of signals."""

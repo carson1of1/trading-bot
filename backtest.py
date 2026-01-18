@@ -90,7 +90,8 @@ class Backtest1Hour:
         crypto_intrabar_entry: bool = False,
         timeframe: str = '1Hour',
         pullback_pct: float = None,
-        enter_at_open: bool = False
+        enter_at_open: bool = False,
+        power_hour_only: bool = False
     ):
         """
         Initialize the backtester.
@@ -115,6 +116,7 @@ class Backtest1Hour:
         self.pullback_pct = pullback_pct if pullback_pct is not None else 0.015  # Default 1.5%
         self.order_validity_bars = 1  # How many bars a limit order stays valid
         self.enter_at_open = enter_at_open  # If True, enter at next bar open instead of limit order
+        self.power_hour_only = power_hour_only  # If True, only trade during first hour (9:30-10:30 ET)
         self._kill_switch_trace_log = []
 
         # Initialize volatility scanner if enabled
@@ -527,6 +529,17 @@ class Backtest1Hour:
                     self._diag_entry_blocks[symbol]['scanner_filtered'] += 1
                     continue
 
+            # Power hour filter: Only trade during first hour (9:30-10:30 ET)
+            if self.power_hour_only and timestamp is not None:
+                try:
+                    bar_hour = timestamp.hour if hasattr(timestamp, 'hour') else pd.Timestamp(timestamp).hour
+                    # The 9:30 bar covers 9:30-10:30, 10:00 bar covers 10:00-11:00
+                    # We want bars starting between 9:00-10:00 (which covers 9:30-10:30 trading)
+                    if bar_hour not in (9, 10):
+                        continue
+                except Exception:
+                    pass  # If we can't parse time, allow the trade
+
             try:
                 signal = self.strategy_manager.get_best_signal(
                     symbol=symbol,
@@ -589,6 +602,31 @@ class Backtest1Hour:
 
         except Exception:
             return 0.0
+
+    def _calculate_atr_stop_pct(self, atr: float, entry_price: float) -> float:
+        """
+        Calculate ATR-based stop percentage (P3 - Jan 2026).
+
+        Formula: stop_pct = clamp(1.5 * ATR_percent, min=2%, max=8%)
+
+        This ensures:
+        - Consistent risk-per-trade (constant $ risk sizing)
+        - Stops outside normal volatility noise
+        - Maximum loss capped at 8%
+
+        Args:
+            atr: Current ATR value
+            entry_price: Entry price for the position
+
+        Returns:
+            Stop percentage as decimal (e.g., 0.05 for 5%)
+        """
+        if atr <= 0 or entry_price <= 0:
+            return self.default_stop_loss_pct  # Fall back to config default
+
+        atr_pct = atr / entry_price
+        stop_pct = max(0.02, min(0.08, 1.5 * atr_pct))
+        return stop_pct
 
     def simulate_trades(self, symbol: str, data: pd.DataFrame) -> List[Dict]:
         """
@@ -921,13 +959,17 @@ class Backtest1Hour:
                 open_price = row.get('open', current_price)
                 direction = pending_entry.get('direction', 'LONG')
 
+                # P3 (Jan 2026): Calculate ATR-based stop for constant $ risk sizing
+                entry_atr = self._calculate_atr(data, i, period=14)
                 if direction == 'LONG':
                     realistic_entry_price = open_price * (1 + self.ENTRY_SLIPPAGE + self.BID_ASK_SPREAD)
-                    stop_loss_price = realistic_entry_price * (1 - self.default_stop_loss_pct)
+                    atr_stop_pct = self._calculate_atr_stop_pct(entry_atr, realistic_entry_price)
+                    stop_loss_price = realistic_entry_price * (1 - atr_stop_pct)
                     take_profit_price = realistic_entry_price * (1 + self.default_take_profit_pct)
                 else:
                     realistic_entry_price = open_price * (1 - self.ENTRY_SLIPPAGE - self.BID_ASK_SPREAD)
-                    stop_loss_price = realistic_entry_price * (1 + self.default_stop_loss_pct)
+                    atr_stop_pct = self._calculate_atr_stop_pct(entry_atr, realistic_entry_price)
+                    stop_loss_price = realistic_entry_price * (1 + atr_stop_pct)
                     take_profit_price = realistic_entry_price * (1 - self.default_take_profit_pct)
 
                 # Calculate position size
@@ -961,13 +1003,16 @@ class Backtest1Hour:
                     trailing_stop_price = 0.0
 
                     # Register with exit manager (LONG and SHORT - Jan 2026)
+                    # P2 (Jan 2026): Pass ATR for volatility-scaled stops
                     if self.use_tiered_exits and self.exit_manager:
+                        entry_atr = self._calculate_atr(data, i, period=14)
                         self.exit_manager.register_position(
                             symbol=symbol,
                             entry_price=entry_price,
                             quantity=shares,
                             entry_time=timestamp if isinstance(timestamp, datetime) else None,
-                            direction=direction
+                            direction=direction,
+                            atr=entry_atr
                         )
 
                     # Record entry for gate
@@ -1023,7 +1068,7 @@ class Backtest1Hour:
                             # Prevents LONG in downtrend, SHORT in uptrend
                             if self.entry_gate:
                                 # Get price data up to current bar
-                                df_for_trend = df.iloc[:i+1].tail(60)  # Last 60 bars for SMA
+                                df_for_trend = data.iloc[:i+1].tail(60)  # Last 60 bars for SMA
                                 trend_ok, trend_reason = self.entry_gate.check_trend_alignment(
                                     symbol, direction, df_for_trend
                                 )
@@ -1035,14 +1080,18 @@ class Backtest1Hour:
 
                             # Crypto intrabar: enter immediately at close price
                             if self.crypto_intrabar_entry and is_crypto(symbol):
+                                # P3 (Jan 2026): Calculate ATR-based stop for constant $ risk sizing
+                                intra_entry_atr = self._calculate_atr(data, i, period=14)
                                 # Enter at current bar's close (intrabar entry)
                                 if direction == 'LONG':
                                     realistic_entry_price = current_price * (1 + self.ENTRY_SLIPPAGE + self.BID_ASK_SPREAD)
-                                    stop_loss_price = realistic_entry_price * (1 - self.default_stop_loss_pct)
+                                    atr_stop_pct = self._calculate_atr_stop_pct(intra_entry_atr, realistic_entry_price)
+                                    stop_loss_price = realistic_entry_price * (1 - atr_stop_pct)
                                     take_profit_price = realistic_entry_price * (1 + self.default_take_profit_pct)
                                 else:
                                     realistic_entry_price = current_price * (1 - self.ENTRY_SLIPPAGE - self.BID_ASK_SPREAD)
-                                    stop_loss_price = realistic_entry_price * (1 + self.default_stop_loss_pct)
+                                    atr_stop_pct = self._calculate_atr_stop_pct(intra_entry_atr, realistic_entry_price)
+                                    stop_loss_price = realistic_entry_price * (1 + atr_stop_pct)
                                     take_profit_price = realistic_entry_price * (1 - self.default_take_profit_pct)
 
                                 # Calculate position size
@@ -1081,13 +1130,16 @@ class Backtest1Hour:
                                     trailing_stop_price = 0.0
 
                                     # Register with exit manager
+                                    # P2 (Jan 2026): Pass ATR for volatility-scaled stops
                                     if self.use_tiered_exits and self.exit_manager:
+                                        entry_atr = self._calculate_atr(data, i, period=14)
                                         self.exit_manager.register_position(
                                             symbol=symbol,
                                             entry_price=entry_price,
                                             quantity=shares,
                                             entry_time=timestamp if isinstance(timestamp, datetime) else None,
-                                            direction=direction
+                                            direction=direction,
+                                            atr=entry_atr
                                         )
 
                                     # Record entry for gate
@@ -1297,12 +1349,32 @@ class Backtest1Hour:
                         filled = True
 
                 if filled:
-                    # Calculate position size using entry price
+                    # Check position limit before filling (Jan 2026 fix)
+                    if len(open_positions) >= self.max_open_positions:
+                        # Position limit reached - cancel pending order
+                        self._risk_analytics['entries_blocked_by_limit'] += 1
+                        if self.kill_switch_trace:
+                            self._kill_switch_trace_log.append({
+                                'event': 'ENTRY_BLOCKED',
+                                'symbol': symbol,
+                                'timestamp': timestamp,
+                                'signal': 1 if direction == 'LONG' else -1,
+                                'block_reason': f'max_positions reached ({len(open_positions)}/{self.max_open_positions})',
+                                'open_positions': list(open_positions.keys())
+                            })
+                        del pending_orders[symbol]
+                        continue
+
+                    # P3 (Jan 2026): Calculate ATR-based stop for constant $ risk sizing
+                    entry_atr = self._calculate_atr(df, bar_index, period=14)
+                    atr_stop_pct = self._calculate_atr_stop_pct(entry_atr, entry_price)
+
+                    # Calculate position size using ATR-based stop
                     if direction == 'LONG':
-                        stop_loss = entry_price * (1 - self.default_stop_loss_pct)
+                        stop_loss = entry_price * (1 - atr_stop_pct)
                         take_profit = entry_price * (1 + self.default_take_profit_pct)
                     else:
-                        stop_loss = entry_price * (1 + self.default_stop_loss_pct)
+                        stop_loss = entry_price * (1 + atr_stop_pct)
                         take_profit = entry_price * (1 - self.default_take_profit_pct)
 
                     shares = self.risk_manager.calculate_position_size(
@@ -1332,13 +1404,15 @@ class Backtest1Hour:
                         last_trade_bar[symbol] = bar_index
 
                         # Register with ExitManager
+                        # P2+P3 (Jan 2026): Pass ATR for volatility-scaled stops (already calculated for sizing)
                         if self.use_tiered_exits and self.exit_manager:
                             self.exit_manager.register_position(
                                 symbol=symbol,
                                 entry_price=entry_price,
                                 quantity=shares,
                                 entry_time=timestamp if isinstance(timestamp, datetime) else None,
-                                direction=direction
+                                direction=direction,
+                                atr=entry_atr
                             )
 
                     del pending_orders[symbol]
@@ -1740,13 +1814,17 @@ class Backtest1Hour:
                 if self.crypto_intrabar_entry and is_crypto(symbol):
                     # Crypto intrabar: enter immediately at signal bar close (for 24/7 markets)
                     base_price = current_price
+                    # P3 (Jan 2026): Calculate ATR-based stop for constant $ risk sizing
+                    entry_atr = self._calculate_atr(df, bar_index, period=14)
                     if direction == 'LONG':
                         entry_price = base_price * (1 + self.ENTRY_SLIPPAGE)
-                        stop_loss = entry_price * (1 - self.default_stop_loss_pct)
+                        atr_stop_pct = self._calculate_atr_stop_pct(entry_atr, entry_price)
+                        stop_loss = entry_price * (1 - atr_stop_pct)
                         take_profit = entry_price * (1 + self.default_take_profit_pct)
                     else:
                         entry_price = base_price * (1 - self.ENTRY_SLIPPAGE)
-                        stop_loss = entry_price * (1 + self.default_stop_loss_pct)
+                        atr_stop_pct = self._calculate_atr_stop_pct(entry_atr, entry_price)
+                        stop_loss = entry_price * (1 + atr_stop_pct)
                         take_profit = entry_price * (1 - self.default_take_profit_pct)
 
                     shares = self.risk_manager.calculate_position_size(
@@ -1774,13 +1852,15 @@ class Backtest1Hour:
                     open_positions[symbol] = position_state[symbol]
                     last_trade_bar[symbol] = bar_index
 
+                    # P2+P3 (Jan 2026): Pass ATR for volatility-scaled stops (already calculated for sizing)
                     if self.use_tiered_exits and self.exit_manager:
                         self.exit_manager.register_position(
                             symbol=symbol,
                             entry_price=entry_price,
                             quantity=shares,
                             entry_time=timestamp if isinstance(timestamp, datetime) else None,
-                            direction=direction
+                            direction=direction,
+                            atr=entry_atr
                         )
                 else:
                     # Standard: Create pending limit order (fills checked on next bars)
@@ -2250,6 +2330,7 @@ def run_backtest(
     crypto_intrabar_entry: bool = False,
     pullback_pct: float = None,
     enter_at_open: bool = False,
+    power_hour_only: bool = False,
 ) -> Dict:
     """
     Run backtest with configuration from config.yaml.
@@ -2335,6 +2416,7 @@ def run_backtest(
         crypto_intrabar_entry=crypto_intrabar_entry,
         pullback_pct=pullback_pct,
         enter_at_open=enter_at_open,
+        power_hour_only=power_hour_only,
     )
 
     return backtester.run(symbols, start_date, end_date)
@@ -2357,6 +2439,7 @@ def main():
     parser.add_argument('--crypto-intrabar', action='store_true', help='Crypto enters at signal bar close (no pullback)')
     parser.add_argument('--pullback-pct', type=float, help='Pullback entry %% (e.g., 1.5 for 1.5%%, default)')
     parser.add_argument('--enter-at-open', action='store_true', help='Enter at next bar open (most conservative, no pullback waiting)')
+    parser.add_argument('--power-hour', action='store_true', help='Only trade during first hour of market (9:30-10:30 ET)')
 
     args = parser.parse_args()
 
@@ -2382,6 +2465,7 @@ def main():
         crypto_intrabar_entry=args.crypto_intrabar,
         pullback_pct=args.pullback_pct / 100.0 if args.pullback_pct else None,
         enter_at_open=args.enter_at_open,
+        power_hour_only=args.power_hour,
     )
 
     if results:

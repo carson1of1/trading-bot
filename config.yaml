@@ -96,7 +96,7 @@ risk_management:
   emergency_stop_pct: 8.0
   force_liquidate_on_kill_switch: true
   max_daily_loss_pct: 4.0
-  max_open_positions: 999999
+  max_open_positions: 5
   max_portfolio_risk_pct: 30.0
   max_position_dollars: 999999
   max_position_size_pct: 15
