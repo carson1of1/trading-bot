@@ -1141,7 +1141,8 @@ class ExitManager:
     # ==================== END STATE PERSISTENCE ====================
 
     def register_position(self, symbol: str, entry_price: float, quantity: int,
-                         entry_time: datetime = None, direction: str = 'LONG') -> PositionExitState:
+                         entry_time: datetime = None, direction: str = 'LONG',
+                         atr: float = None) -> PositionExitState:
         """
         Register a new position for exit management.
 
@@ -1151,6 +1152,7 @@ class ExitManager:
             quantity: Number of shares
             entry_time: Entry timestamp (defaults to now)
             direction: 'LONG' or 'SHORT' (Jan 2026 - added SHORT support)
+            atr: Current ATR value for volatility-scaled stop (P2 - Jan 2026)
 
         Returns:
             PositionExitState object for the position
@@ -1163,6 +1165,20 @@ class ExitManager:
         if direction not in ('LONG', 'SHORT'):
             self.logger.warning(f"Invalid direction '{direction}', defaulting to LONG")
             direction = 'LONG'
+
+        # P2 (Jan 2026): Calculate ATR-based hard stop if ATR is provided
+        # Formula: stop_pct = clamp(1.5 * ATR_percent, min=2%, max=8%)
+        if atr is not None and atr > 0 and entry_price > 0:
+            atr_pct = atr / entry_price  # ATR as percentage of price
+            dynamic_stop_pct = max(0.02, min(0.08, 1.5 * atr_pct))
+            hard_stop_pct = dynamic_stop_pct
+            self.logger.info(
+                f"EXIT_MGR | {symbol} | ATR_STOP | ATR=${atr:.2f}, "
+                f"ATR%={atr_pct*100:.2f}%, Stop={hard_stop_pct*100:.2f}% "
+                f"(clamped 2%-8%)"
+            )
+        else:
+            hard_stop_pct = self.hard_stop_pct
 
         state = PositionExitState(
             symbol=symbol,
@@ -1177,7 +1193,7 @@ class ExitManager:
             partial_tp_size=self.partial_tp_size,
             partial_tp2_pct=self.partial_tp2_pct,
             partial_tp2_size=self.partial_tp2_size,
-            hard_stop_pct=self.hard_stop_pct,
+            hard_stop_pct=hard_stop_pct,
             atr_multiplier=self.atr_multiplier,
             peak_price=entry_price,
             trough_price=entry_price,
