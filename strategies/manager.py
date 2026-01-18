@@ -14,6 +14,7 @@ from .base import TradingStrategy
 from .momentum import MomentumStrategy
 from .mean_reversion import MeanReversionStrategy
 from .breakout import BreakoutStrategy
+from .filtered_mean_reversion import FilteredMeanReversionStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,14 @@ class StrategyManager:
             buy_threshold=60,
             sell_threshold=40,
             enabled=breakout_config.get('enabled', True)
+        ))
+
+        # Filtered Mean Reversion strategy (walk-forward validated)
+        fmr_config = strat_config.get('filtered_mean_reversion', {})
+        self.strategies.append(FilteredMeanReversionStrategy(
+            buy_threshold=70,
+            sell_threshold=70,
+            enabled=fmr_config.get('enabled', True)
         ))
 
     def evaluate_all_strategies(
@@ -193,4 +202,5 @@ class StrategyManager:
             'Momentum_1Hour': strat_config.get('momentum', {}).get('weight', 0.35),
             'MeanReversion_1Hour': strat_config.get('mean_reversion', {}).get('weight', 0.25),
             'Breakout_1Hour': strat_config.get('breakout', {}).get('weight', 0.20),
+            'FilteredMeanReversion_1Hour': strat_config.get('filtered_mean_reversion', {}).get('weight', 0.30),
         }

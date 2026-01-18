@@ -48,10 +48,10 @@ exit_manager:
   eod_close: false
   max_hold_hours: 168
   tier_0_hard_stop: -0.05
-  tier_1_profit_floor: 0.5
-  tier_2_atr_trailing: 1.0
-  tier_3_partial_take: 1.0
-  tier_4_partial_take2: 1.0
+  tier_1_profit_floor: 1.5
+  tier_2_atr_trailing: 2.0
+  tier_3_partial_take: 3.0
+  tier_4_partial_take2: 5.0
 hot_stocks:
   cache_hours: 20
   enabled: true
@@ -107,10 +107,13 @@ risk_management:
 shorts_only: false
 strategies:
   breakout:
-    enabled: true
+    enabled: false
     weight: 0.4
+  filtered_mean_reversion:
+    enabled: true  # Walk-forward validated: 10/12 positive windows, PF 2.81
+    weight: 0.3
   mean_reversion:
-    enabled: true
+    enabled: false
     weight: 0.3
   ml_ensemble:
     enabled: false
